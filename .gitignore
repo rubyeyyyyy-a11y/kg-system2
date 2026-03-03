@@ -56,3 +56,4 @@ volumes/
 # Project backup/patch artifacts
 backend/*.bak*
 backend/*.diff
+backend/*.final.*
