@@ -1,0 +1,63 @@
+.kg-layout {
+  /* Use minmax(0, 1fr) so the center column can shrink without overflowing sidebars. */
+  display: grid;
+  grid-template-columns: var(--leftW) 8px minmax(0, 1fr) 8px var(--rightW);
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background: #fff;
+}
+
+.kg-pane {
+  /* min-width: 0 is required in CSS Grid to allow content to shrink and avoid drift/overlap. */
+  min-width: 0;
+  overflow: auto;
+  background: #fff;
+}
+
+.kg-pane-left {
+  border-right: 1px solid #eee;
+}
+
+.kg-pane-right {
+  border-left: 1px solid #eee;
+}
+
+.kg-center {
+  min-width: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  background: #fff;
+}
+
+.kg-topbar-sticky {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: #fff;
+  border-bottom: 1px solid #eee;
+}
+
+.kg-canvas-wrap {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.kg-resizer {
+  cursor: col-resize;
+  background: transparent;
+  transition: background-color 120ms ease;
+  user-select: none;
+  touch-action: none;
+}
+
+.kg-resizer:hover {
+  background: rgba(0, 0, 0, 0.06);
+}
+
+.kg-resizer:active {
+  background: rgba(0, 0, 0, 0.1);
+}
