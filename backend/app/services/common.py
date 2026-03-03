@@ -87,6 +87,7 @@ def uniq_edges(edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         k = (
             int(e["source"]),
             int(e["target"]),
+            int(e.get("rank") or 0),
             str(e.get("relation") or ""),
             str(e.get("source_db") or ""),
         )

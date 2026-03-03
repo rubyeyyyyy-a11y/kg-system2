@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 
-from app.db.nebula import get_session
+from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.graph import (
     ExpandRequest,
     MultiEntityGraphApplyPathsRequest,
@@ -20,10 +20,11 @@ _MAX_MULTI_QUERY_EDGES = 50000
 _MAX_MULTI_NODE_LIMIT = 2000
 
 
-def _edge_key(edge: Dict[str, Any]) -> Tuple[int, int, str, str]:
+def _edge_key(edge: Dict[str, Any]) -> Tuple[int, int, int, str, str]:
     return (
         int(edge["source"]),
         int(edge["target"]),
+        int(edge.get("rank") or 0),
         str(edge.get("relation") or ""),
         str(edge.get("source_db") or ""),
     )
@@ -110,8 +111,9 @@ def _go_edges_from(
     id_list = ",".join(str(int(x)) for x in sorted(set(frontier)))
     direction_kw = " BIDIRECT" if ignore_direction else ""
     ngql = f"""
-    GO FROM {id_list} OVER `REL`{direction_kw}
+    GO FROM {id_list} OVER {EDGE_TAG}{direction_kw}
     YIELD src(edge) AS src, dst(edge) AS dst,
+          rank(edge) AS rank,
           properties(edge).relation AS relation,
           properties(edge).source AS esource
     | LIMIT {int(max_edges)};
@@ -123,6 +125,7 @@ def _go_edges_from(
 
     srcs = res.column_values("src")
     dsts = res.column_values("dst")
+    ranks = res.column_values("rank")
     rels = res.column_values("relation")
     esources = res.column_values("esource")
 
@@ -130,11 +133,20 @@ def _go_edges_from(
     for i in range(len(srcs)):
         src = int(vw(srcs[i]))
         dst = int(vw(dsts[i]))
+        rank = int(vw(ranks[i]) or 0)
         rel = str(vw(rels[i]) or "")
         esrc = str(vw(esources[i]) or "")
         if rel_filter and rel not in rel_filter:
             continue
-        out.append({"source": src, "target": dst, "relation": rel, "source_db": esrc})
+        out.append(
+            {
+                "source": src,
+                "target": dst,
+                "rank": str(rank),
+                "relation": rel,
+                "source_db": esrc,
+            }
+        )
     return uniq_edges(out)
 
 
@@ -222,7 +234,7 @@ def _find_shortest_path_candidates_bfs(
         return []
 
     paths: List[Dict[str, Any]] = []
-    seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, str, str], ...]]] = set()
+    seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, int, str, str], ...]]] = set()
     stack: List[Tuple[int, List[int], List[Dict[str, Any]]]] = [(target, [target], [])]
 
     while stack and len(paths) < int(candidate_limit):
@@ -258,8 +270,8 @@ def relation_types() -> List[str]:
         return _relation_cache["data"]
 
     s = get_session()
-    ngql = """
-    MATCH ()-[e:`REL`]-()
+    ngql = f"""
+    MATCH ()-[e:{EDGE_TAG}]-()
     RETURN DISTINCT properties(e).relation AS relation
 LIMIT 5000;
     """
@@ -302,8 +314,9 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
 
         id_list = ",".join(str(x) for x in frontier)
         go_ngql = f"""
-        GO FROM {id_list} OVER `REL` BIDIRECT
+        GO FROM {id_list} OVER {EDGE_TAG} BIDIRECT
         YIELD src(edge) AS src, dst(edge) AS dst,
+              rank(edge) AS rank,
               properties(edge).relation AS relation,
               properties(edge).source AS esource
         | LIMIT {max_edges};
@@ -314,6 +327,7 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
 
         srcs = go_res.column_values("src")
         dsts = go_res.column_values("dst")
+        ranks = go_res.column_values("rank")
         rels = go_res.column_values("relation")
         esources = go_res.column_values("esource")
 
@@ -321,13 +335,22 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
         for i in range(len(srcs)):
             src = int(vw(srcs[i]))
             dst = int(vw(dsts[i]))
+            rank = int(vw(ranks[i]) or 0)
             rel = str(vw(rels[i]) or "")
             esrc = str(vw(esources[i]) or "")
 
             if rel_filter and rel not in rel_filter:
                 continue
 
-            edges_all.append({"source": src, "target": dst, "relation": rel, "source_db": esrc})
+            edges_all.append(
+                {
+                    "source": src,
+                    "target": dst,
+                    "rank": str(rank),
+                    "relation": rel,
+                    "source_db": esrc,
+                }
+            )
 
             if dst not in visited:
                 visited.add(dst)
@@ -432,8 +455,9 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
     max_edges = int(req.max_edges or 20000)
 
     go_ngql = f"""
-    GO FROM {from_vid} OVER `REL` BIDIRECT
+    GO FROM {from_vid} OVER {EDGE_TAG} BIDIRECT
     YIELD src(edge) AS src, dst(edge) AS dst,
+          rank(edge) AS rank,
           properties(edge).relation AS relation,
           properties(edge).source AS esource
     | LIMIT {max_edges};
@@ -444,6 +468,7 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
 
     srcs = go_res.column_values("src")
     dsts = go_res.column_values("dst")
+    ranks = go_res.column_values("rank")
     rels = go_res.column_values("relation")
     esources = go_res.column_values("esource")
 
@@ -454,13 +479,22 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
     for i in range(len(srcs)):
         src = int(vw(srcs[i]))
         dst = int(vw(dsts[i]))
+        rank = int(vw(ranks[i]) or 0)
         rel = str(vw(rels[i]) or "")
         esrc = str(vw(esources[i]) or "")
 
         if rel_filter and rel not in rel_filter:
             continue
 
-        edges_all.append({"source": src, "target": dst, "relation": rel, "source_db": esrc})
+        edges_all.append(
+            {
+                "source": src,
+                "target": dst,
+                "rank": str(rank),
+                "relation": rel,
+                "source_db": esrc,
+            }
+        )
         cand_nodes.add(src)
         cand_nodes.add(dst)
 
@@ -576,7 +610,7 @@ def _build_multi_entity_graph(
     explain_enabled = bool(req.explain_paths) and (not bool(req.direct_only))
     auto_apply_limit = 1 if int(req.per_pair_path_limit or 1) >= 1 else 0
 
-    edge_map: Dict[Tuple[int, int, str, str], Dict[str, Any]] = {}
+    edge_map: Dict[Tuple[int, int, int, str, str], Dict[str, Any]] = {}
     node_ids: Set[int] = set(selected_vids)
     selected_set = set(selected_vids)
     truncated = False
@@ -607,6 +641,7 @@ def _build_multi_entity_graph(
         edge_map[ek] = {
             "source": src,
             "target": dst,
+            "rank": str(e.get("rank") or "0"),
             "relation": str(e.get("relation") or ""),
             "source_db": str(e.get("source_db") or ""),
             "is_explain": False,
@@ -661,6 +696,7 @@ def _build_multi_entity_graph(
                         {
                             "source": int(e["source"]),
                             "target": int(e["target"]),
+                            "rank": str(e.get("rank") or "0"),
                             "relation": str(e.get("relation") or ""),
                             "source_db": str(e.get("source_db") or ""),
                         }
@@ -695,6 +731,7 @@ def _build_multi_entity_graph(
                         edge_map[ek] = {
                             "source": int(edge["source"]),
                             "target": int(edge["target"]),
+                            "rank": str(edge.get("rank") or "0"),
                             "relation": str(edge.get("relation") or ""),
                             "source_db": str(edge.get("source_db") or ""),
                             "is_explain": True,
@@ -742,6 +779,7 @@ def _build_multi_entity_graph(
                 bool(e.get("is_explain", False)),
                 int(e["source"]),
                 int(e["target"]),
+                int(e.get("rank") or 0),
                 str(e.get("relation") or ""),
                 str(e.get("source_db") or ""),
             )

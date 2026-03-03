@@ -11,6 +11,7 @@ export type NodeBrief = {
 export type EdgeBrief = {
   source: number;
   target: number;
+  rank: string;
   relation?: string;
   source_db?: string;
   is_explain?: boolean;
@@ -36,12 +37,20 @@ export type ExpandResp = {
 };
 
 export type NodeDetailResp = { vid: number; props: Record<string, unknown> };
-export type EdgeDetailResp = { src: number; dst: number; props: Record<string, unknown> };
+export type EdgeDetailResp = {
+  src: number;
+  dst: number;
+  rank: string;
+  relation?: string;
+  source_db?: string;
+  updated?: boolean;
+  props: Record<string, unknown>;
+};
 
 export type Sel =
   | { kind: "none" }
   | { kind: "node"; vid: number }
-  | { kind: "edge"; src: number; dst: number; relation: string; source_db?: string };
+  | { kind: "edge"; src: number; dst: number; rank: string; relation: string; source_db?: string };
 
 export type ExpandProbeState = "loading" | "noextra" | "hasextra";
 
@@ -81,6 +90,7 @@ export type EntityTypeItem = {
 export type EdgeSearchItem = {
   src: number;
   dst: number;
+  rank: string;
   relation: string;
   source_db?: string;
   score?: number;

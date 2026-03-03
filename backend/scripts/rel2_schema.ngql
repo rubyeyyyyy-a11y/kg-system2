@@ -1,0 +1,7 @@
+-- Keep old REL unchanged. Add REL2 for ranked multi-edges.
+CREATE EDGE IF NOT EXISTS REL2(
+  relation string,
+  source string,
+  evidence string,
+  description string
+);

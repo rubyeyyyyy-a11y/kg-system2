@@ -1,10 +1,12 @@
 from fastapi import APIRouter
 
 from app.schemas.graph import (
+    ExpandResp,
     ExpandRequest,
     MultiEntityGraphApplyPathsRequest,
     MultiEntityGraphRequest,
     MultiEntityGraphResp,
+    SubgraphResp,
     SubgraphRequest,
 )
 from app.services import graph_service
@@ -12,12 +14,12 @@ from app.services import graph_service
 router = APIRouter(prefix="/api")
 
 
-@router.post("/subgraph")
+@router.post("/subgraph", response_model=SubgraphResp)
 def subgraph(req: SubgraphRequest):
     return graph_service.subgraph(req)
 
 
-@router.post("/expand")
+@router.post("/expand", response_model=ExpandResp)
 def expand(req: ExpandRequest):
     return graph_service.expand(req)
 

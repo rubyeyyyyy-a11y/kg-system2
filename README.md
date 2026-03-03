@@ -55,6 +55,7 @@ cp .env.example .env
 - `NEBULA_HOST` / `NEBULA_PORT`：NebulaGraph 地址
 - `NEBULA_USER` / `NEBULA_PASSWORD`：数据库账号密码
 - `NEBULA_SPACE`：使用的图空间
+- `EDGE_TYPE`：边类型（默认 `REL`，切到 `REL2` 可启用 rank 多重边）
 - `CANDIDATE_LIMIT` / `TOPK` / `MAX_EDGES_RETURN`：搜索与返回规模控制
 - `EDGE_*`：边检索相关的性能与截断控制
 - `VITE_API_BASE_URL`：前端请求后端 API 的基地址

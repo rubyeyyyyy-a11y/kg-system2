@@ -6,7 +6,7 @@ export function relationDisplay(raw?: string): string {
 }
 
 export function edgeKey(e: EdgeBrief): string {
-  return `${e.source}|${e.target}|${e.relation || ""}|${e.source_db || ""}`;
+  return `${e.source}|${e.target}|${String(e.rank || "0")}|${e.relation || ""}|${e.source_db || ""}`;
 }
 
 export function pairKey(u: number, v: number): string {
@@ -29,20 +29,14 @@ export function getNodeLabelById(
 export type EdgeIdentity = {
   src: number;
   dst: number;
-  relation: string;
-  source_db?: string;
+  rank: string;
 };
-
-function normalizeSourceDb(v: string | undefined): string {
-  return String(v || "").trim();
-}
 
 export function isSameEdge(edge: EdgeBrief, target: EdgeIdentity): boolean {
   return (
     Number(edge.source) === Number(target.src) &&
     Number(edge.target) === Number(target.dst) &&
-    String(edge.relation || "") === String(target.relation || "") &&
-    normalizeSourceDb(edge.source_db) === normalizeSourceDb(target.source_db)
+    String(edge.rank || "0") === String(target.rank || "0")
   );
 }
 

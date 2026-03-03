@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
-from app.db.nebula import get_session
+from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.search import SearchRequest
 from app.services.common import (
     esc,
@@ -132,8 +132,9 @@ def _score_and_collect_edges(
     id_list = ",".join(str(x) for x in cand_ids)
 
     go_ngql = f"""
-    GO FROM {id_list} OVER `REL` BIDIRECT
+    GO FROM {id_list} OVER {EDGE_TAG} BIDIRECT
     YIELD src(edge) AS src, dst(edge) AS dst,
+          rank(edge) AS rank,
           properties(edge).relation AS relation,
           properties(edge).source AS esource
     | LIMIT 20000;
@@ -149,12 +150,14 @@ def _score_and_collect_edges(
 
     srcs = go_res.column_values("src")
     dsts = go_res.column_values("dst")
+    ranks = go_res.column_values("rank")
     rels = go_res.column_values("relation")
     esources = go_res.column_values("esource")
 
     for i in range(len(srcs)):
         src = int(vw(srcs[i]))
         dst = int(vw(dsts[i]))
+        rank = int(vw(ranks[i]) or 0)
         rel = str(vw(rels[i]) or "")
         esrc = str(vw(esources[i]) or "")
 
@@ -165,6 +168,7 @@ def _score_and_collect_edges(
                 {
                     "source": src,
                     "target": dst,
+                    "rank": str(rank),
                     "relation": rel,
                     "source_db": esrc,
                 }

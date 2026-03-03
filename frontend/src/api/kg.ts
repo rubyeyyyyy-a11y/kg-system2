@@ -120,10 +120,18 @@ export async function nodeDetail(vid: number): Promise<NodeDetailResp> {
 export async function edgeDetail(body: {
   src: number;
   dst: number;
-  relation: string;
-  source_db: string | null;
+  rank: string;
 }): Promise<EdgeDetailResp> {
   return apiPost<EdgeDetailResp>("/api/edge_detail", body);
+}
+
+export async function edgeUpdate(body: {
+  src: number;
+  dst: number;
+  rank: string;
+  props: Record<string, unknown>;
+}): Promise<EdgeDetailResp> {
+  return apiPost<EdgeDetailResp>("/api/edge_update", body);
 }
 
 export async function suggest({

@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Optional
 
 from nebula3.Config import Config
@@ -9,6 +10,18 @@ NEBULA_PORT = int(os.getenv("NEBULA_PORT", "9669"))
 NEBULA_USER = os.getenv("NEBULA_USER", "root")
 NEBULA_PASSWORD = os.getenv("NEBULA_PASSWORD", "nebula")
 NEBULA_SPACE = os.getenv("NEBULA_SPACE", "demo_kg")
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _safe_identifier(raw: str, fallback: str) -> str:
+    value = (raw or "").strip()
+    if value and _IDENTIFIER_RE.match(value):
+        return value
+    return fallback
+
+
+EDGE_TYPE = _safe_identifier(os.getenv("EDGE_TYPE", "REL"), "REL")
+EDGE_TAG = f"`{EDGE_TYPE}`"
 
 _pool: Optional[ConnectionPool] = None
 

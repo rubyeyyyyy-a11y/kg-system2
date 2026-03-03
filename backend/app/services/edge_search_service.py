@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
-from app.db.nebula import get_session
+from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.edge import EdgeSearchRequest
 from app.services.common import esc, vw
 
@@ -47,10 +47,11 @@ def _fetch_edge_rows(
         where_clause = "WHERE " + " AND ".join(f"({p})" for p in where_parts)
 
     ngql = f"""
-    MATCH (src:`Entity`)-[e:`REL`]->(dst:`Entity`)
+    MATCH (src:`Entity`)-[e:{EDGE_TAG}]->(dst:`Entity`)
     {where_clause}
     RETURN id(src) AS src,
            id(dst) AS dst,
+           rank(e) AS rank,
            coalesce(properties(e).relation, "") AS relation,
            coalesce(properties(e).source, "") AS source_db,
            properties(e) AS props
@@ -63,6 +64,7 @@ LIMIT {int(scan_limit)};
 
     srcs = res.column_values("src")
     dsts = res.column_values("dst")
+    ranks = res.column_values("rank")
     relations = res.column_values("relation")
     source_dbs = res.column_values("source_db")
     propss = res.column_values("props")
@@ -72,9 +74,10 @@ LIMIT {int(scan_limit)};
     for i in range(len(srcs)):
         src = int(vw(srcs[i]))
         dst = int(vw(dsts[i]))
+        rank = int(vw(ranks[i]) or 0)
         relation = str(vw(relations[i]) or "")
         source_db = str(vw(source_dbs[i]) or "")
-        key = (src, dst, relation, source_db)
+        key = (src, dst, rank)
         if key in seen:
             continue
         seen.add(key)
@@ -82,6 +85,7 @@ LIMIT {int(scan_limit)};
             {
                 "src": src,
                 "dst": dst,
+                "rank": rank,
                 "relation": relation,
                 "source_db": source_db,
                 "props": vw(propss[i]) or {},
@@ -245,6 +249,7 @@ def _search_core(
             {
                 "src": row["src"],
                 "dst": row["dst"],
+                "rank": str(row["rank"]),
                 "relation": row["relation"],
                 "source_db": row["source_db"],
                 "score": round(float(score), 6),
@@ -258,6 +263,7 @@ def _search_core(
             len(x["relation"] or ""),
             x["src"],
             x["dst"],
+            int(x["rank"]),
             x["relation"],
             x["source_db"],
         )
@@ -304,6 +310,7 @@ def edge_suggest(
             {
                 "src": e["src"],
                 "dst": e["dst"],
+                "rank": e["rank"],
                 "relation": e["relation"],
                 "source_db": e["source_db"],
                 "score": e["score"],

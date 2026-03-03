@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class EdgeSuggestItem(BaseModel):
     src: int
     dst: int
+    rank: str = "0"
     relation: str
     source_db: str = ""
     score: Optional[float] = None
@@ -31,6 +32,7 @@ class EdgeSearchRequest(BaseModel):
 class EdgeSearchItem(BaseModel):
     src: int
     dst: int
+    rank: str = "0"
     relation: str
     source_db: str = ""
     score: Optional[float] = None

@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class GraphEdge(BaseModel):
     source: int
     target: int
+    rank: str = "0"
     relation: str = ""
     source_db: str = ""
 

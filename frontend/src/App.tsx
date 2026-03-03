@@ -138,15 +138,14 @@ export default function App() {
     }
   }
 
-  async function loadEdgeDetail(src: number, dst: number, relation: string, source_db?: string) {
+  async function loadEdgeDetail(src: number, dst: number, rank: string) {
     setDetailLoading(true);
     try {
       setEdgeDetail(
         await edgeDetailApi({
           src,
           dst,
-          relation,
-          source_db: source_db || null,
+          rank,
         })
       );
     } catch (e: unknown) {
@@ -515,11 +514,11 @@ export default function App() {
 
     const edgeMap = new Map<string, (typeof graphEdges)[number]>();
     for (const e of graphEdges) {
-      const ek = `${e.source}|${e.target}|${e.relation || ""}|${e.source_db || ""}`;
+      const ek = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
       edgeMap.set(ek, e);
     }
     for (const e of candidate.edges || []) {
-      const ek = `${e.source}|${e.target}|${e.relation || ""}|${e.source_db || ""}`;
+      const ek = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
       if (edgeMap.has(ek)) continue;
       edgeMap.set(ek, { ...e, is_explain: true });
     }
@@ -807,7 +806,7 @@ export default function App() {
     const edgeMap = new Map<string, (typeof visibleGraphEdges)[number]>();
     const dupSeqBySignature = new Map<string, number>();
     const edges = visibleGraphEdges.map((e) => {
-      const signature = `${e.source}|${e.target}|${e.relation || ""}|${e.source_db || ""}`;
+      const signature = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
       const seq = dupSeqBySignature.get(signature) || 0;
       dupSeqBySignature.set(signature, seq + 1);
       // Stable edge ids avoid item reference churn when visibility-only toggles change.
@@ -827,16 +826,18 @@ export default function App() {
 
   function selectEdgeWithDetail(target: EdgeSearchItem, edgeId: string | null) {
     const source_db = target.source_db ? String(target.source_db) : undefined;
+    const rank = String(target.rank || "0");
     setSelectedEdgeGraphId(edgeId);
     setSel({
       kind: "edge",
       src: Number(target.src),
       dst: Number(target.dst),
+      rank,
       relation: String(target.relation || ""),
       source_db,
     });
     setNodeDetail(null);
-    void loadEdgeDetail(Number(target.src), Number(target.dst), String(target.relation || ""), source_db);
+    void loadEdgeDetail(Number(target.src), Number(target.dst), rank);
 
     if (edgeId) {
       applyHighlightRef.current?.(null, edgeId, true);
@@ -847,8 +848,7 @@ export default function App() {
     const edgeId = findEdgeIdByIdentity(edgeById, {
       src: Number(target.src),
       dst: Number(target.dst),
-      relation: String(target.relation || ""),
-      source_db: target.source_db,
+      rank: String(target.rank || "0"),
     });
     if (!edgeId) return false;
     selectEdgeWithDetail(target, edgeId);
@@ -874,8 +874,7 @@ export default function App() {
     const edgeId = findEdgeIdByIdentity(edgeById, {
       src: Number(pendingEdgeLocate.src),
       dst: Number(pendingEdgeLocate.dst),
-      relation: String(pendingEdgeLocate.relation || ""),
-      source_db: pendingEdgeLocate.source_db,
+      rank: String(pendingEdgeLocate.rank || "0"),
     });
 
     if (edgeId) {
@@ -891,8 +890,7 @@ export default function App() {
       isSameEdge(e, {
         src: Number(pendingEdgeLocate.src),
         dst: Number(pendingEdgeLocate.dst),
-        relation: String(pendingEdgeLocate.relation || ""),
-        source_db: pendingEdgeLocate.source_db,
+        rank: String(pendingEdgeLocate.rank || "0"),
       })
     );
 
@@ -950,14 +948,15 @@ export default function App() {
   function handleGraphEdgeClick(edgeId: string, edge: (typeof visibleGraphEdges)[number]) {
     const src = Number(edge.source);
     const dst = Number(edge.target);
+    const rank = String(edge.rank || "0");
     const relation = String(edge.relation || "");
     const source_db = edge.source_db ? String(edge.source_db) : undefined;
     if (!Number.isFinite(src) || !Number.isFinite(dst) || !relation) return;
 
     setSelectedEdgeGraphId(edgeId);
-    setSel({ kind: "edge", src, dst, relation, source_db });
+    setSel({ kind: "edge", src, dst, rank, relation, source_db });
     setNodeDetail(null);
-    void loadEdgeDetail(src, dst, relation, source_db);
+    void loadEdgeDetail(src, dst, rank);
   }
 
   return (

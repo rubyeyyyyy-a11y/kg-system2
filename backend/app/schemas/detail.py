@@ -6,8 +6,7 @@ from pydantic import BaseModel
 class EdgeDetailRequest(BaseModel):
     src: int
     dst: int
-    relation: str
-    source_db: Optional[str] = None
+    rank: str
 
 
 class NodeDetailResp(BaseModel):
@@ -18,4 +17,15 @@ class NodeDetailResp(BaseModel):
 class EdgeDetailResp(BaseModel):
     src: int
     dst: int
+    rank: str
+    relation: str = ""
+    source_db: Optional[str] = None
+    updated: bool = False
+    props: Dict[str, Any]
+
+
+class EdgeUpdateRequest(BaseModel):
+    src: int
+    dst: int
+    rank: str
     props: Dict[str, Any]

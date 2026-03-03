@@ -1127,7 +1127,7 @@ export function LeftSearchPanel({
                     const active = idx === edgeSuggestHighlightIndex;
                     return (
                       <div
-                        key={`${item.src}-${item.dst}-${item.relation}-${item.source_db || ""}-${idx}`}
+                        key={`${item.src}-${item.dst}-${item.rank || "0"}-${item.relation}-${item.source_db || ""}-${idx}`}
                         onMouseEnter={() => setEdgeSuggestHighlightIndex(idx)}
                         onMouseDown={(e) => e.preventDefault()}
                         onClick={() => onSelectEdgeSuggestItem(item)}
@@ -1143,6 +1143,7 @@ export function LeftSearchPanel({
                         </div>
                         <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
                           {(item.src_label || item.src) + ` (${item.src})`} → {(item.dst_label || item.dst) + ` (${item.dst})`}
+                          {` | rank=${item.rank ?? "0"}`}
                           {item.source_db ? ` | ${item.source_db}` : ""}
                           {typeof item.score === "number" ? ` | score=${item.score}` : ""}
                         </div>
@@ -1193,7 +1194,7 @@ export function LeftSearchPanel({
           <div style={{ display: "grid", gap: 10 }}>
             {edgeSearchData.edges.map((e, idx) => (
               <div
-                key={`${e.src}-${e.dst}-${e.relation}-${e.source_db || ""}-${idx}`}
+                key={`${e.src}-${e.dst}-${e.rank || "0"}-${e.relation}-${e.source_db || ""}-${idx}`}
                 style={{
                   padding: 10,
                   border: "1px solid #f0f0f0",
@@ -1206,6 +1207,7 @@ export function LeftSearchPanel({
                 <div style={{ fontWeight: 600 }}>{relationDisplay(e.relation) || e.relation}</div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
                   {(e.src_label || e.src) + ` (${e.src})`} → {(e.dst_label || e.dst) + ` (${e.dst})`}
+                  {` | rank=${e.rank ?? "0"}`}
                   {e.source_db ? ` | ${e.source_db}` : ""}
                   {typeof e.score === "number" ? ` | score=${e.score}` : ""}
                 </div>

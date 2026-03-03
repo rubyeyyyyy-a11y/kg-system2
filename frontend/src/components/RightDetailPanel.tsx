@@ -489,7 +489,7 @@ export function RightDetailPanel({
             src={sel.src} → dst={sel.dst}
           </div>
           <div style={{ fontSize: 12, color: "#666" }}>
-            relation={relationDisplay(sel.relation)} | source_db={sel.source_db || "-"}
+            rank={sel.rank} | relation={relationDisplay(sel.relation)} | source_db={sel.source_db || "-"}
           </div>
 
           <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>

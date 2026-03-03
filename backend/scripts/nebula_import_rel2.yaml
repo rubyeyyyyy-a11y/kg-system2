@@ -1,0 +1,46 @@
+version: v3
+
+description: Import REL2 edges with rank from edges_with_rank.csv
+
+clientSettings:
+  retry: 3
+  concurrency: 16
+  channelBufferSize: 128
+  space: demo_kg
+  connection:
+    user: root
+    password: nebula
+    address: 127.0.0.1:9669
+
+logPath: ./logs
+
+files:
+  - path: ./edges_with_rank.csv
+    failDataPath: ./failed/edges_with_rank.csv
+    batchSize: 1024
+    type: csv
+    csv:
+      withHeader: true
+      delimiter: ","
+      quote: "\""
+      escape: "\\"
+    schema:
+      type: edge
+      edge:
+        name: REL2
+        withRanking: true
+      source:
+        idType: INT
+        index: src
+      target:
+        idType: INT
+        index: dst
+      ranking:
+        index: rank
+      props:
+        - name: relation
+          type: string
+          index: relation
+        - name: source
+          type: string
+          index: source_db
