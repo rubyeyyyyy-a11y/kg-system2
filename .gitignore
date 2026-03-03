@@ -1,0 +1,58 @@
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.vite/
+frontend/.cache/
+frontend/.eslintcache
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+backend/.venv/
+backend/.venv*/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Logs
+*.log
+*.out
+logs/
+backend/*.log
+backend/*.log.*
+frontend/*.log
+
+# Env
+.env
+.env.*
+!.env.example
+
+# OS / Editor
+.DS_Store
+.vscode/
+.idea/
+Thumbs.db
+
+# Archives / dumps
+*.tar
+*.tar.gz
+*.zip
+
+# Build / temp / cache
+*.tmp
+tmp/
+.cache/
+
+# Local data / database / docker volumes
+data/
+volumes/
+*.sqlite
+*.sqlite3
+*.db
+
+# Project backup/patch artifacts
+backend/*.bak*
+backend/*.diff
