@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 
 class EdgeSuggestItem(BaseModel):
+    edge_type: str = "REL2"
     src: int
     dst: int
     rank: str = "0"
@@ -30,6 +31,7 @@ class EdgeSearchRequest(BaseModel):
 
 
 class EdgeSearchItem(BaseModel):
+    edge_type: str = "REL2"
     src: int
     dst: int
     rank: str = "0"

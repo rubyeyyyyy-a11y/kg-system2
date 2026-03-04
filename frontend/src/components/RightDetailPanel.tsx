@@ -1,9 +1,14 @@
+import { useState } from "react";
+
 import { EXPAND_AUTO_REVEAL_TOPK, TOP_N_VISIBLE } from "../constants/kg";
+import { EditWritebackPanel } from "./EditWritebackPanel";
 import type {
   EdgeDetailResp,
+  EdgePatchResp,
   ExpandProbeState,
   NodeBrief,
   NodeDetailResp,
+  NodePatchResp,
   Sel,
 } from "../types/kg";
 
@@ -69,6 +74,20 @@ type RightDetailPanelProps = {
   nodeDetail: NodeDetailResp | null;
   edgeDetail: EdgeDetailResp | null;
   relationDisplay: (raw?: string) => string;
+  onReloadNodeDetail: (vid: number) => Promise<void>;
+  onReloadEdgeDetail: (identity: { edge_type: string; src: number; dst: number; rank: string }) => Promise<void>;
+  onSaveNodeEdit: (
+    vid: number,
+    setFields: Record<string, string>,
+    expectedVersion: number,
+    updatedBy: string
+  ) => Promise<NodePatchResp>;
+  onSaveEdgeEdit: (
+    identity: { edge_type: string; src: number; dst: number; rank: string },
+    setFields: Record<string, string>,
+    expectedVersion: number,
+    updatedBy: string
+  ) => Promise<EdgePatchResp>;
 };
 
 export function RightDetailPanel({
@@ -124,7 +143,13 @@ export function RightDetailPanel({
   nodeDetail,
   edgeDetail,
   relationDisplay,
+  onReloadNodeDetail,
+  onReloadEdgeDetail,
+  onSaveNodeEdit,
+  onSaveEdgeEdit,
 }: RightDetailPanelProps) {
+  const [editorTab, setEditorTab] = useState<"detail" | "edit" | "direct">("detail");
+
   return (
     <div
       style={{
@@ -402,8 +427,20 @@ export function RightDetailPanel({
       </div>
 
       <hr style={{ margin: "12px 0" }} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <button onClick={() => setEditorTab("detail")} style={{ padding: "6px 10px", fontSize: 12 }}>
+          详情
+        </button>
+        <button onClick={() => setEditorTab("edit")} style={{ padding: "6px 10px", fontSize: 12 }}>
+          编辑
+        </button>
+        <button onClick={() => setEditorTab("direct")} style={{ padding: "6px 10px", fontSize: 12 }}>
+          直接编辑
+        </button>
+      </div>
 
-      {sel.kind === "none" ? (
+      {editorTab === "detail" ? (
+        sel.kind === "none" ? (
         <div style={{ color: "#666", fontSize: 13 }}>未选择节点/边</div>
       ) : sel.kind === "node" ? (
         <div style={{ display: "grid", gap: 10 }}>
@@ -501,6 +538,19 @@ export function RightDetailPanel({
             </div>
           ) : null}
         </div>
+      )
+      ) : (
+        <EditWritebackPanel
+          mode={editorTab === "edit" ? "edit" : "direct"}
+          sel={sel}
+          nodeDetail={nodeDetail}
+          edgeDetail={edgeDetail}
+          detailLoading={detailLoading}
+          onReloadNodeDetail={onReloadNodeDetail}
+          onReloadEdgeDetail={onReloadEdgeDetail}
+          onSaveNodeEdit={onSaveNodeEdit}
+          onSaveEdgeEdit={onSaveEdgeEdit}
+        />
       )}
     </div>
   );

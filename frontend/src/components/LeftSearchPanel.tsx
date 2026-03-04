@@ -1143,7 +1143,7 @@ export function LeftSearchPanel({
                         </div>
                         <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
                           {(item.src_label || item.src) + ` (${item.src})`} → {(item.dst_label || item.dst) + ` (${item.dst})`}
-                          {` | rank=${item.rank ?? "0"}`}
+                          {` | ${item.edge_type || "REL2"} | rank=${item.rank ?? "0"}`}
                           {item.source_db ? ` | ${item.source_db}` : ""}
                           {typeof item.score === "number" ? ` | score=${item.score}` : ""}
                         </div>
@@ -1207,7 +1207,7 @@ export function LeftSearchPanel({
                 <div style={{ fontWeight: 600 }}>{relationDisplay(e.relation) || e.relation}</div>
                 <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
                   {(e.src_label || e.src) + ` (${e.src})`} → {(e.dst_label || e.dst) + ` (${e.dst})`}
-                  {` | rank=${e.rank ?? "0"}`}
+                  {` | ${e.edge_type || "REL2"} | rank=${e.rank ?? "0"}`}
                   {e.source_db ? ` | ${e.source_db}` : ""}
                   {typeof e.score === "number" ? ` | score=${e.score}` : ""}
                 </div>

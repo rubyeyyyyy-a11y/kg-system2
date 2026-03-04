@@ -3,6 +3,8 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   edgeDetail as edgeDetailApi,
   edgeSearch as edgeSearchApi,
+  patchEdge as patchEdgeApi,
+  patchNode as patchNodeApi,
   multiEntityGraph as multiEntityGraphApi,
   multiEntityGraphApplyPaths as multiEntityGraphApplyPathsApi,
   nodeDetail as nodeDetailApi,
@@ -24,18 +26,20 @@ import { useSuggest } from "./hooks/useSuggest";
 import { useVisibilityRanking } from "./hooks/useVisibilityRanking";
 import type {
   EdgeDetailResp,
+  EdgePatchResp,
   EdgeSearchItem,
   EdgeSearchResp,
   MultiEntityGraphResp,
   NodeBrief,
   NodeDetailResp,
+  NodePatchResp,
   PairPathCandidate,
   RawIdSuggestItem,
   SearchResp,
   Sel,
   SuggestItem,
 } from "./types/kg";
-import { findEdgeIdByIdentity, isSameEdge, pairKey, relationDisplay } from "./utils/kg";
+import { edgeKey, findEdgeIdByIdentity, isSameEdge, pairKey, relationDisplay } from "./utils/kg";
 import "./styles/layout.css";
 
 type MultiGraphParams = {
@@ -62,6 +66,7 @@ const RIGHT_WIDTH_KEY = "kg:rightW";
 const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_DEFAULT_WIDTH = 420;
+const EDGE_TYPE_DEFAULT = "REL2";
 
 function clampSidebarWidth(next: number) {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(next)));
@@ -138,11 +143,12 @@ export default function App() {
     }
   }
 
-  async function loadEdgeDetail(src: number, dst: number, rank: string) {
+  async function loadEdgeDetail(src: number, dst: number, rank: string, edgeType = EDGE_TYPE_DEFAULT) {
     setDetailLoading(true);
     try {
       setEdgeDetail(
         await edgeDetailApi({
+          edge_type: edgeType,
           src,
           dst,
           rank,
@@ -154,6 +160,116 @@ export default function App() {
     } finally {
       setDetailLoading(false);
     }
+  }
+
+  async function saveNodeEdit(
+    vid: number,
+    setFields: Record<string, string>,
+    expectedVersion: number,
+    updatedBy: string
+  ): Promise<NodePatchResp> {
+    const resp = await patchNodeApi(vid, {
+      set: setFields,
+      expected_version: expectedVersion,
+      updated_by: updatedBy,
+    });
+
+    updateNodeInGraph(vid, {
+      label: resp.updated.entity_name ?? undefined,
+      entity_type: resp.updated.entity_type ?? undefined,
+      source: resp.updated.source ?? undefined,
+      snippet: resp.updated.description ?? undefined,
+    });
+    setSearchData((prev) => ({
+      ...prev,
+      nodes: prev.nodes.map((n) =>
+        n.id === vid
+          ? {
+              ...n,
+              label: resp.updated.entity_name ?? n.label,
+              entity_type: resp.updated.entity_type ?? n.entity_type,
+              source: resp.updated.source ?? n.source,
+              snippet: resp.updated.description ?? n.snippet,
+            }
+          : n
+      ),
+    }));
+    setNodeDetail((prev) => {
+      if (!prev || prev.vid !== vid) return prev;
+      return {
+        ...prev,
+        ...resp.updated,
+        version: resp.version,
+        updated_at: resp.updated_at,
+        updated_by: resp.updated_by,
+      };
+    });
+    return resp;
+  }
+
+  async function saveEdgeEdit(
+    identity: { edge_type: string; src: number; dst: number; rank: string },
+    setFields: Record<string, string>,
+    expectedVersion: number,
+    updatedBy: string
+  ): Promise<EdgePatchResp> {
+    const resp = await patchEdgeApi({
+      edge_type: identity.edge_type || EDGE_TYPE_DEFAULT,
+      src: identity.src,
+      dst: identity.dst,
+      rank: identity.rank,
+      set: setFields,
+      expected_version: expectedVersion,
+      updated_by: updatedBy,
+    });
+
+    updateEdgeInGraph(
+      {
+        source: identity.src,
+        target: identity.dst,
+        rank: identity.rank,
+        edge_type: identity.edge_type,
+      },
+      {
+        relation: resp.updated.relation,
+        source_db: resp.updated.source,
+      }
+    );
+    setEdgeDetail((prev) => {
+      if (!prev) return prev;
+      const same =
+        Number(prev.src) === Number(identity.src) &&
+        Number(prev.dst) === Number(identity.dst) &&
+        String(prev.rank) === String(identity.rank) &&
+        String(prev.edge_type || EDGE_TYPE_DEFAULT) === String(identity.edge_type || EDGE_TYPE_DEFAULT);
+      if (!same) return prev;
+      return {
+        ...prev,
+        relation: resp.updated.relation ?? prev.relation,
+        source_db: resp.updated.source ?? prev.source_db,
+        evidence: resp.updated.evidence ?? prev.evidence,
+        version: resp.version,
+        updated_at: resp.updated_at,
+        updated_by: resp.updated_by,
+      };
+    });
+    setEdgeSearchData((prev) => ({
+      ...prev,
+      edges: prev.edges.map((e) => {
+        const same =
+          Number(e.src) === Number(identity.src) &&
+          Number(e.dst) === Number(identity.dst) &&
+          String(e.rank) === String(identity.rank) &&
+          String(e.edge_type || EDGE_TYPE_DEFAULT) === String(identity.edge_type || EDGE_TYPE_DEFAULT);
+        if (!same) return e;
+        return {
+          ...e,
+          relation: resp.updated.relation ?? e.relation,
+          source_db: resp.updated.source ?? e.source_db,
+        };
+      }),
+    }));
+    return resp;
   }
 
   function handleClearSelection() {
@@ -199,6 +315,8 @@ export default function App() {
     unrevealNode,
     collapseExpandFromNode,
     replaceGraphData,
+    updateNodeInGraph,
+    updateEdgeInGraph,
   } = useGraphData({
     selectedNodeVid,
     onSelectNode: handleSelectNode,
@@ -514,11 +632,11 @@ export default function App() {
 
     const edgeMap = new Map<string, (typeof graphEdges)[number]>();
     for (const e of graphEdges) {
-      const ek = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
+      const ek = edgeKey(e);
       edgeMap.set(ek, e);
     }
     for (const e of candidate.edges || []) {
-      const ek = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
+      const ek = edgeKey(e);
       if (edgeMap.has(ek)) continue;
       edgeMap.set(ek, { ...e, is_explain: true });
     }
@@ -804,13 +922,9 @@ export default function App() {
     }));
 
     const edgeMap = new Map<string, (typeof visibleGraphEdges)[number]>();
-    const dupSeqBySignature = new Map<string, number>();
     const edges = visibleGraphEdges.map((e) => {
-      const signature = `${e.source}|${e.target}|${e.rank || "0"}|${e.relation || ""}|${e.source_db || ""}`;
-      const seq = dupSeqBySignature.get(signature) || 0;
-      dupSeqBySignature.set(signature, seq + 1);
-      // Stable edge ids avoid item reference churn when visibility-only toggles change.
-      const id = `e:${signature}#${seq}`;
+      // Identity for multi-edge: src**dst**rank
+      const id = edgeKey(e);
       edgeMap.set(id, e);
       return {
         id,
@@ -827,17 +941,19 @@ export default function App() {
   function selectEdgeWithDetail(target: EdgeSearchItem, edgeId: string | null) {
     const source_db = target.source_db ? String(target.source_db) : undefined;
     const rank = String(target.rank || "0");
+    const edge_type = String(target.edge_type || EDGE_TYPE_DEFAULT);
     setSelectedEdgeGraphId(edgeId);
     setSel({
       kind: "edge",
       src: Number(target.src),
       dst: Number(target.dst),
       rank,
+      edge_type,
       relation: String(target.relation || ""),
       source_db,
     });
     setNodeDetail(null);
-    void loadEdgeDetail(Number(target.src), Number(target.dst), rank);
+    void loadEdgeDetail(Number(target.src), Number(target.dst), rank, edge_type);
 
     if (edgeId) {
       applyHighlightRef.current?.(null, edgeId, true);
@@ -849,6 +965,7 @@ export default function App() {
       src: Number(target.src),
       dst: Number(target.dst),
       rank: String(target.rank || "0"),
+      edge_type: String(target.edge_type || EDGE_TYPE_DEFAULT),
     });
     if (!edgeId) return false;
     selectEdgeWithDetail(target, edgeId);
@@ -875,6 +992,7 @@ export default function App() {
       src: Number(pendingEdgeLocate.src),
       dst: Number(pendingEdgeLocate.dst),
       rank: String(pendingEdgeLocate.rank || "0"),
+      edge_type: String(pendingEdgeLocate.edge_type || EDGE_TYPE_DEFAULT),
     });
 
     if (edgeId) {
@@ -891,6 +1009,7 @@ export default function App() {
         src: Number(pendingEdgeLocate.src),
         dst: Number(pendingEdgeLocate.dst),
         rank: String(pendingEdgeLocate.rank || "0"),
+        edge_type: String(pendingEdgeLocate.edge_type || EDGE_TYPE_DEFAULT),
       })
     );
 
@@ -949,14 +1068,23 @@ export default function App() {
     const src = Number(edge.source);
     const dst = Number(edge.target);
     const rank = String(edge.rank || "0");
+    const edge_type = String(edge.edge_type || EDGE_TYPE_DEFAULT);
     const relation = String(edge.relation || "");
     const source_db = edge.source_db ? String(edge.source_db) : undefined;
     if (!Number.isFinite(src) || !Number.isFinite(dst) || !relation) return;
 
     setSelectedEdgeGraphId(edgeId);
-    setSel({ kind: "edge", src, dst, rank, relation, source_db });
+    setSel({ kind: "edge", src, dst, rank, edge_type, relation, source_db });
     setNodeDetail(null);
-    void loadEdgeDetail(src, dst, rank);
+    void loadEdgeDetail(src, dst, rank, edge_type);
+  }
+
+  async function reloadNodeDetailById(vid: number) {
+    await loadNodeDetail(vid);
+  }
+
+  async function reloadEdgeDetailByIdentity(identity: { edge_type: string; src: number; dst: number; rank: string }) {
+    await loadEdgeDetail(identity.src, identity.dst, identity.rank, identity.edge_type);
   }
 
   return (
@@ -1160,6 +1288,10 @@ export default function App() {
           nodeDetail={nodeDetail}
           edgeDetail={edgeDetail}
           relationDisplay={relationDisplay}
+          onReloadNodeDetail={reloadNodeDetailById}
+          onReloadEdgeDetail={reloadEdgeDetailByIdentity}
+          onSaveNodeEdit={saveNodeEdit}
+          onSaveEdgeEdit={saveEdgeEdit}
         />
       </div>
 

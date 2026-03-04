@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 
+from app.core import config
 from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.graph import (
     ExpandRequest,
@@ -20,13 +21,11 @@ _MAX_MULTI_QUERY_EDGES = 50000
 _MAX_MULTI_NODE_LIMIT = 2000
 
 
-def _edge_key(edge: Dict[str, Any]) -> Tuple[int, int, int, str, str]:
+def _edge_key(edge: Dict[str, Any]) -> Tuple[int, int, int]:
     return (
         int(edge["source"]),
         int(edge["target"]),
         int(edge.get("rank") or 0),
-        str(edge.get("relation") or ""),
-        str(edge.get("source_db") or ""),
     )
 
 
@@ -143,6 +142,7 @@ def _go_edges_from(
                 "source": src,
                 "target": dst,
                 "rank": str(rank),
+                "edge_type": config.EDGE_TYPE,
                 "relation": rel,
                 "source_db": esrc,
             }
@@ -234,7 +234,7 @@ def _find_shortest_path_candidates_bfs(
         return []
 
     paths: List[Dict[str, Any]] = []
-    seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, int, str, str], ...]]] = set()
+    seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, int], ...]]] = set()
     stack: List[Tuple[int, List[int], List[Dict[str, Any]]]] = [(target, [target], [])]
 
     while stack and len(paths) < int(candidate_limit):
@@ -347,6 +347,7 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
                     "source": src,
                     "target": dst,
                     "rank": str(rank),
+                    "edge_type": config.EDGE_TYPE,
                     "relation": rel,
                     "source_db": esrc,
                 }
@@ -491,6 +492,7 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
                 "source": src,
                 "target": dst,
                 "rank": str(rank),
+                "edge_type": config.EDGE_TYPE,
                 "relation": rel,
                 "source_db": esrc,
             }
@@ -642,6 +644,7 @@ def _build_multi_entity_graph(
             "source": src,
             "target": dst,
             "rank": str(e.get("rank") or "0"),
+            "edge_type": config.EDGE_TYPE,
             "relation": str(e.get("relation") or ""),
             "source_db": str(e.get("source_db") or ""),
             "is_explain": False,
@@ -697,6 +700,7 @@ def _build_multi_entity_graph(
                             "source": int(e["source"]),
                             "target": int(e["target"]),
                             "rank": str(e.get("rank") or "0"),
+                            "edge_type": config.EDGE_TYPE,
                             "relation": str(e.get("relation") or ""),
                             "source_db": str(e.get("source_db") or ""),
                         }
@@ -732,6 +736,7 @@ def _build_multi_entity_graph(
                             "source": int(edge["source"]),
                             "target": int(edge["target"]),
                             "rank": str(edge.get("rank") or "0"),
+                            "edge_type": config.EDGE_TYPE,
                             "relation": str(edge.get("relation") or ""),
                             "source_db": str(edge.get("source_db") or ""),
                             "is_explain": True,

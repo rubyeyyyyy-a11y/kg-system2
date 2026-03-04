@@ -20,7 +20,7 @@ def _safe_identifier(raw: str, fallback: str) -> str:
     return fallback
 
 
-EDGE_TYPE = _safe_identifier(os.getenv("EDGE_TYPE", "REL"), "REL")
+EDGE_TYPE = _safe_identifier(os.getenv("EDGE_TYPE", "REL2"), "REL2")
 EDGE_TAG = f"`{EDGE_TYPE}`"
 
 _pool: Optional[ConnectionPool] = None

@@ -12,6 +12,7 @@ export type EdgeBrief = {
   source: number;
   target: number;
   rank: string;
+  edge_type?: string;
   relation?: string;
   source_db?: string;
   is_explain?: boolean;
@@ -36,13 +37,29 @@ export type ExpandResp = {
   stats: { node_count_after: number; dropped_nodes: number; policy: string };
 };
 
-export type NodeDetailResp = { vid: number; props: Record<string, unknown> };
+export type NodeDetailResp = {
+  vid: number;
+  entity_name?: string;
+  entity_type?: string;
+  source?: string;
+  description?: string;
+  entity_raw_id?: string;
+  version: number;
+  updated_at: number;
+  updated_by: string;
+  props: Record<string, unknown>;
+};
 export type EdgeDetailResp = {
+  edge_type: string;
   src: number;
   dst: number;
   rank: string;
   relation?: string;
   source_db?: string;
+  evidence?: string;
+  version: number;
+  updated_at: number;
+  updated_by: string;
   updated?: boolean;
   props: Record<string, unknown>;
 };
@@ -50,7 +67,7 @@ export type EdgeDetailResp = {
 export type Sel =
   | { kind: "none" }
   | { kind: "node"; vid: number }
-  | { kind: "edge"; src: number; dst: number; rank: string; relation: string; source_db?: string };
+  | { kind: "edge"; src: number; dst: number; rank: string; edge_type: string; relation: string; source_db?: string };
 
 export type ExpandProbeState = "loading" | "noextra" | "hasextra";
 
@@ -88,6 +105,7 @@ export type EntityTypeItem = {
 };
 
 export type EdgeSearchItem = {
+  edge_type: string;
   src: number;
   dst: number;
   rank: string;
@@ -142,4 +160,39 @@ export type MultiEntityGraphResp = {
     [k: string]: unknown;
   };
   path_candidates?: PairPathCandidate[];
+};
+
+export type EditableFieldSpec = {
+  name: string;
+  type: "string";
+  maxLen: number;
+  multiline: boolean;
+  required: boolean;
+};
+
+export type EditableFieldsResp = {
+  entity: { fields: EditableFieldSpec[] };
+  edge: { fields: EditableFieldSpec[] };
+  forbidden_fields: string[];
+};
+
+export type NodePatchResp = {
+  vid: number;
+  updated: Record<string, string>;
+  version: number;
+  updated_at: number;
+  updated_by: string;
+};
+
+export type EdgePatchResp = {
+  identity: {
+    src: number;
+    dst: number;
+    rank: string;
+    edge_type: string;
+  };
+  updated: Record<string, string>;
+  version: number;
+  updated_at: number;
+  updated_by: string;
 };

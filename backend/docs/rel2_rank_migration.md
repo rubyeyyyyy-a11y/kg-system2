@@ -8,7 +8,9 @@ CREATE EDGE IF NOT EXISTS REL2(
   relation string,
   source string,
   evidence string,
-  description string
+  version int64,
+  updated_at int64,
+  updated_by string
 );
 ```
 
@@ -19,16 +21,14 @@ Notes:
 ## 2) Generate Ranked CSV
 
 ```bash
-python3 backend/scripts/generate_edge_rank_csv.py \
+python3 backend/scripts/generate_rel2_ranked_edges.py \
   --input /path/to/edges_clean.csv \
-  --output /path/to/edges_with_rank.csv \
-  --relation-column relation \
-  --source-db-column source_db
+  --output /path/to/edges_with_rank.csv
 ```
 
 Rank rule:
-- `rank = stable_hash64(f"{relation}|{source_db}")`
-- `stable_hash64` = SHA1 first 8 bytes interpreted as signed int64.
+- same `(src,dst)` group gets `rank=0..n-1`
+- ranking order is stable by `(relation, source_db, evidence)`
 
 ## 3) Import REL2 with nebula-importer
 

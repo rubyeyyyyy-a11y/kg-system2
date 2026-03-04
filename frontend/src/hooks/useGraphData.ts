@@ -49,6 +49,11 @@ type UseGraphDataResult = {
     stats: Record<string, unknown> | null;
     hop?: number;
   }) => void;
+  updateNodeInGraph: (vid: number, patch: Partial<NodeBrief>) => void;
+  updateEdgeInGraph: (
+    identity: { source: number; target: number; rank: string; edge_type?: string },
+    patch: Partial<EdgeBrief>
+  ) => void;
 };
 
 export function useGraphData({
@@ -112,6 +117,25 @@ export function useGraphData({
     resetExpandProbeCache();
     resetPanelGroupingForNewRoot(params.nodes, params.rootVid);
     onClearSelection();
+  }
+
+  function updateNodeInGraph(vid: number, patch: Partial<NodeBrief>) {
+    setGraphNodes((prev) => prev.map((n) => (n.id === vid ? { ...n, ...patch } : n)));
+  }
+
+  function updateEdgeInGraph(
+    identity: { source: number; target: number; rank: string; edge_type?: string },
+    patch: Partial<EdgeBrief>
+  ) {
+    setGraphEdges((prev) =>
+      prev.map((e) => {
+        const same =
+          Number(e.source) === Number(identity.source) &&
+          Number(e.target) === Number(identity.target) &&
+          String(e.rank || "0") === String(identity.rank || "0");
+        return same ? { ...e, ...patch } : e;
+      })
+    );
   }
 
   function resetPanelGroupingForNewRoot(nodes: NodeBrief[], nextRoot: number) {
@@ -441,5 +465,7 @@ export function useGraphData({
     resetExpandProbeCache,
     probeExpand1hop,
     replaceGraphData,
+    updateNodeInGraph,
+    updateEdgeInGraph,
   };
 }

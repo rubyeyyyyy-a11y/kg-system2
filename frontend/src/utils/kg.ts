@@ -6,7 +6,7 @@ export function relationDisplay(raw?: string): string {
 }
 
 export function edgeKey(e: EdgeBrief): string {
-  return `${e.source}|${e.target}|${String(e.rank || "0")}|${e.relation || ""}|${e.source_db || ""}`;
+  return `${e.source}**${e.target}**${String(e.rank || "0")}`;
 }
 
 export function pairKey(u: number, v: number): string {
@@ -30,6 +30,7 @@ export type EdgeIdentity = {
   src: number;
   dst: number;
   rank: string;
+  edge_type?: string;
 };
 
 export function isSameEdge(edge: EdgeBrief, target: EdgeIdentity): boolean {

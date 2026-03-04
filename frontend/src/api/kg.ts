@@ -1,12 +1,15 @@
 import { apiGet, apiPost } from "./http";
 import type {
   EdgeDetailResp,
+  EdgePatchResp,
+  EditableFieldsResp,
   EntityTypeItem,
   EdgeSearchResp,
   EdgeSuggestResp,
   MultiEntityGraphResp,
   ExpandResp,
   NodeDetailResp,
+  NodePatchResp,
   RawIdSuggestResp,
   SearchResp,
   SubgraphResp,
@@ -118,6 +121,7 @@ export async function nodeDetail(vid: number): Promise<NodeDetailResp> {
 }
 
 export async function edgeDetail(body: {
+  edge_type: string;
   src: number;
   dst: number;
   rank: string;
@@ -125,13 +129,37 @@ export async function edgeDetail(body: {
   return apiPost<EdgeDetailResp>("/api/edge_detail", body);
 }
 
-export async function edgeUpdate(body: {
+export async function editableFields(): Promise<EditableFieldsResp> {
+  return apiGet<EditableFieldsResp>("/api/schema/editable_fields");
+}
+
+export async function patchNode(
+  vid: number,
+  body: {
+    set: Record<string, unknown>;
+    expected_version: number;
+    updated_by: string;
+  }
+): Promise<NodePatchResp> {
+  return apiFetchJson<NodePatchResp>(`/api/node/${vid}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function patchEdge(body: {
+  edge_type: string;
   src: number;
   dst: number;
   rank: string;
-  props: Record<string, unknown>;
-}): Promise<EdgeDetailResp> {
-  return apiPost<EdgeDetailResp>("/api/edge_update", body);
+  set: Record<string, unknown>;
+  expected_version: number;
+  updated_by: string;
+}): Promise<EdgePatchResp> {
+  return apiFetchJson<EdgePatchResp>(`/api/edge`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
 }
 
 export async function suggest({
@@ -207,4 +235,16 @@ export async function multiEntityGraph(body: MultiEntityGraphParams): Promise<Mu
 
 export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPathsParams): Promise<MultiEntityGraphResp> {
   return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph_apply_paths", body);
+}
+
+async function apiFetchJson<T>(path: string, init: RequestInit): Promise<T> {
+  const resp = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...init,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`HTTP ${resp.status}: ${text}`);
+  }
+  return (await resp.json()) as T;
 }

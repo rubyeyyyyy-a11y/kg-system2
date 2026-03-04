@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 
+from app.core import config
 from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.edge import EdgeSearchRequest
 from app.services.common import esc, vw
@@ -247,6 +248,7 @@ def _search_core(
 
         scored.append(
             {
+                "edge_type": config.EDGE_TYPE,
                 "src": row["src"],
                 "dst": row["dst"],
                 "rank": str(row["rank"]),
@@ -308,6 +310,7 @@ def edge_suggest(
     for e in edges[:safe_limit]:
         items.append(
             {
+                "edge_type": config.EDGE_TYPE,
                 "src": e["src"],
                 "dst": e["dst"],
                 "rank": e["rank"],

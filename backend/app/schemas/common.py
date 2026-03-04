@@ -7,6 +7,7 @@ class GraphEdge(BaseModel):
     source: int
     target: int
     rank: str = "0"
+    edge_type: str = "REL2"
     relation: str = ""
     source_db: str = ""
 

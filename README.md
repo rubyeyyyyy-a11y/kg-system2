@@ -127,3 +127,47 @@ git merge --no-ff ai/task-YYYYMMDD
 git switch main
 git branch -D ai/task-YYYYMMDD
 ```
+
+## 7) 编辑写回（Node/Edge）
+
+### 7.1 Nebula Schema（demo_kg）
+```ngql
+USE demo_kg;
+
+ALTER TAG Entity ADD (
+  version int64,
+  updated_at int64,
+  updated_by string
+);
+
+CREATE EDGE IF NOT EXISTS REL2(
+  relation string,
+  source string,
+  evidence string,
+  version int64,
+  updated_at int64,
+  updated_by string
+);
+```
+
+### 7.2 编辑 API
+- `GET /api/schema/editable_fields`
+- `PATCH /api/node/{vid}`
+- `PATCH /api/edge`（identity: `src,dst,rank`，`edge_type=REL2`）
+- `GET /api/node/{vid}`（返回 `version/updated_at/updated_by`）
+- `POST /api/edge_detail`（请求需 `edge_type/src/dst/rank`，返回 `version/updated_at/updated_by`）
+
+### 7.3 乐观锁
+- 请求必须携带 `expected_version`
+- 后端比较当前版本（NULL 视为 0）
+- 不一致返回 `409`，响应包含 `current_version` 与 `current_snapshot`
+
+### 7.4 审计日志
+- 路径：`backend/logs/edit_audit.jsonl`
+- 每次写操作都会记录 `success/fail/conflict/validation_error`
+- 日志写失败不会阻断主流程
+
+### 7.5 前端操作
+- 右侧面板新增 `详情 / 编辑 / 直接编辑` 三个页签
+- `updated_by` 支持全局默认（localStorage）+ 本次保存覆盖
+- 保存成功后只做局部状态更新，不重拉 subgraph

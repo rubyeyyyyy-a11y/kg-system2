@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException
 
+from app.core import config
 from app.db.nebula import EDGE_TAG, get_session
 from app.schemas.search import SearchRequest
 from app.services.common import (
@@ -169,6 +170,7 @@ def _score_and_collect_edges(
                     "source": src,
                     "target": dst,
                     "rank": str(rank),
+                    "edge_type": config.EDGE_TYPE,
                     "relation": rel,
                     "source_db": esrc,
                 }

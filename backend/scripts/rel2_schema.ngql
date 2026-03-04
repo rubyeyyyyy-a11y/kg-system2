@@ -3,5 +3,7 @@ CREATE EDGE IF NOT EXISTS REL2(
   relation string,
   source string,
   evidence string,
-  description string
+  version int64,
+  updated_at int64,
+  updated_by string
 );

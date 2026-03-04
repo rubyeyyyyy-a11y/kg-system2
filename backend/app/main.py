@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import routes_edit
+from app.core.config import ensure_audit_log_dir
 from app.db.nebula import get_session
 from app.routers import detail, graph, search
 
@@ -24,6 +26,12 @@ def health():
     return {"ok": True, "hosts_rows": len(r.rows())}
 
 
+@app.on_event("startup")
+def startup_prepare():
+    ensure_audit_log_dir()
+
+
 app.include_router(search.router)
 app.include_router(graph.router)
 app.include_router(detail.router)
+app.include_router(routes_edit.router)
