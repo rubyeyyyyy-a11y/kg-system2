@@ -8,9 +8,10 @@ from .common import GraphEdge, GraphNode
 class SearchRequest(BaseModel):
     q: str
     search_in_name: bool = True
-    search_in_description: bool = True
+    search_in_description: bool = False
     search_in_type: bool = False
     search_in_raw_id: bool = False
+    include_edges: bool = False
     entity_type: Optional[str] = None
     source: Optional[str] = None
     entity_raw_id: Optional[str] = None

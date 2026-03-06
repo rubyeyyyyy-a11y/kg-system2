@@ -48,6 +48,7 @@ type UseRelationFilterResult = {
 const PRESETS_KEY = "kg:relPresets";
 const ACTIVE_PRESET_KEY = "kg:relPresetActiveId";
 const SYSTEM_PRESET_ID_ALL = "__all__";
+const SYSTEM_PRESET_UPDATED_AT = 0;
 
 function readPresetsFromStorage(): RelPreset[] {
   if (typeof window === "undefined") return [];
@@ -85,7 +86,6 @@ export function useRelationFilter({
   rootVid,
 }: UseRelationFilterParams): UseRelationFilterResult {
   const [open, setOpen] = useState(false);
-  const [appliedState, setAppliedState] = useState<string[]>(() => uniqueStrings(appliedRelations));
   const [draftRelations, setDraftRelationsState] = useState<string[]>(() => uniqueStrings(appliedRelations));
 
   const [previewActive, setPreviewActive] = useState(false);
@@ -93,12 +93,7 @@ export function useRelationFilter({
 
   const [customPresets, setCustomPresets] = useState<RelPreset[]>(() => readPresetsFromStorage());
   const [activePresetId, setActivePresetId] = useState<string>(() => readPresetActiveId());
-
-  useEffect(() => {
-    const normalized = uniqueStrings(appliedRelations);
-    setAppliedState(normalized);
-    if (!open) setDraftRelationsState(normalized);
-  }, [appliedRelations, open]);
+  const appliedState = useMemo(() => uniqueStrings(appliedRelations), [appliedRelations]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -115,7 +110,7 @@ export function useRelationFilter({
       id: SYSTEM_PRESET_ID_ALL,
       name: "全部（不筛选）",
       relations: [],
-      updatedAt: Date.now(),
+      updatedAt: SYSTEM_PRESET_UPDATED_AT,
     };
     const sortedCustom = [...customPresets].sort((a, b) => b.updatedAt - a.updatedAt);
     return [systemPreset, ...sortedCustom];
@@ -222,7 +217,6 @@ export function useRelationFilter({
 
   function commitDraftAsApplied() {
     const next = uniqueStrings(draftRelations);
-    setAppliedState(next);
     setPreviewActive(false);
     setPreviewRelations([]);
     return next;

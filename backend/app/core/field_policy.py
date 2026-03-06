@@ -1,8 +1,7 @@
 from typing import Dict, Iterable, List, Literal, TypedDict
 
-from fastapi import HTTPException
-
 from app.core import config
+from app.core.escape import raise_validation_error
 
 
 FieldKind = Literal["string"]
@@ -62,30 +61,30 @@ def _check_field_names(
     forbidden = forbidden or set()
     for key in incoming:
         if key in forbidden:
-            raise HTTPException(status_code=422, detail=f"field '{key}' is forbidden")
+            raise_validation_error(f"field '{key}' is forbidden", field=key)
         if key not in allowed:
-            raise HTTPException(status_code=422, detail=f"field '{key}' is not editable")
+            raise_validation_error(f"field '{key}' is not editable", field=key)
 
 
 def validate_node_patch_set(data: Dict[str, object]) -> Dict[str, str]:
     if not isinstance(data, dict) or len(data) == 0:
-        raise HTTPException(status_code=422, detail="'set' must be a non-empty object")
+        raise_validation_error("'set' must be a non-empty object", field="set")
     _check_field_names(data.keys(), config.ENTITY_EDITABLE_FIELDS, config.ENTITY_FORBIDDEN_FIELDS)
     out: Dict[str, str] = {}
     for k, v in data.items():
         if not isinstance(v, str):
-            raise HTTPException(status_code=422, detail=f"field '{k}' must be string")
+            raise_validation_error(f"field '{k}' must be string", field=k)
         out[k] = v
     return out
 
 
 def validate_edge_patch_set(data: Dict[str, object]) -> Dict[str, str]:
     if not isinstance(data, dict) or len(data) == 0:
-        raise HTTPException(status_code=422, detail="'set' must be a non-empty object")
+        raise_validation_error("'set' must be a non-empty object", field="set")
     _check_field_names(data.keys(), config.EDGE_EDITABLE_FIELDS)
     out: Dict[str, str] = {}
     for k, v in data.items():
         if not isinstance(v, str):
-            raise HTTPException(status_code=422, detail=f"field '{k}' must be string")
+            raise_validation_error(f"field '{k}' must be string", field=k)
         out[k] = v
     return out

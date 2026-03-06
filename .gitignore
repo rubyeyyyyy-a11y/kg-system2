@@ -53,6 +53,11 @@ volumes/
 *.sqlite3
 *.db
 
+# Data import runtime outputs
+data-import/logs/
+data-import/out/
+data-import/state/
+
 # Project backup/patch artifacts
 backend/*.bak*
 backend/*.diff

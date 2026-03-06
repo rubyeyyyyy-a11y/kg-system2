@@ -1,0 +1,56 @@
+client:
+  version: v3
+  address: "127.0.0.1:9669"
+  user: root
+  password: nebula
+
+manager:
+  spaceName: demo_kg
+  batch: 1024
+  readerConcurrency: 4
+  importerConcurrency: __CONCURRENCY__
+  statsInterval: 10s
+
+log:
+  level: INFO
+  console: true
+  files:
+    - __LOG_PATH__
+
+sources:
+  - path: __VERTICES_GLOB__
+    csv:
+      withHeader: true
+      delimiter: ","
+
+    tags:
+      - name: Entity
+        mode: INSERT
+        id:
+          type: INT
+          index: 0
+        props:
+          - name: entity_type
+            type: STRING
+            index: 1
+          - name: entity_name
+            type: STRING
+            index: 2
+          - name: entity_raw_id
+            type: STRING
+            index: 3
+          - name: description
+            type: STRING
+            index: 4
+          - name: source
+            type: STRING
+            index: 5
+          - name: version
+            type: INT
+            index: 6
+          - name: updated_at
+            type: INT
+            index: 7
+          - name: updated_by
+            type: STRING
+            index: 8

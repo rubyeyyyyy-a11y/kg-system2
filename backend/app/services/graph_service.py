@@ -1,24 +1,23 @@
-import time
+import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from fastapi import HTTPException
 
 from app.core import config
-from app.db.nebula import EDGE_TAG, get_session
+from app.db.nebula import EDGE_TAG, execute_ngql
 from app.schemas.graph import (
     ExpandRequest,
     MultiEntityGraphApplyPathsRequest,
     MultiEntityGraphRequest,
     SubgraphRequest,
 )
+from app.services.graph_budget import graph_budget
+from app.services import metadata_service
 from app.services.common import truncate_by_degree, uniq_edges, vw
 
-_relation_cache = {"ts": 0.0, "data": []}
-_MAX_MULTI_VIDS = 8
-_MAX_MULTI_HOP = 3
-_PAIR_CAND_LIMIT = 5
-_MAX_MULTI_QUERY_EDGES = 50000
-_MAX_MULTI_NODE_LIMIT = 2000
+logger = logging.getLogger(__name__)
+
+_PAIR_PARENT_FANIN_LIMIT = 12
 
 
 def _edge_key(edge: Dict[str, Any]) -> Tuple[int, int, int]:
@@ -41,13 +40,30 @@ def _pair_key_with_direction(a: int, b: int, ignore_direction: bool) -> Tuple[in
     return (int(a), int(b))
 
 
-def _normalize_rel_filter(relations: List[str]) -> Set[str]:
+def _budget_error(message: str, code: str = "graph_budget_reject") -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail={
+            "code": code,
+            "message": message,
+        },
+    )
+
+
+def _normalize_rel_filter(relations: List[str], max_count: int) -> Tuple[Set[str], int]:
     out = set()
+    dropped = 0
     for r in relations or []:
         rr = str(r or "").strip()
-        if rr:
-            out.add(rr)
-    return out
+        if not rr:
+            continue
+        if rr in out:
+            continue
+        if len(out) >= int(max_count):
+            dropped += 1
+            continue
+        out.add(rr)
+    return out, dropped
 
 
 def _fetch_entity_nodes(node_ids: List[int]) -> Dict[int, Dict[str, Any]]:
@@ -55,7 +71,6 @@ def _fetch_entity_nodes(node_ids: List[int]) -> Dict[int, Dict[str, Any]]:
     if not ids:
         return {}
 
-    s = get_session()
     vid_list = ",".join(str(x) for x in ids)
     fetch_ngql = f"""
     MATCH (v:`Entity`)
@@ -68,7 +83,7 @@ def _fetch_entity_nodes(node_ids: List[int]) -> Dict[int, Dict[str, Any]]:
            v.`Entity`.`description` AS descr
 LIMIT {len(ids)};
     """
-    fres = s.execute(fetch_ngql)
+    fres = execute_ngql(fetch_ngql)
     if not fres.is_succeeded():
         raise HTTPException(status_code=500, detail=fres.error_msg())
 
@@ -101,13 +116,20 @@ LIMIT {len(ids)};
 def _go_edges_from(
     frontier: List[int],
     rel_filter: Set[str],
-    max_edges: int,
+    query_scan_limit: int,
+    per_root_neighbor_cap: int,
     ignore_direction: bool = True,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     if not frontier:
-        return []
+        return [], {
+            "scanned_rows": 0,
+            "dropped_by_relation": 0,
+            "dropped_by_neighbor_cap": 0,
+        }
 
-    id_list = ",".join(str(int(x)) for x in sorted(set(frontier)))
+    frontier_unique = sorted(set(int(x) for x in frontier))
+    frontier_set = set(frontier_unique)
+    id_list = ",".join(str(x) for x in frontier_unique)
     direction_kw = " BIDIRECT" if ignore_direction else ""
     ngql = f"""
     GO FROM {id_list} OVER {EDGE_TAG}{direction_kw}
@@ -115,10 +137,9 @@ def _go_edges_from(
           rank(edge) AS rank,
           properties(edge).relation AS relation,
           properties(edge).source AS esource
-    | LIMIT {int(max_edges)};
+    | LIMIT {int(query_scan_limit)};
     """
-    s = get_session()
-    res = s.execute(ngql)
+    res = execute_ngql(ngql)
     if not res.is_succeeded():
         raise HTTPException(status_code=500, detail=res.error_msg())
 
@@ -128,6 +149,10 @@ def _go_edges_from(
     rels = res.column_values("relation")
     esources = res.column_values("esource")
 
+    # Super-node protection: each root vertex gets capped neighbor budget.
+    root_neighbor_count: Dict[int, int] = {int(v): 0 for v in frontier_unique}
+    dropped_by_neighbor_cap = 0
+    dropped_by_relation = 0
     out: List[Dict[str, Any]] = []
     for i in range(len(srcs)):
         src = int(vw(srcs[i]))
@@ -135,8 +160,30 @@ def _go_edges_from(
         rank = int(vw(ranks[i]) or 0)
         rel = str(vw(rels[i]) or "")
         esrc = str(vw(esources[i]) or "")
+
         if rel_filter and rel not in rel_filter:
+            dropped_by_relation += 1
             continue
+
+        anchors: List[int] = []
+        if src in frontier_set:
+            anchors.append(src)
+        if ignore_direction and dst in frontier_set and dst != src:
+            anchors.append(dst)
+
+        if not anchors:
+            continue
+
+        accepted = False
+        for anchor in anchors:
+            if int(root_neighbor_count.get(anchor) or 0) >= int(per_root_neighbor_cap):
+                continue
+            root_neighbor_count[anchor] = int(root_neighbor_count.get(anchor) or 0) + 1
+            accepted = True
+        if not accepted:
+            dropped_by_neighbor_cap += 1
+            continue
+
         out.append(
             {
                 "source": src,
@@ -147,7 +194,29 @@ def _go_edges_from(
                 "source_db": esrc,
             }
         )
-    return uniq_edges(out)
+
+    return uniq_edges(out), {
+        "scanned_rows": len(srcs),
+        "dropped_by_relation": dropped_by_relation,
+        "dropped_by_neighbor_cap": dropped_by_neighbor_cap,
+    }
+
+
+def _apply_edge_hard_cap(edges: List[Dict[str, Any]], max_edges: int) -> Tuple[List[Dict[str, Any]], int]:
+    if len(edges) <= int(max_edges):
+        return edges, 0
+    sorted_edges = sorted(
+        edges,
+        key=lambda e: (
+            int(e["source"]),
+            int(e["target"]),
+            int(e.get("rank") or 0),
+            str(e.get("relation") or ""),
+            str(e.get("source_db") or ""),
+        ),
+    )
+    kept = sorted_edges[: int(max_edges)]
+    return kept, max(0, len(sorted_edges) - len(kept))
 
 
 def _build_path_summary(path: Dict[str, Any]) -> str:
@@ -172,12 +241,17 @@ def _find_shortest_path_candidates_bfs(
     dst: int,
     max_hop: int,
     rel_filter: Set[str],
-    max_edges: int,
+    query_scan_limit: int,
+    per_root_neighbor_cap: int,
     ignore_direction: bool,
     candidate_limit: int,
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
     if int(src) == int(dst):
-        return [{"nodes": [int(src)], "edges": []}]
+        return [{"nodes": [int(src)], "edges": []}], {
+            "scanned_rows": 0,
+            "dropped_by_relation": 0,
+            "dropped_by_neighbor_cap": 0,
+        }
 
     source = int(src)
     target = int(dst)
@@ -185,18 +259,27 @@ def _find_shortest_path_candidates_bfs(
     frontier = [source]
     parents: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
     shortest_depth: Optional[int] = None
+    meta = {
+        "scanned_rows": 0,
+        "dropped_by_relation": 0,
+        "dropped_by_neighbor_cap": 0,
+    }
 
     for depth in range(1, int(max_hop) + 1):
         if not frontier:
             break
 
         frontier_set = set(frontier)
-        batch_edges = _go_edges_from(
+        batch_edges, batch_meta = _go_edges_from(
             frontier,
             rel_filter=rel_filter,
-            max_edges=max_edges,
+            query_scan_limit=query_scan_limit,
+            per_root_neighbor_cap=per_root_neighbor_cap,
             ignore_direction=ignore_direction,
         )
+        meta["scanned_rows"] += int(batch_meta["scanned_rows"])
+        meta["dropped_by_relation"] += int(batch_meta["dropped_by_relation"])
+        meta["dropped_by_neighbor_cap"] += int(batch_meta["dropped_by_neighbor_cap"])
         next_frontier: Set[int] = set()
 
         for edge in batch_edges:
@@ -222,7 +305,7 @@ def _find_shortest_path_candidates_bfs(
                         if existing_parent == parent and _edge_key(existing_edge) == _edge_key(edge):
                             already = True
                             break
-                    if not already and len(parent_items) < 12:
+                    if not already and len(parent_items) < _PAIR_PARENT_FANIN_LIMIT:
                         parent_items.append((parent, edge))
 
         if visited_depth.get(target) == depth:
@@ -231,7 +314,7 @@ def _find_shortest_path_candidates_bfs(
         frontier = list(next_frontier)
 
     if shortest_depth is None:
-        return []
+        return [], meta
 
     paths: List[Dict[str, Any]] = []
     seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, int], ...]]] = set()
@@ -261,120 +344,110 @@ def _find_shortest_path_candidates_bfs(
             tuple(_edge_key(e) for e in (p.get("edges") or [])),
         )
     )
-    return paths[: int(candidate_limit)]
+    return paths[: int(candidate_limit)], meta
 
 
-def relation_types() -> List[str]:
-    now = time.time()
-    if _relation_cache["data"] and (now - _relation_cache["ts"] < 600):
-        return _relation_cache["data"]
-
-    s = get_session()
-    ngql = f"""
-    MATCH ()-[e:{EDGE_TAG}]-()
-    RETURN DISTINCT properties(e).relation AS relation
-LIMIT 5000;
-    """
-    res = s.execute(ngql)
-    if not res.is_succeeded():
-        raise HTTPException(status_code=500, detail=res.error_msg())
-
-    rels = []
-    vals = res.column_values("relation")
-    for v in vals:
-        r = str(vw(v) or "").strip()
-        if r:
-            rels.append(r)
-
-    rels = sorted(list(set(rels)))
-    _relation_cache["ts"] = now
-    _relation_cache["data"] = rels
-    return rels
+def relation_types(*, q: str = "", limit: int = 100, offset: int = 0) -> Dict[str, Any]:
+    try:
+        return metadata_service.query_relation_types(q=q, limit=limit, offset=offset)
+    except Exception as exc:
+        logger.warning("relation_types metadata fallback: %s", exc)
+        safe_limit = max(1, min(int(limit or 100), 200))
+        safe_offset = max(0, int(offset or 0))
+        return {
+            "items": [],
+            "q": str(q or "").strip().lower(),
+            "limit": safe_limit,
+            "offset": safe_offset,
+            "next_offset": None,
+            "has_more": False,
+            "matched_total": 0,
+        }
 
 
 def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
-    s = get_session()
-
     root = int(req.root_vid)
-    hop = max(1, min(int(req.hop or 1), 6))
-    rel_filter = set([r for r in (req.relations or []) if r])
+    requested_hop = int(req.hop or 1)
+    requested_max_nodes = int(req.max_nodes or 300)
+    requested_max_edges = int(req.max_edges or 20000)
 
-    max_nodes = int(req.max_nodes or 300)
-    max_edges = int(req.max_edges or 20000)
+    hop = max(1, min(requested_hop, graph_budget.subgraph_hop_max))
+    max_nodes = max(2, min(requested_max_nodes, graph_budget.subgraph_max_nodes_cap))
+    max_edges = max(1, min(requested_max_edges, graph_budget.subgraph_max_edges_cap))
+    rel_filter, dropped_relation_filter_terms = _normalize_rel_filter(
+        req.relations or [],
+        max_count=graph_budget.relation_filter_max,
+    )
+    query_scan_limit = max(
+        max_edges,
+        min(graph_budget.subgraph_query_edge_scan_cap, max_edges * 4),
+    )
 
     visited = set([root])
     frontier = [root]
 
     edges_all: List[Dict[str, Any]] = []
     nodes_all: List[int] = [root]
+    dropped_neighbors = 0
+    dropped_edges = 0
+    dropped_frontier = 0
+    scanned_rows = 0
+    dropped_rows_by_relation = 0
+    truncated = False
 
-    for _ in range(hop):
+    for _hop_idx in range(hop):
         if not frontier:
             break
 
-        id_list = ",".join(str(x) for x in frontier)
-        go_ngql = f"""
-        GO FROM {id_list} OVER {EDGE_TAG} BIDIRECT
-        YIELD src(edge) AS src, dst(edge) AS dst,
-              rank(edge) AS rank,
-              properties(edge).relation AS relation,
-              properties(edge).source AS esource
-        | LIMIT {max_edges};
-        """
-        go_res = s.execute(go_ngql)
-        if not go_res.is_succeeded():
-            raise HTTPException(status_code=500, detail=go_res.error_msg())
+        if len(frontier) > graph_budget.subgraph_frontier_cap:
+            dropped_frontier += len(frontier) - graph_budget.subgraph_frontier_cap
+            frontier = sorted(frontier)[: graph_budget.subgraph_frontier_cap]
+            truncated = True
 
-        srcs = go_res.column_values("src")
-        dsts = go_res.column_values("dst")
-        ranks = go_res.column_values("rank")
-        rels = go_res.column_values("relation")
-        esources = go_res.column_values("esource")
+        batch_edges, batch_meta = _go_edges_from(
+            frontier=frontier,
+            rel_filter=rel_filter,
+            query_scan_limit=query_scan_limit,
+            per_root_neighbor_cap=graph_budget.subgraph_per_root_neighbor_cap,
+            ignore_direction=True,
+        )
+        scanned_rows += int(batch_meta["scanned_rows"])
+        dropped_rows_by_relation += int(batch_meta["dropped_by_relation"])
+        dropped_neighbors += int(batch_meta["dropped_by_neighbor_cap"])
 
-        next_frontier = []
-        for i in range(len(srcs)):
-            src = int(vw(srcs[i]))
-            dst = int(vw(dsts[i]))
-            rank = int(vw(ranks[i]) or 0)
-            rel = str(vw(rels[i]) or "")
-            esrc = str(vw(esources[i]) or "")
+        next_frontier: List[int] = []
+        frontier_set = set(frontier)
+        for edge in batch_edges:
+            edges_all.append(edge)
 
-            if rel_filter and rel not in rel_filter:
-                continue
+            src = int(edge["source"])
+            dst = int(edge["target"])
+            for nid in (src, dst):
+                if nid in visited:
+                    continue
+                visited.add(nid)
+                nodes_all.append(nid)
+                if nid not in frontier_set:
+                    next_frontier.append(nid)
 
-            edges_all.append(
-                {
-                    "source": src,
-                    "target": dst,
-                    "rank": str(rank),
-                    "edge_type": config.EDGE_TYPE,
-                    "relation": rel,
-                    "source_db": esrc,
-                }
-            )
-
-            if dst not in visited:
-                visited.add(dst)
-                next_frontier.append(dst)
-                nodes_all.append(dst)
-
-            if src not in visited:
-                visited.add(src)
-                next_frontier.append(src)
-                nodes_all.append(src)
-
-            if len(visited) >= max_nodes:
-                pass
-
-        frontier = list(set(next_frontier))
+        frontier = sorted(set(next_frontier))
+        if len(edges_all) >= max_edges:
+            truncated = True
+            break
         if len(visited) >= max_nodes:
+            truncated = True
             break
 
     edges_all = uniq_edges(edges_all)
+    edges_all, dropped_by_edge_cap = _apply_edge_hard_cap(edges_all, max_edges=max_edges)
+    dropped_edges += int(dropped_by_edge_cap)
+    if dropped_by_edge_cap > 0:
+        truncated = True
 
     nodes_unique = sorted(set(nodes_all))
     dropped_nodes = 0
     if len(nodes_unique) > max_nodes:
+        before_trim = len(edges_all)
         kept_nodes, kept_edges, dropped_nodes = truncate_by_degree(
             root_vid=root,
             keep_forced=[root],
@@ -384,6 +457,8 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
         )
         nodes_unique = kept_nodes
         edges_all = kept_edges
+        dropped_edges += max(0, before_trim - len(kept_edges))
+        truncated = True
 
     vid_list = ",".join(str(x) for x in nodes_unique)
     fetch_ngql = f"""
@@ -398,7 +473,7 @@ def subgraph(req: SubgraphRequest) -> Dict[str, Any]:
 LIMIT {len(nodes_unique)};
     """
 
-    fres = s.execute(fetch_ngql)
+    fres = execute_ngql(fetch_ngql)
     if not fres.is_succeeded():
         raise HTTPException(status_code=500, detail=fres.error_msg())
 
@@ -431,6 +506,43 @@ LIMIT {len(nodes_unique)};
     edges_out = [
         e for e in edges_all if int(e["source"]) in kept_nodes_set and int(e["target"]) in kept_nodes_set
     ]
+    if len(edges_out) < len(edges_all):
+        dropped_edges += len(edges_all) - len(edges_out)
+        truncated = True
+
+    budget_applied = {
+        "api": "subgraph",
+        "requested": {
+            "hop": requested_hop,
+            "max_nodes": requested_max_nodes,
+            "max_edges": requested_max_edges,
+            "relation_filter_count": len(req.relations or []),
+        },
+        "applied": {
+            "hop": hop,
+            "max_nodes": max_nodes,
+            "max_edges": max_edges,
+            "relation_filter_count": len(rel_filter),
+            "relation_filter_max": graph_budget.relation_filter_max,
+            "frontier_cap": graph_budget.subgraph_frontier_cap,
+            "per_root_neighbor_cap": graph_budget.subgraph_per_root_neighbor_cap,
+            "query_edge_scan_limit": query_scan_limit,
+        },
+        "dropped": {
+            "relation_filter_terms": int(dropped_relation_filter_terms),
+            "frontier_nodes": int(dropped_frontier),
+            "rows_by_relation": int(dropped_rows_by_relation),
+            "rows_by_neighbor_cap": int(dropped_neighbors),
+        },
+        "scanned_rows": int(scanned_rows),
+    }
+    truncated = bool(
+        truncated
+        or dropped_nodes > 0
+        or dropped_edges > 0
+        or dropped_neighbors > 0
+        or dropped_relation_filter_terms > 0
+    )
 
     return {
         "root_vid": root,
@@ -439,74 +551,73 @@ LIMIT {len(nodes_unique)};
         "stats": {
             "node_count": len(nodes_out),
             "edge_count": len(edges_out),
-            "truncated": (dropped_nodes > 0),
-            "dropped_nodes": dropped_nodes,
+            "truncated": bool(truncated),
+            "dropped_nodes": int(dropped_nodes),
+            "dropped_edges": int(dropped_edges),
+            "dropped_neighbors": int(dropped_neighbors),
+            "budget_applied": budget_applied,
         },
     }
 
 
 def expand(req: ExpandRequest) -> Dict[str, Any]:
-    s = get_session()
-
     from_vid = int(req.from_vid)
-    rel_filter = set([r for r in (req.relations or []) if r])
-    existing = set(int(x) for x in (req.existing_node_ids or []))
+    requested_max_nodes = int(req.max_nodes or 300)
+    requested_max_edges = int(req.max_edges or 20000)
+    requested_existing_count = len(req.existing_node_ids or [])
+    rel_filter, dropped_relation_filter_terms = _normalize_rel_filter(
+        req.relations or [],
+        max_count=graph_budget.relation_filter_max,
+    )
 
-    max_nodes = int(req.max_nodes or 300)
-    max_edges = int(req.max_edges or 20000)
+    existing_items = [int(x) for x in (req.existing_node_ids or [])]
+    if len(existing_items) > graph_budget.expand_existing_node_cap:
+        existing_items = existing_items[: graph_budget.expand_existing_node_cap]
+    existing = set(existing_items)
 
-    go_ngql = f"""
-    GO FROM {from_vid} OVER {EDGE_TAG} BIDIRECT
-    YIELD src(edge) AS src, dst(edge) AS dst,
-          rank(edge) AS rank,
-          properties(edge).relation AS relation,
-          properties(edge).source AS esource
-    | LIMIT {max_edges};
-    """
-    go_res = s.execute(go_ngql)
-    if not go_res.is_succeeded():
-        raise HTTPException(status_code=500, detail=go_res.error_msg())
+    max_nodes = max(2, min(requested_max_nodes, graph_budget.expand_max_nodes_cap))
+    max_edges = max(1, min(requested_max_edges, graph_budget.expand_max_edges_cap))
+    query_scan_limit = max(
+        max_edges,
+        min(graph_budget.expand_query_edge_scan_cap, max_edges * 4),
+    )
 
-    srcs = go_res.column_values("src")
-    dsts = go_res.column_values("dst")
-    ranks = go_res.column_values("rank")
-    rels = go_res.column_values("relation")
-    esources = go_res.column_values("esource")
+    batch_edges, batch_meta = _go_edges_from(
+        frontier=[from_vid],
+        rel_filter=rel_filter,
+        query_scan_limit=query_scan_limit,
+        per_root_neighbor_cap=graph_budget.expand_per_root_neighbor_cap,
+        ignore_direction=True,
+    )
+    dropped_neighbors = int(batch_meta["dropped_by_neighbor_cap"])
+    dropped_rows_by_relation = int(batch_meta["dropped_by_relation"])
+    scanned_rows = int(batch_meta["scanned_rows"])
 
     edges_all = []
     cand_nodes = set(existing)
     cand_nodes.add(from_vid)
+    dropped_edges = 0
+    truncated = False
 
-    for i in range(len(srcs)):
-        src = int(vw(srcs[i]))
-        dst = int(vw(dsts[i]))
-        rank = int(vw(ranks[i]) or 0)
-        rel = str(vw(rels[i]) or "")
-        esrc = str(vw(esources[i]) or "")
-
-        if rel_filter and rel not in rel_filter:
-            continue
-
-        edges_all.append(
-            {
-                "source": src,
-                "target": dst,
-                "rank": str(rank),
-                "edge_type": config.EDGE_TYPE,
-                "relation": rel,
-                "source_db": esrc,
-            }
-        )
+    for edge in batch_edges:
+        src = int(edge["source"])
+        dst = int(edge["target"])
+        edges_all.append(edge)
         cand_nodes.add(src)
         cand_nodes.add(dst)
 
     edges_all = uniq_edges(edges_all)
+    edges_all, dropped_by_edge_cap = _apply_edge_hard_cap(edges_all, max_edges=max_edges)
+    dropped_edges += int(dropped_by_edge_cap)
+    if dropped_by_edge_cap > 0:
+        truncated = True
 
     dropped_nodes = 0
     kept_nodes = sorted(cand_nodes)
     kept_edges = edges_all
 
     if len(cand_nodes) > max_nodes:
+        before_trim = len(kept_edges)
         keep_forced = list(existing) + [from_vid]
         kept_nodes, kept_edges, dropped_nodes = truncate_by_degree(
             root_vid=from_vid,
@@ -515,6 +626,8 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
             edges_all=edges_all,
             max_nodes=max_nodes,
         )
+        dropped_edges += max(0, before_trim - len(kept_edges))
+        truncated = True
 
     kept_set = set(kept_nodes)
 
@@ -533,7 +646,7 @@ def expand(req: ExpandRequest) -> Dict[str, Any]:
                v.`Entity`.`description` AS descr
 LIMIT {len(new_node_ids)};
         """
-        fres = s.execute(fetch_ngql)
+        fres = execute_ngql(fetch_ngql)
         if not fres.is_succeeded():
             raise HTTPException(status_code=500, detail=fres.error_msg())
 
@@ -562,17 +675,63 @@ LIMIT {len(new_node_ids)};
                 }
             )
 
+    pre_filter_edges = len(kept_edges)
     kept_edges = [e for e in kept_edges if int(e["source"]) in kept_set and int(e["target"]) in kept_set]
+    if len(kept_edges) < pre_filter_edges:
+        dropped_edges += pre_filter_edges - len(kept_edges)
+        truncated = True
     new_set = set(new_node_ids)
     added_edges = [e for e in kept_edges if int(e["source"]) in new_set or int(e["target"]) in new_set]
+
+    budget_applied = {
+        "api": "expand",
+        "requested": {
+            "max_nodes": requested_max_nodes,
+            "max_edges": requested_max_edges,
+            "relation_filter_count": len(req.relations or []),
+            "existing_node_ids_count": requested_existing_count,
+        },
+        "applied": {
+            "max_nodes": max_nodes,
+            "max_edges": max_edges,
+            "relation_filter_count": len(rel_filter),
+            "relation_filter_max": graph_budget.relation_filter_max,
+            "existing_node_ids_count": len(existing),
+            "existing_node_ids_cap": graph_budget.expand_existing_node_cap,
+            "per_root_neighbor_cap": graph_budget.expand_per_root_neighbor_cap,
+            "query_edge_scan_limit": query_scan_limit,
+        },
+        "dropped": {
+            "relation_filter_terms": int(dropped_relation_filter_terms),
+            "rows_by_relation": int(dropped_rows_by_relation),
+            "rows_by_neighbor_cap": int(dropped_neighbors),
+            "existing_node_ids": max(0, requested_existing_count - len(existing)),
+        },
+        "scanned_rows": int(scanned_rows),
+    }
+    truncated = bool(
+        truncated
+        or dropped_nodes > 0
+        or dropped_edges > 0
+        or dropped_neighbors > 0
+        or dropped_relation_filter_terms > 0
+        or requested_existing_count > len(existing)
+    )
 
     return {
         "added_nodes": added_nodes,
         "added_edges": added_edges,
         "stats": {
             "node_count_after": len(kept_set),
-            "dropped_nodes": dropped_nodes,
+            "edge_count_after": len(kept_edges),
+            "added_nodes": len(added_nodes),
+            "added_edges": len(added_edges),
+            "truncated": bool(truncated),
+            "dropped_nodes": int(dropped_nodes),
+            "dropped_edges": int(dropped_edges),
+            "dropped_neighbors": int(dropped_neighbors),
             "policy": "degree",
+            "budget_applied": budget_applied,
         },
     }
 
@@ -581,6 +740,12 @@ def _build_multi_entity_graph(
     req: MultiEntityGraphRequest,
     choice_overrides: Optional[Dict[Tuple[int, int], int]] = None,
 ) -> Dict[str, Any]:
+    requested_vid_count = len(req.vids or [])
+    requested_max_nodes = int(req.max_nodes or 300)
+    requested_max_edges = int(req.max_edges or 20000)
+    requested_k = int(req.k or 2)
+    requested_rel_filter_count = len(req.relations or [])
+
     vids_raw = req.vids or []
     selected_vids: List[int] = []
     seen_vid = set()
@@ -592,42 +757,54 @@ def _build_multi_entity_graph(
         selected_vids.append(iv)
 
     if len(selected_vids) < 2:
-        raise HTTPException(status_code=400, detail="vids must contain at least 2 entities")
-    if len(selected_vids) > _MAX_MULTI_VIDS:
-        raise HTTPException(status_code=400, detail=f"vids exceeds max slots {_MAX_MULTI_VIDS}")
+        raise _budget_error("vids must contain at least 2 entities")
+    if len(selected_vids) > graph_budget.multi_root_cap:
+        raise _budget_error(
+            f"vids exceeds max slots {graph_budget.multi_root_cap}",
+            code="graph_root_overflow",
+        )
 
-    max_nodes = max(2, min(int(req.max_nodes or 300), _MAX_MULTI_NODE_LIMIT))
-    max_edges = max(1, min(int(req.max_edges or 20000), _MAX_MULTI_QUERY_EDGES))
+    max_nodes = max(2, min(requested_max_nodes, graph_budget.multi_max_nodes_cap))
+    max_edges = max(1, min(requested_max_edges, graph_budget.multi_max_edges_cap))
     if len(selected_vids) > max_nodes:
-        raise HTTPException(status_code=400, detail="max_nodes is smaller than selected vids count")
+        raise _budget_error("max_nodes is smaller than selected vids count")
 
-    raw_k = int(req.k or 2)
-    if raw_k > _MAX_MULTI_HOP:
-        raise HTTPException(status_code=400, detail=f"k exceeds max {_MAX_MULTI_HOP}")
-    if raw_k < 1:
-        raise HTTPException(status_code=400, detail="k must be >= 1")
-    k = raw_k
-    rel_filter = _normalize_rel_filter(req.relations or [])
+    k = max(1, min(requested_k, graph_budget.multi_k_max))
+    rel_filter, dropped_relation_filter_terms = _normalize_rel_filter(
+        req.relations or [],
+        max_count=graph_budget.relation_filter_max,
+    )
     ignore_direction = bool(req.ignore_direction)
     explain_enabled = bool(req.explain_paths) and (not bool(req.direct_only))
     auto_apply_limit = 1 if int(req.per_pair_path_limit or 1) >= 1 else 0
+    pair_candidate_limit = graph_budget.multi_pair_candidate_cap
+    query_limit = max(
+        max_edges,
+        min(graph_budget.multi_query_edge_scan_cap, max_edges * 4),
+    )
 
     edge_map: Dict[Tuple[int, int, int, str, str], Dict[str, Any]] = {}
     node_ids: Set[int] = set(selected_vids)
     selected_set = set(selected_vids)
     truncated = False
+    dropped_neighbors = 0
+    dropped_rows_by_relation = 0
+    scanned_rows = 0
     explained_pairs = 0
     path_candidates: List[Dict[str, Any]] = []
     unconnected_pairs: List[str] = []
 
     # direct edges among selected entities
-    query_limit = min(max(max_edges, 20000), _MAX_MULTI_QUERY_EDGES)
-    direct_candidates = _go_edges_from(
+    direct_candidates, direct_meta = _go_edges_from(
         selected_vids,
         rel_filter=rel_filter,
-        max_edges=query_limit,
+        query_scan_limit=query_limit,
+        per_root_neighbor_cap=graph_budget.multi_per_root_neighbor_cap,
         ignore_direction=ignore_direction,
     )
+    scanned_rows += int(direct_meta["scanned_rows"])
+    dropped_neighbors += int(direct_meta["dropped_by_neighbor_cap"])
+    dropped_rows_by_relation += int(direct_meta["dropped_by_relation"])
     direct_edges = [
         e
         for e in direct_candidates
@@ -670,15 +847,19 @@ def _build_multi_entity_graph(
                     )
                     continue
 
-                raw_paths = _find_shortest_path_candidates_bfs(
+                raw_paths, path_meta = _find_shortest_path_candidates_bfs(
                     src=src,
                     dst=dst,
                     max_hop=k,
                     rel_filter=rel_filter,
-                    max_edges=query_limit,
+                    query_scan_limit=query_limit,
+                    per_root_neighbor_cap=graph_budget.multi_per_root_neighbor_cap,
                     ignore_direction=ignore_direction,
-                    candidate_limit=_PAIR_CAND_LIMIT,
+                    candidate_limit=pair_candidate_limit,
                 )
+                scanned_rows += int(path_meta["scanned_rows"])
+                dropped_neighbors += int(path_meta["dropped_by_neighbor_cap"])
+                dropped_rows_by_relation += int(path_meta["dropped_by_relation"])
                 if not raw_paths:
                     unconnected_pairs.append(f"{pair_key[0]}-{pair_key[1]}")
                     path_candidates.append(
@@ -827,6 +1008,45 @@ def _build_multi_entity_graph(
 
     unconnected = [v for v in selected_vids if v not in connected_selected]
     direct_edge_count = sum(1 for e in edges_out if not bool(e.get("is_explain", False)))
+    budget_applied = {
+        "api": "multi_entity_graph",
+        "requested": {
+            "vids_count": requested_vid_count,
+            "k": requested_k,
+            "max_nodes": requested_max_nodes,
+            "max_edges": requested_max_edges,
+            "relation_filter_count": requested_rel_filter_count,
+        },
+        "applied": {
+            "vids_count": len(selected_vids),
+            "vids_cap": graph_budget.multi_root_cap,
+            "k": k,
+            "k_cap": graph_budget.multi_k_max,
+            "max_nodes": max_nodes,
+            "max_nodes_cap": graph_budget.multi_max_nodes_cap,
+            "max_edges": max_edges,
+            "max_edges_cap": graph_budget.multi_max_edges_cap,
+            "relation_filter_count": len(rel_filter),
+            "relation_filter_cap": graph_budget.relation_filter_max,
+            "pair_candidate_cap": pair_candidate_limit,
+            "per_root_neighbor_cap": graph_budget.multi_per_root_neighbor_cap,
+            "query_edge_scan_limit": query_limit,
+        },
+        "dropped": {
+            "relation_filter_terms": int(dropped_relation_filter_terms),
+            "rows_by_relation": int(dropped_rows_by_relation),
+            "rows_by_neighbor_cap": int(dropped_neighbors),
+        },
+        "scanned_rows": int(scanned_rows),
+    }
+    truncated = bool(
+        truncated
+        or dropped_nodes > 0
+        or dropped_edges > 0
+        or dropped_neighbors > 0
+        or dropped_relation_filter_terms > 0
+        or requested_k != k
+    )
 
     return {
         "nodes": nodes_out,
@@ -840,8 +1060,10 @@ def _build_multi_entity_graph(
             "truncated": bool(truncated),
             "dropped_nodes": int(dropped_nodes),
             "dropped_edges": int(dropped_edges),
+            "dropped_neighbors": int(dropped_neighbors),
             "node_count": len(nodes_out),
             "edge_count": len(edges_out),
+            "budget_applied": budget_applied,
         },
         "path_candidates": path_candidates,
     }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   edgeDetail as edgeDetailApi,
@@ -11,11 +11,8 @@ import {
   relationTypes as relationTypesApi,
   search as searchApi,
 } from "./api/kg";
-import { GraphCanvas } from "./components/GraphCanvas";
 import { LeftSearchPanel } from "./components/LeftSearchPanel";
-import { RelationFilterPanel } from "./components/RelationFilter/RelationFilterPanel";
 import { Resizer } from "./components/Resizer";
-import { RightDetailPanel } from "./components/RightDetailPanel";
 import { TopBar } from "./components/TopBar";
 import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
@@ -24,6 +21,7 @@ import { useRawIdSuggest } from "./hooks/useRawIdSuggest";
 import { useRelationFilter } from "./hooks/useRelationFilter";
 import { useSuggest } from "./hooks/useSuggest";
 import { useVisibilityRanking } from "./hooks/useVisibilityRanking";
+import { parseApiError } from "./utils/httpError";
 import type {
   EdgeDetailResp,
   EdgePatchResp,
@@ -34,6 +32,7 @@ import type {
   NodeDetailResp,
   NodePatchResp,
   PairPathCandidate,
+  RelationTypeItem,
   RawIdSuggestItem,
   SearchResp,
   Sel,
@@ -61,12 +60,25 @@ type MultiGraphRequest = {
   ignore_direction: boolean;
 };
 
+type UiNotice = {
+  level: "error" | "warn" | "info";
+  message: string;
+};
+
 const LEFT_WIDTH_KEY = "kg:leftW";
 const RIGHT_WIDTH_KEY = "kg:rightW";
 const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_DEFAULT_WIDTH = 420;
 const EDGE_TYPE_DEFAULT = "REL2";
+const RELATION_TYPES_PAGE_SIZE = 100;
+const GraphCanvas = lazy(() => import("./components/GraphCanvas").then((mod) => ({ default: mod.GraphCanvas })));
+const RightDetailPanel = lazy(() =>
+  import("./components/RightDetailPanel").then((mod) => ({ default: mod.RightDetailPanel }))
+);
+const RelationFilterPanel = lazy(() =>
+  import("./components/RelationFilter/RelationFilterPanel").then((mod) => ({ default: mod.RelationFilterPanel }))
+);
 
 function clampSidebarWidth(next: number) {
   return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(next)));
@@ -80,17 +92,57 @@ function loadSidebarWidth(key: string) {
   return clampSidebarWidth(parsed);
 }
 
+function mergeRelationTypeItems(prev: RelationTypeItem[], next: RelationTypeItem[]) {
+  const merged = new Map<string, RelationTypeItem>();
+  for (const item of prev) {
+    const key = String(item.relation_type || "").trim();
+    if (!key) continue;
+    merged.set(key, item);
+  }
+  for (const item of next) {
+    const key = String(item.relation_type || "").trim();
+    if (!key) continue;
+    merged.set(key, item);
+  }
+  return Array.from(merged.values());
+}
+
+function LoadingPanel({ message, style }: { message: string; style?: CSSProperties }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        placeItems: "center",
+        minHeight: 160,
+        color: "#666",
+        fontSize: 13,
+        background: "#fff",
+        ...style,
+      }}
+    >
+      {message}
+    </div>
+  );
+}
+
 export default function App() {
   const [q, setQ] = useState("");
   const [searchName, setSearchName] = useState(true);
-  const [searchDesc, setSearchDesc] = useState(true);
+  const [searchDesc, setSearchDesc] = useState(false);
   const [entityType, setEntityType] = useState("");
   const [entityRawId, setEntityRawId] = useState("");
   const [source, setSource] = useState("");
   const [loadingSearch, setLoadingSearch] = useState(false);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const [searchData, setSearchData] = useState<SearchResp>({ nodes: [], edges: [], total_candidates: 0 });
+  const [searchSelectedVid, setSearchSelectedVid] = useState<number | null>(null);
+  const [uiNotice, setUiNotice] = useState<UiNotice | null>(null);
 
-  const { options: entityTypeOptions, usedFallback: entityTypeFallbackUsed } = useEntityTypeOptions();
+  const {
+    options: entityTypeOptions,
+    usedFallback: entityTypeFallbackUsed,
+    ensureLoaded: ensureEntityTypesLoaded,
+  } = useEntityTypeOptions({ deferMs: 1200 });
 
   const [edgeQ, setEdgeQ] = useState("");
   const [edgeSearchInRelation, setEdgeSearchInRelation] = useState(true);
@@ -117,7 +169,12 @@ export default function App() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedEdgeGraphId, setSelectedEdgeGraphId] = useState<string | null>(null);
 
-  const [relationTypes, setRelationTypes] = useState<string[]>([]);
+  const [relationTypeCatalogItems, setRelationTypeCatalogItems] = useState<RelationTypeItem[]>([]);
+  const [relationTypeCatalogQuery, setRelationTypeCatalogQuery] = useState("");
+  const [relationTypeCatalogMatchedTotal, setRelationTypeCatalogMatchedTotal] = useState(0);
+  const [relationTypeCatalogNextOffset, setRelationTypeCatalogNextOffset] = useState<number | null>(0);
+  const [relationTypeCatalogHasMore, setRelationTypeCatalogHasMore] = useState(false);
+  const [relationTypeCatalogLoading, setRelationTypeCatalogLoading] = useState(false);
 
   const [renderNodeLabels, setRenderNodeLabels] = useState(true);
   const [renderEdgeLabels, setRenderEdgeLabels] = useState(false);
@@ -131,19 +188,19 @@ export default function App() {
   const applyHighlightRef =
     useRef<((nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void) | null>(null);
 
-  async function loadNodeDetail(vid: number) {
+  const loadNodeDetail = useCallback(async (vid: number) => {
     setDetailLoading(true);
     try {
       setNodeDetail(await nodeDetailApi(vid));
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `节点详情加载失败：${parsed.message}` });
     } finally {
       setDetailLoading(false);
     }
-  }
+  }, []);
 
-  async function loadEdgeDetail(src: number, dst: number, rank: string, edgeType = EDGE_TYPE_DEFAULT) {
+  const loadEdgeDetail = useCallback(async (src: number, dst: number, rank: string, edgeType = EDGE_TYPE_DEFAULT) => {
     setDetailLoading(true);
     try {
       setEdgeDetail(
@@ -155,12 +212,12 @@ export default function App() {
         })
       );
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `边详情加载失败：${parsed.message}` });
     } finally {
       setDetailLoading(false);
     }
-  }
+  }, []);
 
   async function saveNodeEdit(
     vid: number,
@@ -317,10 +374,14 @@ export default function App() {
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,
+    budgetPresetLabel,
+    canLoadMoreEdges,
+    loadMoreEdges,
   } = useGraphData({
     selectedNodeVid,
     onSelectNode: handleSelectNode,
     onClearSelection: handleClearSelection,
+    onNotice: (level, message) => setUiNotice({ level, message }),
   });
 
   const graphBusy = loadingGraph || loadingMultiGraph || loadingApplyPathChoice;
@@ -452,7 +513,12 @@ export default function App() {
     if (!qTrimmed && !rawIdTrimmed) return;
 
     const useRawId = !!rawIdTrimmed;
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+
     setLoadingSearch(true);
+    setUiNotice(null);
     try {
       const json = await searchApi({
         q: useRawId ? "" : nextQ,
@@ -462,13 +528,30 @@ export default function App() {
         source: source || null,
         entity_raw_id: rawIdTrimmed || null,
         entity_raw_id_mode: "contains",
+        include_edges: false,
+        signal: controller.signal,
       });
       setSearchData(json);
+      const firstVid = (json.nodes || [])[0]?.id;
+      setSearchSelectedVid(Number.isFinite(firstVid) ? Number(firstVid) : null);
+      const includeEdgesNote =
+        typeof json.meta === "object" && json.meta
+          ? String((json.meta as Record<string, unknown>).include_edges_legacy_note || "")
+          : "";
+      if (includeEdgesNote) {
+        setUiNotice({ level: "info", message: includeEdgesNote });
+      }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      if (e instanceof Error && e.name === "AbortError") {
+        return;
+      }
+      const parsed = parseApiError(e);
+      const base = parsed.message || "搜索失败";
+      setUiNotice({ level: "error", message: `搜索失败：${base}` });
     } finally {
-      setLoadingSearch(false);
+      if (searchAbortRef.current === controller) {
+        setLoadingSearch(false);
+      }
     }
   }
 
@@ -476,6 +559,12 @@ export default function App() {
     await runSearchWithParams(q, entityRawId);
   }
 
+
+  useEffect(() => {
+    return () => {
+      searchAbortRef.current?.abort();
+    };
+  }, []);
   async function runEdgeSearch() {
     if (!edgeQ.trim()) return;
     setLoadingEdgeSearch(true);
@@ -491,8 +580,8 @@ export default function App() {
       });
       setEdgeSearchData(json);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `边搜索失败：${parsed.message}` });
     } finally {
       setLoadingEdgeSearch(false);
     }
@@ -509,7 +598,7 @@ export default function App() {
 
     if (selectedEntities.length < 2) return;
     if (selectedEntities.length > 8) {
-      alert("多实体关系最多支持 8 个实体，请减少选择后重试。");
+      setUiNotice({ level: "warn", message: "多实体关系最多支持 8 个实体，请减少选择后重试。" });
       return;
     }
 
@@ -517,7 +606,7 @@ export default function App() {
     const reqRelations = overrideRelations ?? relations;
     const safeK = params.k > 3 ? 3 : params.k < 2 ? 2 : params.k;
     if (safeK !== params.k) {
-      alert(`k 已自动调整为 ${safeK}（当前仅支持 2~3）。`);
+      setUiNotice({ level: "info", message: `k 已自动调整为 ${safeK}（当前仅支持 2~3）。` });
     }
     const reqBody: MultiGraphRequest = {
       vids,
@@ -536,9 +625,15 @@ export default function App() {
     try {
       const json = await multiEntityGraphApi(reqBody);
       applyMultiGraphPayload(json, selectedEntities, vids[0], { ...params, k: safeK as 2 | 3 }, reqBody);
+      if (json.stats?.truncated) {
+        setUiNotice({
+          level: "warn",
+          message: `多实体图结果已裁剪：dropped_nodes=${Number(json.stats?.dropped_nodes || 0)} dropped_edges=${Number(json.stats?.dropped_edges || 0)} dropped_neighbors=${Number(json.stats?.dropped_neighbors || 0)}`,
+        });
+      }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `多实体图生成失败：${parsed.message}` });
     } finally {
       setLoadingMultiGraph(false);
     }
@@ -595,9 +690,15 @@ export default function App() {
       const selectedEntities = lastMultiGraphParams.selectedEntities;
       const nextRoot = selectedEntities[0]?.vid ?? lastMultiGraphRequest.vids[0];
       applyMultiGraphPayload(json, selectedEntities, nextRoot, lastMultiGraphParams, lastMultiGraphRequest);
+      if (json.stats?.truncated) {
+        setUiNotice({
+          level: "warn",
+          message: `路径应用后图结果被裁剪：dropped_nodes=${Number(json.stats?.dropped_nodes || 0)} dropped_edges=${Number(json.stats?.dropped_edges || 0)} dropped_neighbors=${Number(json.stats?.dropped_neighbors || 0)}`,
+        });
+      }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `路径应用失败：${parsed.message}` });
     } finally {
       setLoadingApplyPathChoice(false);
     }
@@ -644,11 +745,11 @@ export default function App() {
     const maxNodes = Math.max(2, Number(lastMultiGraphRequest.max_nodes || 300));
     const maxEdges = Math.max(1, Number(lastMultiGraphRequest.max_edges || 20000));
     if (nodeMap.size > maxNodes) {
-      alert(`追加失败：节点数将超过上限 ${maxNodes}。请提高 max_nodes 或改用替换。`);
+      setUiNotice({ level: "warn", message: `追加失败：节点数将超过上限 ${maxNodes}。请提高 max_nodes 或改用替换。` });
       return;
     }
     if (edgeMap.size > maxEdges) {
-      alert(`追加失败：边数将超过上限 ${maxEdges}。请提高 max_edges 或改用替换。`);
+      setUiNotice({ level: "warn", message: `追加失败：边数将超过上限 ${maxEdges}。请提高 max_edges 或改用替换。` });
       return;
     }
 
@@ -679,6 +780,16 @@ export default function App() {
     clearMultiPathState();
     await loadSubgraph(vid);
     if (autoSelectRoot) handleSelectNode(vid);
+  }
+
+  async function loadSelectedSearchSubgraph(vidOverride?: number) {
+    const targetVid = Number.isFinite(vidOverride as number) ? Number(vidOverride) : searchSelectedVid;
+    if (targetVid == null) {
+      setUiNotice({ level: "info", message: "请先在搜索结果中选择一个节点作为 root。" });
+      return;
+    }
+    setSearchSelectedVid(targetVid);
+    await loadSingleSubgraph(targetVid);
   }
 
   async function reloadGraphByCurrentMode(nextRoot: number) {
@@ -831,16 +942,74 @@ export default function App() {
   }, [panelGroups, setPanelGroupCollapsed]);
 
   useEffect(() => {
-    async function loadRelationTypes() {
-      try {
-        setRelationTypes(await relationTypesApi());
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.warn(msg);
-      }
+    if (!relationFilter.open) return;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      setRelationTypeCatalogLoading(true);
+      void relationTypesApi({
+        q: relationTypeCatalogQuery,
+        limit: RELATION_TYPES_PAGE_SIZE,
+        offset: 0,
+        signal: controller.signal,
+      })
+        .then((resp) => {
+          setRelationTypeCatalogItems(resp.items);
+          setRelationTypeCatalogMatchedTotal(resp.matched_total);
+          setRelationTypeCatalogNextOffset(resp.next_offset);
+          setRelationTypeCatalogHasMore(resp.has_more);
+        })
+        .catch((e: unknown) => {
+          if (e instanceof Error && e.name === "AbortError") return;
+          const parsed = parseApiError(e);
+          setUiNotice({ level: "warn", message: `关系类型列表加载失败：${parsed.message}` });
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setRelationTypeCatalogLoading(false);
+        });
+    }, 180);
+
+    return () => {
+      controller.abort();
+      window.clearTimeout(timeoutId);
+    };
+  }, [relationFilter.open, relationTypeCatalogQuery]);
+
+  const handleLoadMoreRelationTypes = useCallback(async () => {
+    if (relationTypeCatalogLoading) return;
+    if (!relationTypeCatalogHasMore || relationTypeCatalogNextOffset == null) return;
+    setRelationTypeCatalogLoading(true);
+    try {
+      const resp = await relationTypesApi({
+        q: relationTypeCatalogQuery,
+        limit: RELATION_TYPES_PAGE_SIZE,
+        offset: relationTypeCatalogNextOffset,
+      });
+      setRelationTypeCatalogItems((prev) => mergeRelationTypeItems(prev, resp.items));
+      setRelationTypeCatalogMatchedTotal(resp.matched_total);
+      setRelationTypeCatalogNextOffset(resp.next_offset);
+      setRelationTypeCatalogHasMore(resp.has_more);
+    } catch (e: unknown) {
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "warn", message: `关系类型列表加载失败：${parsed.message}` });
+    } finally {
+      setRelationTypeCatalogLoading(false);
     }
-    void loadRelationTypes();
-  }, []);
+  }, [
+    relationTypeCatalogHasMore,
+    relationTypeCatalogLoading,
+    relationTypeCatalogNextOffset,
+    relationTypeCatalogQuery,
+  ]);
+
+  function handleOpenRelationFilter() {
+    setRelationTypeCatalogItems([]);
+    setRelationTypeCatalogQuery("");
+    setRelationTypeCatalogMatchedTotal(0);
+    setRelationTypeCatalogNextOffset(0);
+    setRelationTypeCatalogHasMore(false);
+    setRelationTypeCatalogLoading(false);
+    relationFilter.openPanel();
+  }
 
   const currentVisibleEdgeLabelDisplays = useMemo(() => {
     const set = new Set<string>();
@@ -880,7 +1049,11 @@ export default function App() {
     setEdgeLabelSelectionTouched(true);
     setEdgeLabelSelectedDisplays((prev) => {
       const s = new Set(prev);
-      s.has(disp) ? s.delete(disp) : s.add(disp);
+      if (s.has(disp)) {
+        s.delete(disp);
+      } else {
+        s.add(disp);
+      }
       return Array.from(s).sort((a, b) => a.localeCompare(b));
     });
   }
@@ -938,27 +1111,30 @@ export default function App() {
     return { g6Data: { nodes, edges }, edgeById: edgeMap };
   }, [visibleGraphNodes, visibleGraphEdges, rootVid, visibleNodeHopLevelMap, multiSeedVidSet]);
 
-  function selectEdgeWithDetail(target: EdgeSearchItem, edgeId: string | null) {
-    const source_db = target.source_db ? String(target.source_db) : undefined;
-    const rank = String(target.rank || "0");
-    const edge_type = String(target.edge_type || EDGE_TYPE_DEFAULT);
-    setSelectedEdgeGraphId(edgeId);
-    setSel({
-      kind: "edge",
-      src: Number(target.src),
-      dst: Number(target.dst),
-      rank,
-      edge_type,
-      relation: String(target.relation || ""),
-      source_db,
-    });
-    setNodeDetail(null);
-    void loadEdgeDetail(Number(target.src), Number(target.dst), rank, edge_type);
+  const selectEdgeWithDetail = useCallback(
+    (target: EdgeSearchItem, edgeId: string | null) => {
+      const source_db = target.source_db ? String(target.source_db) : undefined;
+      const rank = String(target.rank || "0");
+      const edge_type = String(target.edge_type || EDGE_TYPE_DEFAULT);
+      setSelectedEdgeGraphId(edgeId);
+      setSel({
+        kind: "edge",
+        src: Number(target.src),
+        dst: Number(target.dst),
+        rank,
+        edge_type,
+        relation: String(target.relation || ""),
+        source_db,
+      });
+      setNodeDetail(null);
+      void loadEdgeDetail(Number(target.src), Number(target.dst), rank, edge_type);
 
-    if (edgeId) {
-      applyHighlightRef.current?.(null, edgeId, true);
-    }
-  }
+      if (edgeId) {
+        applyHighlightRef.current?.(null, edgeId, true);
+      }
+    },
+    [loadEdgeDetail]
+  );
 
   function trySelectEdgeFromCurrentRenderedGraph(target: EdgeSearchItem): boolean {
     const edgeId = findEdgeIdByIdentity(edgeById, {
@@ -1019,11 +1195,11 @@ export default function App() {
     } else {
       const msg = "该边不在当前 hop/relations 限制下可见，请提高 hop 或调整关系筛选后重试。";
       setEdgeSearchNotice(msg);
-      alert(msg);
+      setUiNotice({ level: "warn", message: msg });
     }
 
     setPendingEdgeLocate(null);
-  }, [pendingEdgeLocate, loadingGraph, loadingMultiGraph, edgeById, rootVid, graphEdges]);
+  }, [pendingEdgeLocate, loadingGraph, loadingMultiGraph, edgeById, rootVid, graphEdges, selectEdgeWithDetail]);
 
   const selectedNodeBrief = useMemo(() => {
     if (sel.kind !== "node") return null;
@@ -1052,6 +1228,7 @@ export default function App() {
   function handleSearchClick() {
     closeSuggestPanel();
     closeRawIdSuggestPanel();
+    void ensureEntityTypesLoaded();
     void runSearch();
   }
 
@@ -1089,6 +1266,53 @@ export default function App() {
 
   return (
     <div className="kg-layout" style={layoutStyle}>
+      {uiNotice ? (
+        <div
+          style={{
+            position: "fixed",
+            top: 8,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1000,
+            maxWidth: 980,
+            minWidth: 320,
+            padding: "10px 14px",
+            borderRadius: 8,
+            border:
+              uiNotice.level === "error"
+                ? "1px solid #ffccc7"
+                : uiNotice.level === "warn"
+                  ? "1px solid #ffe58f"
+                  : "1px solid #91caff",
+            background:
+              uiNotice.level === "error"
+                ? "#fff2f0"
+                : uiNotice.level === "warn"
+                  ? "#fffbe6"
+                  : "#e6f4ff",
+            color:
+              uiNotice.level === "error"
+                ? "#a8071a"
+                : uiNotice.level === "warn"
+                  ? "#874d00"
+                  : "#003a8c",
+            fontSize: 13,
+            boxShadow: "0 6px 20px rgba(0,0,0,0.12)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <span>{uiNotice.message}</span>
+          <button
+            onClick={() => setUiNotice(null)}
+            style={{ border: "none", background: "transparent", cursor: "pointer", color: "inherit" }}
+          >
+            关闭
+          </button>
+        </div>
+      ) : null}
       <div className="kg-pane kg-pane-left">
         <LeftSearchPanel
           q={q}
@@ -1127,8 +1351,14 @@ export default function App() {
           onSelectRawIdSuggestItem={selectRawIdSuggestCandidate}
           searchData={searchData}
           rootVid={rootVid}
-          onLoadSubgraph={(vid) => {
-            void loadSingleSubgraph(vid);
+          searchSelectedVid={searchSelectedVid}
+          onSelectSearchResultNode={(vid) => setSearchSelectedVid(vid)}
+          onLoadSelectedSubgraph={(vid) => {
+            void loadSelectedSearchSubgraph(vid);
+          }}
+          graphLoadBusy={graphBusy}
+          onEntityTypeDemandLoad={() => {
+            void ensureEntityTypesLoaded();
           }}
           edgeQ={edgeQ}
           onEdgeQChange={onEdgeInputChange}
@@ -1183,10 +1413,15 @@ export default function App() {
           <TopBar
             rootVid={rootVid}
             loadingGraph={graphBusy}
+            graphBudgetLabel={budgetPresetLabel}
+            canLoadMoreEdges={canLoadMoreEdges}
+            onLoadMoreEdges={() => {
+              void loadMoreEdges();
+            }}
             hop={hop}
             setHop={setHop}
             relations={relations}
-            onOpenRelationFilter={relationFilter.openPanel}
+            onOpenRelationFilter={handleOpenRelationFilter}
             onClearRelationsAndReload={() => {
               void (async () => {
                 const nextRelations: string[] = [];
@@ -1204,128 +1439,143 @@ export default function App() {
         </div>
 
         <div className="kg-canvas-wrap">
-          <GraphCanvas
-            g6Data={g6Data}
-            edgeById={edgeById}
-            renderNodeLabels={renderNodeLabels}
-            renderEdgeLabels={renderEdgeLabels}
-            edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
-            showSelfLoops={showSelfLoops}
-            selectedNodeId={selectedNodeId}
-            selectedEdgeId={selectedEdgeId}
-            onNodeClick={handleGraphNodeClick}
-            onEdgeClick={handleGraphEdgeClick}
-            registerApplyHighlight={(fn) => {
-              applyHighlightRef.current = fn;
-            }}
-          />
+          <Suspense fallback={<LoadingPanel message="图谱画布加载中..." style={{ minHeight: "100%" }} />}>
+            <GraphCanvas
+              g6Data={g6Data}
+              edgeById={edgeById}
+              renderNodeLabels={renderNodeLabels}
+              renderEdgeLabels={renderEdgeLabels}
+              edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
+              showSelfLoops={showSelfLoops}
+              selectedNodeId={selectedNodeId}
+              selectedEdgeId={selectedEdgeId}
+              onNodeClick={handleGraphNodeClick}
+              onEdgeClick={handleGraphEdgeClick}
+              registerApplyHighlight={(fn) => {
+                applyHighlightRef.current = fn;
+              }}
+            />
+          </Suspense>
         </div>
       </div>
 
       <Resizer side="right" onPointerDown={(e) => beginResize("right", e)} />
 
       <div className="kg-pane kg-pane-right">
-        <RightDetailPanel
-          renderNodeLabels={renderNodeLabels}
-          setRenderNodeLabels={setRenderNodeLabels}
-          renderEdgeLabels={renderEdgeLabels}
-          setRenderEdgeLabels={setRenderEdgeLabels}
-          edgeLabelPickerOpen={edgeLabelPickerOpen}
-          setEdgeLabelPickerOpen={setEdgeLabelPickerOpen}
-          edgeLabelKeyword={edgeLabelKeyword}
-          setEdgeLabelKeyword={setEdgeLabelKeyword}
-          edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
-          setEdgeLabelSelectedDisplays={setEdgeLabelSelectedDisplays}
-          setEdgeLabelSelectionTouched={setEdgeLabelSelectionTouched}
-          currentVisibleEdgeLabelDisplays={currentVisibleEdgeLabelDisplays}
-          edgeLabelFilteredDisplays={edgeLabelFilteredDisplays}
-          edgeLabelSelectedSet={edgeLabelSelectedSet}
-          edgeLabelAllVisibleChecked={edgeLabelAllVisibleChecked}
-          toggleEdgeLabelDisplay={toggleEdgeLabelDisplay}
-          showSelfLoops={showSelfLoops}
-          setShowSelfLoops={setShowSelfLoops}
-          visibleSelfLoopCount={visibleSelfLoopCount}
-          hiddenSelfLoopCount={hiddenSelfLoopCount}
-          hiddenNodesCollapsed={hiddenNodesCollapsed}
-          setHiddenNodesCollapsed={setHiddenNodesCollapsed}
-          panelNodes={panelNodes}
-          hiddenCount={hiddenCount}
-          visibleCount={visibleCount}
-          graphNodeCount={effectiveGraphNodes.length}
-          panelGroups={panelGroups}
-          panelGroupCollapsed={panelGroupCollapsed}
-          setPanelGroupCollapsed={setPanelGroupCollapsed}
-          visibleNodeIdSet={visibleNodeIdSet}
-          autoVisibleTopIds={autoVisibleTopIds}
-          rootVid={rootVid}
-          revealNode={revealNode}
-          unrevealNode={unrevealNode}
-          sel={sel}
-          selectedNodeBrief={selectedNodeBrief}
-          visibleNodeHopLevelMap={visibleNodeHopLevelMap}
-          reroot1hop={(vid) => {
-            setGraphSourceMode("single");
-            setLastMultiGraphParams(null);
-            clearMultiPathState();
-            void reroot1hop(vid);
-          }}
-          expand1hop={(vid) => {
-            setGraphSourceMode("single");
-            setLastMultiGraphParams(null);
-            clearMultiPathState();
-            void expand1hop(vid);
-          }}
-          collapseExpandFromNode={collapseExpandFromNode}
-          expandButtonDisabled={expandButtonDisabled}
-          expandButtonText={expandButtonText}
-          selectedNodeExpandClosable={selectedNodeExpandClosable}
-          selectedNodeIsVisible={selectedNodeIsVisible}
-          selectedNodeIsRoot={selectedNodeIsRoot}
-          selectedNodeIsAutoTop={selectedNodeIsAutoTop}
-          selectedNodeProbeState={selectedNodeProbeState}
-          loadingGraph={graphBusy}
-          detailLoading={detailLoading}
-          nodeDetail={nodeDetail}
-          edgeDetail={edgeDetail}
-          relationDisplay={relationDisplay}
-          onReloadNodeDetail={reloadNodeDetailById}
-          onReloadEdgeDetail={reloadEdgeDetailByIdentity}
-          onSaveNodeEdit={saveNodeEdit}
-          onSaveEdgeEdit={saveEdgeEdit}
-        />
+        <Suspense fallback={<LoadingPanel message="右侧详情面板加载中..." />}>
+          <RightDetailPanel
+            renderNodeLabels={renderNodeLabels}
+            setRenderNodeLabels={setRenderNodeLabels}
+            renderEdgeLabels={renderEdgeLabels}
+            setRenderEdgeLabels={setRenderEdgeLabels}
+            edgeLabelPickerOpen={edgeLabelPickerOpen}
+            setEdgeLabelPickerOpen={setEdgeLabelPickerOpen}
+            edgeLabelKeyword={edgeLabelKeyword}
+            setEdgeLabelKeyword={setEdgeLabelKeyword}
+            edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
+            setEdgeLabelSelectedDisplays={setEdgeLabelSelectedDisplays}
+            setEdgeLabelSelectionTouched={setEdgeLabelSelectionTouched}
+            currentVisibleEdgeLabelDisplays={currentVisibleEdgeLabelDisplays}
+            edgeLabelFilteredDisplays={edgeLabelFilteredDisplays}
+            edgeLabelSelectedSet={edgeLabelSelectedSet}
+            edgeLabelAllVisibleChecked={edgeLabelAllVisibleChecked}
+            toggleEdgeLabelDisplay={toggleEdgeLabelDisplay}
+            showSelfLoops={showSelfLoops}
+            setShowSelfLoops={setShowSelfLoops}
+            visibleSelfLoopCount={visibleSelfLoopCount}
+            hiddenSelfLoopCount={hiddenSelfLoopCount}
+            hiddenNodesCollapsed={hiddenNodesCollapsed}
+            setHiddenNodesCollapsed={setHiddenNodesCollapsed}
+            panelNodes={panelNodes}
+            hiddenCount={hiddenCount}
+            visibleCount={visibleCount}
+            graphNodeCount={effectiveGraphNodes.length}
+            panelGroups={panelGroups}
+            panelGroupCollapsed={panelGroupCollapsed}
+            setPanelGroupCollapsed={setPanelGroupCollapsed}
+            visibleNodeIdSet={visibleNodeIdSet}
+            autoVisibleTopIds={autoVisibleTopIds}
+            rootVid={rootVid}
+            revealNode={revealNode}
+            unrevealNode={unrevealNode}
+            sel={sel}
+            selectedNodeBrief={selectedNodeBrief}
+            visibleNodeHopLevelMap={visibleNodeHopLevelMap}
+            reroot1hop={(vid) => {
+              setGraphSourceMode("single");
+              setLastMultiGraphParams(null);
+              clearMultiPathState();
+              void reroot1hop(vid);
+            }}
+            expand1hop={(vid) => {
+              setGraphSourceMode("single");
+              setLastMultiGraphParams(null);
+              clearMultiPathState();
+              void expand1hop(vid);
+            }}
+            collapseExpandFromNode={collapseExpandFromNode}
+            expandButtonDisabled={expandButtonDisabled}
+            expandButtonText={expandButtonText}
+            selectedNodeExpandClosable={selectedNodeExpandClosable}
+            selectedNodeIsVisible={selectedNodeIsVisible}
+            selectedNodeIsRoot={selectedNodeIsRoot}
+            selectedNodeIsAutoTop={selectedNodeIsAutoTop}
+            selectedNodeProbeState={selectedNodeProbeState}
+            loadingGraph={graphBusy}
+            detailLoading={detailLoading}
+            nodeDetail={nodeDetail}
+            edgeDetail={edgeDetail}
+            relationDisplay={relationDisplay}
+            onReloadNodeDetail={reloadNodeDetailById}
+            onReloadEdgeDetail={reloadEdgeDetailByIdentity}
+            onSaveNodeEdit={saveNodeEdit}
+            onSaveEdgeEdit={saveEdgeEdit}
+          />
+        </Suspense>
       </div>
 
-      <RelationFilterPanel
-        open={relationFilter.open}
-        relationTypes={relationTypes}
-        draftRelations={relationFilter.draftRelations}
-        appliedRelations={relationFilter.appliedRelations}
-        relationCountMap={relationFilter.relationCountMap}
-        previewActive={relationFilter.previewActive}
-        previewEdgeTotal={relationFilter.previewEdgeTotal}
-        onClose={relationFilter.closePanel}
-        onToggleDraftRelation={relationFilter.toggleDraftRelation}
-        onClearDraft={relationFilter.clearDraft}
-        onRestoreApplied={relationFilter.restoreDraftFromApplied}
-        onInvertCurrentList={relationFilter.invertDraftByRelations}
-        onPreviewOnlyApply={relationFilter.enterPreview}
-        onExitPreview={relationFilter.exitPreview}
-        onApplyAndReload={() => {
-          void (async () => {
-            const next = relationFilter.commitDraftAsApplied();
-            relationFilter.closePanel();
-            setRelations(next);
-            if (rootVid != null) await loadGraphWithFilters(rootVid, hop, next);
-          })();
-        }}
-        presets={relationFilter.presets}
-        activePresetId={relationFilter.activePresetId}
-        onSelectPreset={relationFilter.selectPreset}
-        onSavePreset={relationFilter.savePreset}
-        onRenamePreset={relationFilter.renamePreset}
-        onDeletePreset={relationFilter.deletePreset}
-        estimateKeepEdges={relationFilter.estimateKeepEdges}
-      />
+      {relationFilter.open ? (
+        <Suspense fallback={<LoadingPanel message="关系筛选面板加载中..." />}>
+          <RelationFilterPanel
+            relationCatalogItems={relationTypeCatalogItems}
+            relationCatalogLoading={relationTypeCatalogLoading}
+            relationCatalogHasMore={relationTypeCatalogHasMore}
+            relationCatalogMatchedTotal={relationTypeCatalogMatchedTotal}
+            relationCatalogQuery={relationTypeCatalogQuery}
+            draftRelations={relationFilter.draftRelations}
+            appliedRelations={relationFilter.appliedRelations}
+            relationCountMap={relationFilter.relationCountMap}
+            previewActive={relationFilter.previewActive}
+            previewEdgeTotal={relationFilter.previewEdgeTotal}
+            onRelationCatalogQueryChange={setRelationTypeCatalogQuery}
+            onRelationCatalogLoadMore={() => {
+              void handleLoadMoreRelationTypes();
+            }}
+            onClose={relationFilter.closePanel}
+            onToggleDraftRelation={relationFilter.toggleDraftRelation}
+            onClearDraft={relationFilter.clearDraft}
+            onRestoreApplied={relationFilter.restoreDraftFromApplied}
+            onInvertCurrentList={relationFilter.invertDraftByRelations}
+            onPreviewOnlyApply={relationFilter.enterPreview}
+            onExitPreview={relationFilter.exitPreview}
+            onApplyAndReload={() => {
+              void (async () => {
+                const next = relationFilter.commitDraftAsApplied();
+                relationFilter.closePanel();
+                setRelations(next);
+                if (rootVid != null) await loadGraphWithFilters(rootVid, hop, next);
+              })();
+            }}
+            presets={relationFilter.presets}
+            activePresetId={relationFilter.activePresetId}
+            onSelectPreset={relationFilter.selectPreset}
+            onSavePreset={relationFilter.savePreset}
+            onRenamePreset={relationFilter.renamePreset}
+            onDeletePreset={relationFilter.deletePreset}
+            estimateKeepEdges={relationFilter.estimateKeepEdges}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

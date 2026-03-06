@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -39,7 +39,7 @@ class EdgePatchRequest(BaseModel):
     edge_type: Optional[str] = None
     src: int
     dst: int
-    rank: str
+    rank: Union[str, int]
     set: Dict[str, Any] = Field(default_factory=dict)
     expected_version: int
     updated_by: str

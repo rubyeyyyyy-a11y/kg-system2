@@ -22,19 +22,40 @@ export type SearchResp = {
   nodes: NodeBrief[];
   edges: EdgeBrief[];
   total_candidates: number;
+  truncated?: boolean;
+  meta?: Record<string, unknown>;
 };
 
 export type SubgraphResp = {
   root_vid: number;
   nodes: NodeBrief[];
   edges: EdgeBrief[];
-  stats: { node_count: number; edge_count: number; truncated: boolean; dropped_nodes?: number };
+  stats: {
+    node_count: number;
+    edge_count: number;
+    truncated: boolean;
+    dropped_nodes?: number;
+    dropped_edges?: number;
+    dropped_neighbors?: number;
+    budget_applied?: Record<string, unknown>;
+  };
 };
 
 export type ExpandResp = {
   added_nodes: NodeBrief[];
   added_edges: EdgeBrief[];
-  stats: { node_count_after: number; dropped_nodes: number; policy: string };
+  stats: {
+    node_count_after: number;
+    edge_count_after?: number;
+    added_nodes?: number;
+    added_edges?: number;
+    truncated?: boolean;
+    dropped_nodes: number;
+    dropped_edges?: number;
+    dropped_neighbors?: number;
+    policy: string;
+    budget_applied?: Record<string, unknown>;
+  };
 };
 
 export type NodeDetailResp = {
@@ -104,6 +125,21 @@ export type EntityTypeItem = {
   count: number;
 };
 
+export type RelationTypeItem = {
+  relation_type: string;
+  count: number;
+};
+
+export type RelationTypesResp = {
+  items: RelationTypeItem[];
+  q: string;
+  limit: number;
+  offset: number;
+  next_offset: number | null;
+  has_more: boolean;
+  matched_total: number;
+};
+
 export type EdgeSearchItem = {
   edge_type: string;
   src: number;
@@ -155,8 +191,10 @@ export type MultiEntityGraphResp = {
     unconnected?: number[];
     unconnected_pairs?: string[];
     truncated?: boolean;
+    dropped_neighbors?: number;
     node_count?: number;
     edge_count?: number;
+    budget_applied?: Record<string, unknown>;
     [k: string]: unknown;
   };
   path_candidates?: PairPathCandidate[];

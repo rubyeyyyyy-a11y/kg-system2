@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException
 
 from app.core import config
-from app.db.nebula import EDGE_TAG, get_session
+from app.db.nebula import EDGE_TAG, execute_ngql
 from app.schemas.edge import EdgeSearchRequest
 from app.services.common import esc, vw
 
@@ -58,8 +58,7 @@ def _fetch_edge_rows(
            properties(e) AS props
 LIMIT {int(scan_limit)};
     """
-    s = get_session()
-    res = s.execute(ngql)
+    res = execute_ngql(ngql)
     if not res.is_succeeded():
         raise HTTPException(status_code=500, detail=res.error_msg())
 
@@ -192,8 +191,7 @@ def _fetch_entity_labels(vids: List[int]) -> Dict[int, str]:
 LIMIT {len(uniq)};
     """
 
-    s = get_session()
-    res = s.execute(ngql)
+    res = execute_ngql(ngql)
     if not res.is_succeeded():
         raise HTTPException(status_code=500, detail=res.error_msg())
 

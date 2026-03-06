@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { expand, subgraph } from "../api/kg";
-import { EXPAND_AUTO_REVEAL_TOPK } from "../constants/kg";
+import { EXPAND_AUTO_REVEAL_TOPK, SUBGRAPH_BUDGET_PRESETS } from "../constants/kg";
 import type { EdgeBrief, ExpandProbeState, NodeBrief } from "../types/kg";
+import { parseApiError } from "../utils/httpError";
 import { edgeKey } from "../utils/kg";
 
 type GraphStats = Record<string, unknown> | null;
@@ -11,6 +12,7 @@ type UseGraphDataParams = {
   selectedNodeVid: number | null;
   onSelectNode: (vid: number) => void;
   onClearSelection: () => void;
+  onNotice?: (level: "error" | "warn" | "info", message: string) => void;
 };
 
 type UseGraphDataResult = {
@@ -54,12 +56,17 @@ type UseGraphDataResult = {
     identity: { source: number; target: number; rank: string; edge_type?: string },
     patch: Partial<EdgeBrief>
   ) => void;
+  budgetTier: number;
+  budgetPresetLabel: string;
+  canLoadMoreEdges: boolean;
+  loadMoreEdges: () => Promise<void>;
 };
 
 export function useGraphData({
   selectedNodeVid,
   onSelectNode,
   onClearSelection,
+  onNotice,
 }: UseGraphDataParams): UseGraphDataResult {
   const [rootVid, setRootVid] = useState<number | null>(null);
   const [hop, setHop] = useState(1);
@@ -78,11 +85,32 @@ export function useGraphData({
   const [hiddenNodesCollapsed, setHiddenNodesCollapsed] = useState(false);
   const [panelGroupCollapsed, setPanelGroupCollapsed] = useState<Record<string, boolean>>({});
   const [expandProbeByVid, setExpandProbeByVid] = useState<Record<number, ExpandProbeState>>({});
+  const [budgetTier, setBudgetTier] = useState(0);
 
   const rootVidRef = useRef<number | null>(null);
   const relationsRef = useRef<string[]>([]);
   const graphNodesRef = useRef<NodeBrief[]>([]);
   const expandProbeTokenByVidRef = useRef<Record<number, number>>({});
+
+  function notify(level: "error" | "warn" | "info", message: string) {
+    if (!message) return;
+    onNotice?.(level, message);
+  }
+
+  function summarizeGraphBudgetStats(stats: Record<string, unknown> | null): string {
+    if (!stats) return "";
+    const truncated = Boolean(stats.truncated);
+    const droppedNodes = Number(stats.dropped_nodes || 0);
+    const droppedEdges = Number(stats.dropped_edges || 0);
+    const droppedNeighbors = Number(stats.dropped_neighbors || 0);
+    if (!truncated && droppedNodes <= 0 && droppedEdges <= 0 && droppedNeighbors <= 0) return "";
+    return `图结果已按预算裁剪：dropped_nodes=${droppedNodes} dropped_edges=${droppedEdges} dropped_neighbors=${droppedNeighbors}`;
+  }
+
+  function currentBudgetPreset() {
+    const safeTier = Math.max(0, Math.min(budgetTier, SUBGRAPH_BUDGET_PRESETS.length - 1));
+    return SUBGRAPH_BUDGET_PRESETS[safeTier];
+  }
 
   useEffect(() => {
     rootVidRef.current = rootVid;
@@ -150,15 +178,24 @@ export function useGraphData({
     expandProbeTokenByVidRef.current = {};
   }
 
-  async function loadSubgraphWithParams(nextRoot: number, nextHop: number, nextRelations: string[]) {
+  async function loadSubgraphWithParams(
+    nextRoot: number,
+    nextHop: number,
+    nextRelations: string[],
+    overrideTier?: number
+  ) {
+    const tier = Number.isFinite(overrideTier as number)
+      ? Math.max(0, Math.min(Number(overrideTier), SUBGRAPH_BUDGET_PRESETS.length - 1))
+      : budgetTier;
+    const budget = SUBGRAPH_BUDGET_PRESETS[tier];
     setLoadingGraph(true);
     try {
       const json = await subgraph({
         root_vid: nextRoot,
         hop: nextHop,
         relations: nextRelations,
-        max_nodes: 80,
-        max_edges: 300,
+        max_nodes: budget.max_nodes,
+        max_edges: budget.max_edges,
       });
 
       setRootVid(nextRoot);
@@ -174,9 +211,11 @@ export function useGraphData({
       resetExpandProbeCache();
       resetPanelGroupingForNewRoot(json.nodes, nextRoot);
       onClearSelection();
+      const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
+      if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      notify("error", `子图加载失败：${parsed.message}`);
     } finally {
       setLoadingGraph(false);
     }
@@ -188,6 +227,7 @@ export function useGraphData({
 
   async function expand1hop(fromVid: number) {
     if (!rootVid) return;
+    const budget = currentBudgetPreset();
     setLoadingGraph(true);
     try {
       const existingIds = graphNodes.map((n) => n.id);
@@ -195,13 +235,13 @@ export function useGraphData({
         from_vid: fromVid,
         relations,
         existing_node_ids: existingIds,
-        max_nodes: 80,
-        max_edges: 300,
+        max_nodes: budget.max_nodes,
+        max_edges: budget.max_edges,
       });
 
       if ((json.added_nodes?.length || 0) === 0 && (json.added_edges?.length || 0) === 0) {
         setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "noextra" }));
-        alert("该节点暂无可扩展的 1-hop 邻居，或邻居已全部在当前图中。");
+        notify("info", "该节点暂无可扩展的 1-hop 邻居，或邻居已全部在当前图中。");
         return;
       }
       setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
@@ -232,8 +272,13 @@ export function useGraphData({
       setGraphStats({
         ...(graphStats || {}),
         node_count: json.stats.node_count_after,
+        edge_count: json.stats.edge_count_after,
+        truncated: json.stats.truncated,
         policy: json.stats.policy,
         dropped_nodes: json.stats.dropped_nodes,
+        dropped_edges: json.stats.dropped_edges,
+        dropped_neighbors: json.stats.dropped_neighbors,
+        budget_applied: json.stats.budget_applied,
       });
 
       setNodeGroupRootById((prev) => {
@@ -278,23 +323,26 @@ export function useGraphData({
 
         onSelectNode(autoShowIds[0]);
       }
+      const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
+      if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      notify("error", `Expand 失败：${parsed.message}`);
     } finally {
       setLoadingGraph(false);
     }
   }
 
   async function reroot1hop(vid: number) {
+    const budget = currentBudgetPreset();
     setLoadingGraph(true);
     try {
       const json = await subgraph({
         root_vid: vid,
         hop: 1,
         relations,
-        max_nodes: 80,
-        max_edges: 300,
+        max_nodes: budget.max_nodes,
+        max_edges: budget.max_edges,
       });
 
       setHop(1);
@@ -312,9 +360,11 @@ export function useGraphData({
       resetPanelGroupingForNewRoot(json.nodes, vid);
       onClearSelection();
       onSelectNode(vid);
+      const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
+      if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(msg);
+      const parsed = parseApiError(e);
+      notify("error", `切换 root 失败：${parsed.message}`);
     } finally {
       setLoadingGraph(false);
     }
@@ -361,7 +411,7 @@ export function useGraphData({
       .map((n) => n.id);
 
     if (targetIds.length === 0) {
-      alert("当前节点没有可关闭的 Expand 展开内容。");
+      notify("info", "当前节点没有可关闭的 Expand 展开内容。");
       return;
     }
 
@@ -409,7 +459,7 @@ export function useGraphData({
         relations: curRelations,
         existing_node_ids: existingIds,
         max_nodes: 20,
-        max_edges: 200,
+        max_edges: 120,
       });
 
       if (expandProbeTokenByVidRef.current[fromVid] !== nextToken) return;
@@ -432,8 +482,23 @@ export function useGraphData({
   useEffect(() => {
     if (selectedNodeVid == null) return;
     void probeExpand1hop(selectedNodeVid);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedNodeVid]);
+
+  async function loadMoreEdges() {
+    const curRoot = rootVidRef.current;
+    if (curRoot == null) {
+      notify("info", "当前没有 root，可先从搜索结果加载一个子图。");
+      return;
+    }
+    if (budgetTier >= SUBGRAPH_BUDGET_PRESETS.length - 1) {
+      notify("info", "已到最高图预算级别，无法继续加载更多边。");
+      return;
+    }
+    const nextTier = budgetTier + 1;
+    setBudgetTier(nextTier);
+    notify("info", `图预算已提升到 ${SUBGRAPH_BUDGET_PRESETS[nextTier].label}，正在重载子图…`);
+    await loadSubgraphWithParams(curRoot, hop, relations, nextTier);
+  }
 
   return {
     rootVid,
@@ -467,5 +532,9 @@ export function useGraphData({
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,
+    budgetTier,
+    budgetPresetLabel: currentBudgetPreset().label,
+    canLoadMoreEdges: budgetTier < SUBGRAPH_BUDGET_PRESETS.length - 1,
+    loadMoreEdges,
   };
 }

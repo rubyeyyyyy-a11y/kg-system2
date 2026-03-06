@@ -11,6 +11,7 @@ import type {
   NodeDetailResp,
   NodePatchResp,
   RawIdSuggestResp,
+  RelationTypesResp,
   SearchResp,
   SubgraphResp,
   SuggestResp,
@@ -24,6 +25,8 @@ type SearchParams = {
   source: string | null;
   entity_raw_id: string | null;
   entity_raw_id_mode: "contains" | "prefix" | "exact";
+  include_edges?: boolean;
+  signal?: AbortSignal;
 };
 
 type SubgraphParams = {
@@ -96,8 +99,9 @@ type MultiEntityGraphApplyPathsParams = {
   }>;
 };
 
-export async function search(body: SearchParams): Promise<SearchResp> {
-  return apiPost<SearchResp>("/api/search", body);
+export async function search(params: SearchParams): Promise<SearchResp> {
+  const { signal, ...body } = params;
+  return apiPost<SearchResp>("/api/search", body, { signal });
 }
 
 export async function entityTypes(): Promise<EntityTypeItem[]> {
@@ -112,8 +116,19 @@ export async function expand(body: ExpandParams): Promise<ExpandResp> {
   return apiPost<ExpandResp>("/api/expand", body);
 }
 
-export async function relationTypes(): Promise<string[]> {
-  return apiGet<string[]>("/api/relation_types");
+export async function relationTypes(params: {
+  q?: string;
+  limit?: number;
+  offset?: number;
+  signal?: AbortSignal;
+} = {}): Promise<RelationTypesResp> {
+  const search = new URLSearchParams();
+  if (params.q?.trim()) search.set("q", params.q.trim());
+  if (typeof params.limit === "number") search.set("limit", String(params.limit));
+  if (typeof params.offset === "number") search.set("offset", String(params.offset));
+  const query = search.toString();
+  const suffix = query ? `?${query}` : "";
+  return apiGet<RelationTypesResp>(`/api/relation_types${suffix}`, { signal: params.signal });
 }
 
 export async function nodeDetail(vid: number): Promise<NodeDetailResp> {

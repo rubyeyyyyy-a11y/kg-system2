@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from app.schemas.graph import (
     ExpandResp,
@@ -6,6 +6,7 @@ from app.schemas.graph import (
     MultiEntityGraphApplyPathsRequest,
     MultiEntityGraphRequest,
     MultiEntityGraphResp,
+    RelationTypesResp,
     SubgraphResp,
     SubgraphRequest,
 )
@@ -24,9 +25,13 @@ def expand(req: ExpandRequest):
     return graph_service.expand(req)
 
 
-@router.get("/relation_types")
-def relation_types():
-    return graph_service.relation_types()
+@router.get("/relation_types", response_model=RelationTypesResp)
+def relation_types(
+    q: str = Query(default=""),
+    limit: int = Query(default=100, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+):
+    return graph_service.relation_types(q=q, limit=limit, offset=offset)
 
 
 @router.post("/multi_entity_graph", response_model=MultiEntityGraphResp)

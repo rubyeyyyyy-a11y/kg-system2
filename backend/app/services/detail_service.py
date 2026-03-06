@@ -3,6 +3,7 @@ from typing import Any, Dict
 from fastapi import HTTPException
 
 from app.core import config
+from app.core.escape import raise_validation_error
 from app.db.nebula_client import NebulaExecutionError, execute_ngql_safe
 from app.schemas.detail import EdgeDetailRequest
 from app.services.common import vw
@@ -57,12 +58,12 @@ def node_detail(vid: int) -> Dict[str, Any]:
 
 def edge_detail(req: EdgeDetailRequest) -> Dict[str, Any]:
     if (req.edge_type or "").strip() != config.EDGE_TYPE:
-        raise HTTPException(status_code=422, detail=f"edge_type must be '{config.EDGE_TYPE}'")
+        raise_validation_error(f"edge_type must be '{config.EDGE_TYPE}'", field="edge_type")
 
     try:
         rank_int = int(str(req.rank).strip())
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="'rank' must be int64 string") from exc
+        raise_validation_error("'rank' must be int64 string", field="rank")
 
     ngql = f"""
     MATCH (a:`Entity`)-[e:`{config.EDGE_TYPE}`]->(b:`Entity`)

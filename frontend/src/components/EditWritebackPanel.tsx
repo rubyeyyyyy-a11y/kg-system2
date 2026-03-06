@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { edgeDetail as edgeDetailApi, editableFields as editableFieldsApi, nodeDetail as nodeDetailApi } from "../api/kg";
 import type {
@@ -13,6 +13,7 @@ import type {
 
 const UPDATED_BY_KEY = "kg.updated_by";
 const EDGE_TYPE_DEFAULT = "REL2";
+const EMPTY_EDITABLE_FIELDS: EditableFieldSpec[] = [];
 
 type EdgeIdentity = { edge_type: string; src: number; dst: number; rank: string };
 
@@ -47,7 +48,11 @@ function parseHttpError(err: unknown): { status: number | null; message: string 
   try {
     const json = JSON.parse(body);
     if (typeof json?.detail === "string") return { status, message: json.detail };
-    if (json?.detail?.message) return { status, message: String(json.detail.message) };
+    if (json?.detail?.message) {
+      const field = json?.detail?.field ? `[${String(json.detail.field)}] ` : "";
+      return { status, message: `${field}${String(json.detail.message)}` };
+    }
+    if (json?.message) return { status, message: String(json.message) };
     return { status, message: body || raw };
   } catch {
     return { status, message: body || raw };
@@ -136,8 +141,8 @@ export function EditWritebackPanel({
   const [directEdgeSet, setDirectEdgeSet] = useState<Record<string, string>>({});
   const [directEdgeLoading, setDirectEdgeLoading] = useState(false);
 
-  const nodeSpecs = schema?.entity?.fields || [];
-  const edgeSpecs = schema?.edge?.fields || [];
+  const nodeSpecs = useMemo(() => schema?.entity?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
+  const edgeSpecs = useMemo(() => schema?.edge?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
 
   useEffect(() => {
     let cancelled = false;
@@ -199,15 +204,19 @@ export function EditWritebackPanel({
 
   const selectedNodeVersion = sel.kind === "node" ? nodeDetail?.version ?? null : null;
   const selectedEdgeVersion = sel.kind === "edge" ? edgeDetail?.version ?? null : null;
+  const actorTrimmed = (saveUpdatedBy || "").trim();
+  const actorInvalid = actorTrimmed.length === 0 || actorTrimmed.length > 64;
+  const actorError = actorTrimmed.length === 0 ? "updated_by 必填" : actorTrimmed.length > 64 ? "updated_by 不能超过 64 个字符" : "";
 
-  function finalizeActor(): string {
-    const actor = (saveUpdatedBy || "").trim();
+  const finalizeActor = useCallback((): string => {
+    const actor = actorTrimmed;
     if (!actor) throw new Error("updated_by 必填");
+    if (actor.length > 64) throw new Error("updated_by 不能超过 64 个字符");
     if (setAsDefault) setDefaultUpdatedBy(actor);
     return actor;
-  }
+  }, [actorTrimmed, setAsDefault]);
 
-  async function saveSelectedNode() {
+  const saveSelectedNode = useCallback(async () => {
     if (sel.kind !== "node" || selectedNodeVersion == null) return;
     setSaveLoading(true);
     setError(null);
@@ -223,9 +232,9 @@ export function EditWritebackPanel({
     } finally {
       setSaveLoading(false);
     }
-  }
+  }, [finalizeActor, onReloadNodeDetail, onSaveNodeEdit, sel, selectedNodeSet, selectedNodeVersion]);
 
-  async function saveSelectedEdge() {
+  const saveSelectedEdge = useCallback(async () => {
     if (sel.kind !== "edge" || selectedEdgeVersion == null) return;
     setSaveLoading(true);
     setError(null);
@@ -247,7 +256,7 @@ export function EditWritebackPanel({
     } finally {
       setSaveLoading(false);
     }
-  }
+  }, [finalizeActor, onReloadEdgeDetail, onSaveEdgeEdit, sel, selectedEdgeSet, selectedEdgeVersion]);
 
   async function loadDirectNode() {
     const vid = Number(directNodeVid);
@@ -359,6 +368,7 @@ export function EditWritebackPanel({
         <span>本次保存（可临时覆盖）</span>
         <input value={saveUpdatedBy} onChange={(e) => setSaveUpdatedBy(e.target.value)} style={{ padding: 8 }} />
       </label>
+      {actorError ? <div style={{ fontSize: 12, color: "#d4380d" }}>{actorError}</div> : null}
       <label style={{ fontSize: 12 }}>
         <input type="checkbox" checked={setAsDefault} onChange={(e) => setSetAsDefault(e.target.checked)} /> 保存时设为默认
       </label>
@@ -371,7 +381,7 @@ export function EditWritebackPanel({
     if (schemaError) return <div style={{ fontSize: 12, color: "#d4380d" }}>字段 schema 加载失败：{schemaError}</div>;
 
     if (sel.kind === "node") {
-      const canSave = !saveLoading && !detailLoading && nodeDetail != null && selectedNodeVersion != null;
+      const canSave = !saveLoading && !detailLoading && nodeDetail != null && selectedNodeVersion != null && !actorInvalid;
       return (
         <div style={{ display: "grid", gap: 10 }}>
           <div style={{ fontSize: 12, color: "#666" }}>
@@ -398,7 +408,7 @@ export function EditWritebackPanel({
       );
     }
 
-    const canSave = !saveLoading && !detailLoading && edgeDetail != null && selectedEdgeVersion != null;
+    const canSave = !saveLoading && !detailLoading && edgeDetail != null && selectedEdgeVersion != null && !actorInvalid;
     const identity: EdgeIdentity = {
       edge_type: sel.edge_type || EDGE_TYPE_DEFAULT,
       src: sel.src,
@@ -431,6 +441,7 @@ export function EditWritebackPanel({
       </div>
     );
   }, [
+    actorInvalid,
     detailLoading,
     edgeDetail,
     edgeSpecs,
@@ -446,6 +457,8 @@ export function EditWritebackPanel({
     selectedEdgeVersion,
     selectedNodeSet,
     selectedNodeVersion,
+    saveSelectedEdge,
+    saveSelectedNode,
   ]);
 
   const renderDirectEditor = (
@@ -469,7 +482,7 @@ export function EditWritebackPanel({
                 onChange={(next) => setDirectNodeSet((prev) => ({ ...prev, [spec.name]: next }))}
               />
             ))}
-            <button onClick={() => void saveDirectNode()} disabled={saveLoading} style={{ padding: "6px 10px" }}>
+            <button onClick={() => void saveDirectNode()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
               {saveLoading ? "保存中…" : "保存节点"}
             </button>
           </div>
@@ -497,7 +510,7 @@ export function EditWritebackPanel({
                 onChange={(next) => setDirectEdgeSet((prev) => ({ ...prev, [spec.name]: next }))}
               />
             ))}
-            <button onClick={() => void saveDirectEdge()} disabled={saveLoading} style={{ padding: "6px 10px" }}>
+            <button onClick={() => void saveDirectEdge()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
               {saveLoading ? "保存中…" : "保存边"}
             </button>
           </div>

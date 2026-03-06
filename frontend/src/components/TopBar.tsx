@@ -4,6 +4,9 @@ import { relationDisplay } from "../utils/relation";
 type TopBarProps = {
   rootVid: number | null;
   loadingGraph: boolean;
+  graphBudgetLabel: string;
+  canLoadMoreEdges: boolean;
+  onLoadMoreEdges: () => void;
   hop: number;
   setHop: (nextHop: number) => void;
   relations: string[];
@@ -18,6 +21,9 @@ type TopBarProps = {
 export function TopBar({
   rootVid,
   loadingGraph,
+  graphBudgetLabel,
+  canLoadMoreEdges,
+  onLoadMoreEdges,
   hop,
   setHop,
   relations,
@@ -30,6 +36,10 @@ export function TopBar({
 }: TopBarProps) {
   const nodeCount = typeof graphStats?.node_count === "number" ? graphStats.node_count : undefined;
   const edgeCount = typeof graphStats?.edge_count === "number" ? graphStats.edge_count : undefined;
+  const truncated = Boolean(graphStats?.truncated);
+  const droppedNodes = Number(graphStats?.dropped_nodes || 0);
+  const droppedEdges = Number(graphStats?.dropped_edges || 0);
+  const droppedNeighbors = Number(graphStats?.dropped_neighbors || 0);
 
   const relationButtonText = useMemo(() => {
     if (relations.length === 0) return "筛选关系（全部）";
@@ -98,9 +108,25 @@ export function TopBar({
         重新加载子图
       </button>
 
+      <button
+        onClick={onLoadMoreEdges}
+        disabled={!rootVid || !canLoadMoreEdges || loadingGraph}
+        style={{ padding: "8px 12px" }}
+        title="按更高预算重新加载当前 root 子图"
+      >
+        加载更多边
+      </button>
+
       <div style={{ fontSize: 12, color: "#666", whiteSpace: "nowrap" }}>
-        {nodeCount != null && edgeCount != null ? `缓存 nodes=${nodeCount} edges=${edgeCount}` : ""}
+        {nodeCount != null && edgeCount != null
+          ? `缓存 nodes=${nodeCount} edges=${edgeCount} | budget=${graphBudgetLabel}`
+          : ""}
       </div>
+      {truncated ? (
+        <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
+          图结果已裁剪：dropped_nodes={droppedNodes} dropped_edges={droppedEdges} dropped_neighbors={droppedNeighbors}
+        </div>
+      ) : null}
     </div>
   );
 }

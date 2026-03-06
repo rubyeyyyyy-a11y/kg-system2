@@ -58,7 +58,11 @@ type LeftSearchPanelProps = {
   onSelectRawIdSuggestItem: (item: RawIdSuggestItem) => void;
   searchData: SearchResp;
   rootVid: number | null;
-  onLoadSubgraph: (vid: number) => void;
+  searchSelectedVid: number | null;
+  onSelectSearchResultNode: (vid: number) => void;
+  onLoadSelectedSubgraph: (vid?: number) => void;
+  graphLoadBusy: boolean;
+  onEntityTypeDemandLoad: () => void;
 
   edgeQ: string;
   onEdgeQChange: (value: string) => void;
@@ -146,11 +150,12 @@ function MultiEntitySlotInput({
       const json = await searchApi({
         q: useRawId ? "" : nameQ,
         search_in_name: useRawId ? false : true,
-        search_in_description: useRawId ? false : true,
+        search_in_description: false,
         entity_type: entityType || null,
         source: null,
         entity_raw_id: rawIdTrimmed || null,
         entity_raw_id_mode: "contains",
+        include_edges: false,
       });
       const items: SuggestItem[] = (json.nodes || []).map((n) => ({
         vid: n.id,
@@ -541,7 +546,11 @@ export function LeftSearchPanel({
   onSelectRawIdSuggestItem,
   searchData,
   rootVid,
-  onLoadSubgraph,
+  searchSelectedVid,
+  onSelectSearchResultNode,
+  onLoadSelectedSubgraph,
+  graphLoadBusy,
+  onEntityTypeDemandLoad,
   edgeQ,
   onEdgeQChange,
   edgeSearchLoading,
@@ -603,11 +612,6 @@ export function LeftSearchPanel({
     }
     return arr;
   }, [multiSlots]);
-
-  useEffect(() => {
-    if (!multiExplainPaths || !multiDirectOnly) return;
-    setMultiDirectOnly(false);
-  }, [multiExplainPaths, multiDirectOnly]);
 
   const canGenerateMultiGraph = selectedEntities.length >= 2 && !loadingMultiGraph;
 
@@ -852,6 +856,8 @@ export function LeftSearchPanel({
                   <select
                     style={{ padding: 8, minWidth: 180 }}
                     value={entityType}
+                    onFocus={onEntityTypeDemandLoad}
+                    onMouseDown={onEntityTypeDemandLoad}
                     onChange={(e) => setEntityType(e.target.value)}
                   >
                     <option value="">全部</option>
@@ -878,6 +884,20 @@ export function LeftSearchPanel({
               <div style={{ marginTop: 10, color: "#666", fontSize: 12 }}>
                 候选数量：{searchData.total_candidates}（返回 Top100）
               </div>
+              <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
+                <button
+                  onClick={() => onLoadSelectedSubgraph()}
+                  disabled={searchSelectedVid == null || graphLoadBusy}
+                  style={{ padding: "7px 10px", fontSize: 12 }}
+                >
+                  {graphLoadBusy ? "加载中…" : "加载选中节点子图"}
+                </button>
+                <span style={{ fontSize: 12, color: "#666" }}>
+                  {searchSelectedVid != null
+                    ? `已选 root=${searchSelectedVid}`
+                    : "先点击下方候选卡片选择节点，再加载子图"}
+                </span>
+              </div>
               <hr style={{ margin: "12px 0" }} />
 
               <div style={{ display: "grid", gap: 10 }}>
@@ -886,14 +906,32 @@ export function LeftSearchPanel({
                     key={n.id}
                     style={{
                       padding: 10,
-                      border: rootVid === n.id ? "1px solid #333" : "1px solid #f0f0f0",
+                      border:
+                        searchSelectedVid === n.id
+                          ? "2px solid #1677ff"
+                          : rootVid === n.id
+                            ? "1px solid #333"
+                            : "1px solid #f0f0f0",
                       borderRadius: 8,
                       cursor: "pointer",
                     }}
-                    onClick={() => onLoadSubgraph(n.id)}
-                    title="点击切换为该实体的子图"
+                    onClick={() => onSelectSearchResultNode(n.id)}
+                    title="点击选择该节点为待加载 root"
                   >
-                    <div style={{ fontWeight: 600 }}>{n.label}</div>
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ fontWeight: 600 }}>{n.label}</div>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectSearchResultNode(n.id);
+                          onLoadSelectedSubgraph(n.id);
+                        }}
+                        disabled={graphLoadBusy}
+                        style={{ padding: "5px 8px", fontSize: 12 }}
+                      >
+                        加载子图
+                      </button>
+                    </div>
                     <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
                       id={n.id} | {n.entity_type} | {n.source} | score={n.score}
                     </div>
@@ -932,7 +970,11 @@ export function LeftSearchPanel({
                   <input
                     type="checkbox"
                     checked={multiExplainPaths}
-                    onChange={(e) => setMultiExplainPaths(e.target.checked)}
+                    onChange={(e) => {
+                      const checked = e.target.checked;
+                      setMultiExplainPaths(checked);
+                      if (checked) setMultiDirectOnly(false);
+                    }}
                   />{" "}
                   启用路径解释（k-hop）
                 </label>

@@ -1,5 +1,12 @@
 # KG System
 
+## 重构交接文档
+- 最终交接：`docs/FINAL_HANDOVER_20260306.md`
+- 阶段5验证与交接：`docs/PHASE5_VALIDATION_HANDOVER.md`
+- lint 基线：`docs/STAGEA_FRONTEND_LINT_BASELINE.md`
+- E2E 降级说明：`docs/STAGE_E_E2E_FALLBACK.md`
+- metadata迁移说明：`backend/docs/metadata_stats_migration.md`
+
 ## 1) 项目简介
 本项目是一个知识图谱检索与关系探索系统，采用前后端分离结构：
 
@@ -15,6 +22,30 @@
 
 ## 2) 本地启动
 
+### 2.0 标准化启停流程（推荐）
+```bash
+bash scripts/start_stack.sh
+bash scripts/check_stack.sh
+bash scripts/verify_stack.sh
+bash scripts/smoke_api.sh
+bash scripts/stop_stack.sh
+```
+
+说明：
+
+- 默认后端地址：`http://127.0.0.1:8000`
+- 默认前端地址：`http://127.0.0.1:5173`
+- 运行日志：`.run/logs/backend.log`、`.run/logs/frontend.log`
+- PID 文件：`.run/backend.pid`、`.run/frontend.pid`
+- 标准 smoke 验证：`bash scripts/verify_stack.sh`
+- API 回归 smoke：`bash scripts/smoke_api.sh`
+- 可覆盖环境变量：`BACKEND_HOST` / `BACKEND_PORT` / `FRONTEND_HOST` / `FRONTEND_PORT`
+
+前置条件：
+
+- 后端虚拟环境已准备：`backend/.venv`
+- 前端依赖已安装：`frontend/node_modules`
+
 ### 2.1 前端启动
 ```bash
 cd frontend
@@ -25,11 +56,8 @@ npm run dev -- --host 0.0.0.0 --port 5173
 ### 2.2 后端启动
 ```bash
 cd backend
-python3 -m venv .venv
 source .venv/bin/activate
-# 若存在 requirements.txt
-pip install -r requirements.txt
-python -m uvicorn app:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 ### 2.3 一键启动（推荐）
@@ -171,3 +199,59 @@ CREATE EDGE IF NOT EXISTS REL2(
 - 右侧面板新增 `详情 / 编辑 / 直接编辑` 三个页签
 - `updated_by` 支持全局默认（localStorage）+ 本次保存覆盖
 - 保存成功后只做局部状态更新，不重拉 subgraph
+
+### 7.6 验证命令（可复制）
+
+后端启动：
+```bash
+cd ~/kg-system/backend
+source .venv/bin/activate
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+前端启动：
+```bash
+cd ~/kg-system/frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5173
+```
+
+Nebula Console 6 条验证命令：
+```ngql
+-- 1) 查看节点属性（含 version/updated_at/updated_by）
+FETCH PROP ON Entity 1 YIELD properties(vertex);
+
+-- 2) 关系遍历（注意使用管道 LIMIT）
+GO FROM 1 OVER REL2 YIELD src(edge), dst(edge), rank(edge), properties(edge).relation | LIMIT 10;
+
+-- 3) 查看边属性（按 src->dst@rank 定位）
+FETCH PROP ON REL2 1->38075@0 YIELD properties(edge);
+
+-- 4) 节点写回并验证 version 递增
+UPDATE VERTEX ON Entity 1
+SET Entity.description="manual update from nebula console",
+    Entity.version=1,
+    Entity.updated_at=1700000000,
+    Entity.updated_by="console"
+YIELD properties(vertex);
+
+-- 5) 边写回并验证 version 递增
+UPDATE EDGE ON REL2 1->38075@0
+SET relation="associate",
+    source="console",
+    evidence="manual edge update",
+    version=1,
+    updated_at=1700000000,
+    updated_by="console"
+YIELD properties(edge);
+
+-- 6) 统计
+SHOW STATS;
+```
+
+### 7.7 手工验证一次节点编辑 + 一次边编辑
+1. 前端打开后，先在右侧 `编辑`/`直接编辑` 区设置 `updated_by`。
+2. 节点编辑：输入一个存在的 `vid` 点击“加载”，修改 `entity_name/description`，点击“保存节点”。
+3. 边编辑：输入存在的 `src/dst/rank` 点击“加载”，修改 `relation/evidence`，点击“保存边”。
+4. 若提示 409，点击“重新加载详情”后再保存。
+5. 在 Nebula Console 执行 `FETCH PROP` 确认 `version` 递增且 `updated_at` 为秒级时间戳。

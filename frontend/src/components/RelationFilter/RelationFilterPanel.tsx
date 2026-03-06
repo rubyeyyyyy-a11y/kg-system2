@@ -1,20 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { FixedSizeList } from "react-window";
 import type { RelPreset } from "../../hooks/useRelationFilter";
+import type { RelationTypeItem } from "../../types/kg";
 import { getRelationGroupKey, normalizeText, relationDisplay, uniqueStrings } from "../../utils/relation";
 
 type MatchMode = "display" | "raw" | "both";
 type SortMode = "count" | "alpha" | "selected";
 
 type RelationFilterPanelProps = {
-  open: boolean;
-  relationTypes: string[];
+  relationCatalogItems: RelationTypeItem[];
+  relationCatalogLoading: boolean;
+  relationCatalogHasMore: boolean;
+  relationCatalogMatchedTotal: number;
+  relationCatalogQuery: string;
   draftRelations: string[];
   appliedRelations: string[];
   relationCountMap: Map<string, number>;
   previewActive: boolean;
   previewEdgeTotal: number;
+  onRelationCatalogQueryChange: (next: string) => void;
+  onRelationCatalogLoadMore: () => void;
   onClose: () => void;
   onToggleDraftRelation: (raw: string) => void;
   onClearDraft: () => void;
@@ -91,13 +97,18 @@ function RelationRow({
 }
 
 export function RelationFilterPanel({
-  open,
-  relationTypes,
+  relationCatalogItems,
+  relationCatalogLoading,
+  relationCatalogHasMore,
+  relationCatalogMatchedTotal,
+  relationCatalogQuery,
   draftRelations,
   appliedRelations,
   relationCountMap,
   previewActive,
   previewEdgeTotal,
+  onRelationCatalogQueryChange,
+  onRelationCatalogLoadMore,
   onClose,
   onToggleDraftRelation,
   onClearDraft,
@@ -114,40 +125,34 @@ export function RelationFilterPanel({
   onDeletePreset,
   estimateKeepEdges,
 }: RelationFilterPanelProps) {
-  const [keyword, setKeyword] = useState("");
-  const [debouncedKeyword, setDebouncedKeyword] = useState("");
   const [scopeCurrentOnly, setScopeCurrentOnly] = useState(true);
   const [matchMode, setMatchMode] = useState<MatchMode>("both");
   const [sortMode, setSortMode] = useState<SortMode>("count");
   const [activeGroupKey, setActiveGroupKey] = useState<string>("");
   const [collapsedByGroup, setCollapsedByGroup] = useState<Record<string, boolean>>({});
 
-  useEffect(() => {
-    const t = window.setTimeout(() => setDebouncedKeyword(keyword), 150);
-    return () => window.clearTimeout(t);
-  }, [keyword]);
-
-  useEffect(() => {
-    if (!open) return;
-    setKeyword("");
-    setDebouncedKeyword("");
-    setScopeCurrentOnly(true);
-    setMatchMode("both");
-    setSortMode("count");
-  }, [open]);
-
   const draftSet = useMemo(() => new Set(draftRelations), [draftRelations]);
+  const relationCatalogCountMap = useMemo(() => {
+    const next = new Map<string, number>();
+    for (const item of relationCatalogItems) {
+      const raw = String(item.relation_type || "").trim();
+      if (!raw) continue;
+      next.set(raw, Number(item.count) || 0);
+    }
+    return next;
+  }, [relationCatalogItems]);
 
   const baseRelations = useMemo(() => {
     const fromGraph = Array.from(relationCountMap.keys());
-    const merged = uniqueStrings([...relationTypes, ...fromGraph, ...draftRelations, ...appliedRelations]);
+    const fromCatalog = relationCatalogItems.map((item) => item.relation_type);
+    const merged = uniqueStrings([...fromCatalog, ...fromGraph, ...draftRelations, ...appliedRelations]);
     if (!scopeCurrentOnly) return merged;
     const currentSet = new Set(fromGraph);
     return merged.filter((raw) => currentSet.has(raw));
-  }, [relationTypes, relationCountMap, draftRelations, appliedRelations, scopeCurrentOnly]);
+  }, [relationCatalogItems, relationCountMap, draftRelations, appliedRelations, scopeCurrentOnly]);
 
   const filteredSortedItems = useMemo(() => {
-    const kw = normalizeText(debouncedKeyword);
+    const kw = normalizeText(relationCatalogQuery);
     const out: RelationItem[] = [];
     for (const raw of baseRelations) {
       const display = relationDisplay(raw) || raw;
@@ -162,7 +167,7 @@ export function RelationFilterPanel({
       out.push({
         raw,
         display,
-        count: relationCountMap.get(raw) || 0,
+        count: relationCountMap.get(raw) || relationCatalogCountMap.get(raw) || 0,
         selected: draftSet.has(raw),
         groupKey: getRelationGroupKey(display),
       });
@@ -182,7 +187,7 @@ export function RelationFilterPanel({
     });
 
     return out;
-  }, [baseRelations, debouncedKeyword, draftSet, matchMode, relationCountMap, sortMode]);
+  }, [baseRelations, draftSet, matchMode, relationCatalogCountMap, relationCatalogQuery, relationCountMap, sortMode]);
 
   const groupedItems = useMemo(() => {
     const m = new Map<string, RelationItem[]>();
@@ -208,20 +213,13 @@ export function RelationFilterPanel({
       });
   }, [groupedItems]);
 
-  useEffect(() => {
-    if (groupEntries.length === 0) {
-      setActiveGroupKey("");
-      return;
-    }
-    const exists = groupEntries.some((x) => x.groupKey === activeGroupKey);
-    if (!exists) setActiveGroupKey(groupEntries[0].groupKey);
-  }, [activeGroupKey, groupEntries]);
-
-  const activeGroupCollapsed = !!collapsedByGroup[activeGroupKey];
+  const effectiveActiveGroupKey =
+    groupEntries.some((x) => x.groupKey === activeGroupKey) ? activeGroupKey : (groupEntries[0]?.groupKey ?? "");
+  const activeGroupCollapsed = !!collapsedByGroup[effectiveActiveGroupKey];
   const rightItems = useMemo(() => {
-    if (!activeGroupKey || activeGroupCollapsed) return [];
-    return groupedItems.get(activeGroupKey) || [];
-  }, [activeGroupKey, activeGroupCollapsed, groupedItems]);
+    if (!effectiveActiveGroupKey || activeGroupCollapsed) return [];
+    return groupedItems.get(effectiveActiveGroupKey) || [];
+  }, [activeGroupCollapsed, effectiveActiveGroupKey, groupedItems]);
 
   const rowData = useMemo<RowData>(
     () => ({
@@ -242,8 +240,6 @@ export function RelationFilterPanel({
   const currentListRawRelations = useMemo(() => rightItems.map((x) => x.raw), [rightItems]);
   const keepEdges = estimateKeepEdges(draftRelations);
   const changePct = previewEdgeTotal > 0 ? ((keepEdges - previewEdgeTotal) / previewEdgeTotal) * 100 : 0;
-
-  if (!open) return null;
 
   return (
     <div
@@ -290,8 +286,8 @@ export function RelationFilterPanel({
 
           <div style={{ display: "grid", gridTemplateColumns: "minmax(220px,1fr) auto auto auto", gap: 8 }}>
             <input
-              value={keyword}
-              onChange={(e) => setKeyword(e.target.value)}
+              value={relationCatalogQuery}
+              onChange={(e) => onRelationCatalogQueryChange(e.target.value)}
               placeholder="搜索 relation（支持 display/raw）"
               style={{ padding: 8, minWidth: 0 }}
             />
@@ -328,7 +324,7 @@ export function RelationFilterPanel({
               反选当前列表
             </button>
             <div style={{ marginLeft: "auto", fontSize: 12, color: "#666", alignSelf: "center" }}>
-              已选 {draftRelations.length} 项
+              已选 {draftRelations.length} 项 | metadata 匹配 {relationCatalogMatchedTotal} 项
             </div>
           </div>
 
@@ -385,7 +381,7 @@ export function RelationFilterPanel({
             ) : (
               groupEntries.map((g) => {
                 const collapsed = !!collapsedByGroup[g.groupKey];
-                const active = g.groupKey === activeGroupKey;
+                const active = g.groupKey === effectiveActiveGroupKey;
                 return (
                   <div
                     key={g.groupKey}
@@ -433,7 +429,7 @@ export function RelationFilterPanel({
 
           <div style={{ border: "1px solid #eee", borderRadius: 8, overflow: "hidden", display: "grid", gridTemplateRows: "auto 1fr" }}>
             <div style={{ padding: "8px 10px", borderBottom: "1px solid #eee", fontSize: 12, color: "#666" }}>
-              当前分组：{activeGroupKey || "-"} | 右侧项数：{rightItems.length}
+              当前分组：{effectiveActiveGroupKey || "-"} | 右侧项数：{rightItems.length}
             </div>
             <div style={{ minHeight: 0 }}>
               {rightItems.length === 0 ? (
@@ -449,6 +445,18 @@ export function RelationFilterPanel({
                   {RelationRow}
                 </FixedSizeList>
               )}
+            </div>
+            <div style={{ padding: "8px 10px", borderTop: "1px solid #eee", display: "flex", gap: 8, alignItems: "center" }}>
+              <div style={{ fontSize: 12, color: "#666" }}>
+                {relationCatalogLoading ? "metadata 加载中…" : `已加载 metadata ${relationCatalogItems.length} 项`}
+              </div>
+              <button
+                onClick={onRelationCatalogLoadMore}
+                disabled={relationCatalogLoading || !relationCatalogHasMore}
+                style={{ marginLeft: "auto", padding: "6px 8px", fontSize: 12 }}
+              >
+                {relationCatalogHasMore ? "加载更多" : "已无更多"}
+              </button>
             </div>
           </div>
         </div>

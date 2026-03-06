@@ -1,0 +1,44 @@
+USE demo_kg;
+
+-- Entity base tag for full import (includes business fields only).
+CREATE TAG IF NOT EXISTS Entity(
+  entity_type string,
+  entity_name string,
+  entity_raw_id string,
+  description string,
+  source string
+);
+
+-- System fields for optimistic lock & audit trail.
+ALTER TAG Entity ADD (
+  version int64,
+  updated_at int64,
+  updated_by string
+);
+
+-- Ranked multi-edge type.
+CREATE EDGE IF NOT EXISTS REL2(
+  relation string,
+  source string,
+  evidence string,
+  version int64,
+  updated_at int64,
+  updated_by string
+);
+
+-- Metadata stats for stable type/relation options without online full-graph aggregation.
+CREATE TAG IF NOT EXISTS EntityTypeStat(
+  entity_type string,
+  entity_type_norm string,
+  count int64,
+  updated_at int64,
+  updated_by string
+);
+
+CREATE TAG IF NOT EXISTS RelationTypeStat(
+  relation_type string,
+  relation_type_norm string,
+  count int64,
+  updated_at int64,
+  updated_by string
+);

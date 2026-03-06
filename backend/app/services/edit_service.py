@@ -5,9 +5,15 @@ from fastapi import HTTPException
 
 from app.core import config, field_policy
 from app.core.audit_logger import write_audit_record
-from app.core.escape import escape_ngql_string, validate_text, validate_updated_by
+from app.core.escape import (
+    escape_ngql_string,
+    raise_validation_error,
+    validate_text,
+    validate_updated_by,
+)
 from app.db.nebula_client import NebulaExecutionError, execute_ngql_safe
 from app.schemas.edit import EdgePatchRequest, NodePatchRequest
+from app.services import metadata_service
 from app.services.common import vw
 
 
@@ -18,19 +24,27 @@ def editable_fields() -> Dict[str, Any]:
 def _parse_rank(rank: str) -> int:
     text = str(rank or "").strip()
     if not text:
-        raise HTTPException(status_code=422, detail="'rank' is required")
+        raise_validation_error("'rank' is required", field="rank")
     try:
         return int(text)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail="'rank' must be int64 string") from exc
+        raise_validation_error("'rank' must be int64 string", field="rank")
 
 
 def _ensure_expected_version(v: int) -> int:
     if not isinstance(v, int):
-        raise HTTPException(status_code=422, detail="'expected_version' must be int")
+        raise_validation_error("'expected_version' must be int", field="expected_version")
     if v < 0:
-        raise HTTPException(status_code=422, detail="'expected_version' must be >= 0")
+        raise_validation_error("'expected_version' must be >= 0", field="expected_version")
     return v
+
+
+def _detail_text(detail: Any) -> str:
+    if isinstance(detail, dict):
+        msg = detail.get("message")
+        if msg is not None:
+            return str(msg)
+    return str(detail)
 
 
 def _audit(
@@ -198,7 +212,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 max_len=config.ENTITY_FIELD_MAX_LEN[field_name],
                 multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
             )
-            set_clauses.append(f'`{field_name}` = "{escaped}"')
+            set_clauses.append(f'`Entity`.`{field_name}` = "{escaped}"')
             updated_values[field_name] = cleaned
             old_value = str(before.get(field_name) or "")
             if old_value != cleaned:
@@ -206,19 +220,27 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
 
         now_sec = int(time.time())
         new_version = before_version + 1
+        actor_escaped = escape_ngql_string(actor, "updated_by", config.SYSTEM_FIELD_MAX_LEN["updated_by"], False)
         set_clauses.extend(
             [
-                f"`version` = {new_version}",
-                f"`updated_at` = {now_sec}",
-                f'`updated_by` = "{escape_ngql_string(actor, "updated_by", config.SYSTEM_FIELD_MAX_LEN["updated_by"], False)}"',
+                f"`Entity`.`version` = {new_version}",
+                f"`Entity`.`updated_at` = {now_sec}",
+                f'`Entity`.`updated_by` = "{actor_escaped}"',
             ]
         )
         update_ngql = f"""
         UPDATE VERTEX ON `Entity` {int(vid)}
-        SET {", ".join(set_clauses)};
+        SET {", ".join(set_clauses)}
+        YIELD properties(vertex);
         """
         execute_ngql_safe(update_ngql)
         after = _node_snapshot(vid=int(vid))
+        if "entity_type" in incoming_set:
+            metadata_service.sync_entity_type_change(
+                before_type=str(before.get("entity_type") or ""),
+                after_type=str(after.get("entity_type") or ""),
+                actor=actor,
+            )
         _audit(
             actor=actor,
             object_type="node",
@@ -248,7 +270,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="validation_error",
                 error_code="VALIDATION_ERROR",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         elif exc.status_code == 404:
             _audit(
@@ -261,7 +283,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code="NOT_FOUND",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         elif exc.status_code not in (409,):
             _audit(
@@ -274,7 +296,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code=f"HTTP_{exc.status_code}",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         raise
     except NebulaExecutionError as exc:
@@ -302,10 +324,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
     rank_int = 0
     try:
         if req.edge_type and req.edge_type.strip() and req.edge_type.strip() != config.EDGE_TYPE:
-            raise HTTPException(
-                status_code=422,
-                detail=f"edge_type must be '{config.EDGE_TYPE}'",
-            )
+            raise_validation_error(f"edge_type must be '{config.EDGE_TYPE}'", field="edge_type")
         actor = validate_updated_by(req.updated_by)
         expected_version = _ensure_expected_version(req.expected_version)
         rank_int = _parse_rank(req.rank)
@@ -364,19 +383,27 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
 
         now_sec = int(time.time())
         new_version = before_version + 1
+        actor_escaped = escape_ngql_string(actor, "updated_by", config.SYSTEM_FIELD_MAX_LEN["updated_by"], False)
         set_clauses.extend(
             [
                 f"`version` = {new_version}",
                 f"`updated_at` = {now_sec}",
-                f'`updated_by` = "{escape_ngql_string(actor, "updated_by", config.SYSTEM_FIELD_MAX_LEN["updated_by"], False)}"',
+                f'`updated_by` = "{actor_escaped}"',
             ]
         )
         update_ngql = f"""
         UPDATE EDGE ON `{config.EDGE_TYPE}` {int(req.src)}->{int(req.dst)}@{rank_int}
-        SET {", ".join(set_clauses)};
+        SET {", ".join(set_clauses)}
+        YIELD properties(edge);
         """
         execute_ngql_safe(update_ngql)
         after = _edge_snapshot(src=int(req.src), dst=int(req.dst), rank=rank_int)
+        if "relation" in incoming_set:
+            metadata_service.sync_relation_type_change(
+                before_relation=str(before.get("relation") or ""),
+                after_relation=str(after.get("relation") or ""),
+                actor=actor,
+            )
         _audit(
             actor=actor,
             object_type="edge",
@@ -412,7 +439,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="validation_error",
                 error_code="VALIDATION_ERROR",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         elif exc.status_code == 404:
             _audit(
@@ -425,7 +452,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code="NOT_FOUND",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         elif exc.status_code not in (409,):
             _audit(
@@ -438,7 +465,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code=f"HTTP_{exc.status_code}",
-                error_message=str(exc.detail),
+                error_message=_detail_text(exc.detail),
             )
         raise
     except NebulaExecutionError as exc:

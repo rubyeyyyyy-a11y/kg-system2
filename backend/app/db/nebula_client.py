@@ -15,7 +15,7 @@ class NebulaExecutionError(RuntimeError):
         self.code = code
 
 
-def execute_ngql_safe(ngql: str, retries: int = 1, sleep_sec: float = 0.05) -> Any:
+def execute_ngql_safe(ngql: str, retries: int = 0, sleep_sec: float = 0.05) -> Any:
     last_error: NebulaExecutionError | None = None
     attempts = max(1, retries + 1)
     for attempt in range(1, attempts + 1):
