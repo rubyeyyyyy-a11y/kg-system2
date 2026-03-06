@@ -3,48 +3,59 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-cleanup_stale_pid_file "$BACKEND_PID_FILE"
-cleanup_stale_pid_file "$FRONTEND_PID_FILE"
-
 status=0
 
-backend_pid="$(read_pid_file "$BACKEND_PID_FILE" || true)"
-frontend_pid="$(read_pid_file "$FRONTEND_PID_FILE" || true)"
+print_service_state() {
+  local name="$1"
+  local log_file="$2"
+  local -n state_ref="$3"
 
-if [ -n "$backend_pid" ] && is_pid_running "$backend_pid"; then
-  if curl -fsS "$(backend_url)/api/health" >/dev/null 2>&1; then
-    echo "backend: running pid=$backend_pid url=$(backend_url) health=ok log=$BACKEND_LOG_FILE"
-  else
-    echo "backend: running pid=$backend_pid url=$(backend_url) health=fail log=$BACKEND_LOG_FILE"
-    status=1
-  fi
-else
-  fallback_backend="$(find_backend_pids | tr '\n' ' ' | xargs -r echo || true)"
-  if [ -n "$fallback_backend" ]; then
-    echo "backend: running_without_pidfile pids=$fallback_backend url=$(backend_url) log=$BACKEND_LOG_FILE"
-    status=1
-  else
-    echo "backend: stopped"
-    status=1
-  fi
-fi
+  local pid_display="${state_ref[pid]:-missing}"
+  local matched_display="${state_ref[matched_pids]:-none}"
+  local pidfile_display="missing"
+  local port_display="closed"
+  local http_display="fail"
 
-if [ -n "$frontend_pid" ] && is_pid_running "$frontend_pid"; then
-  if curl -fsS "$(frontend_url)" >/dev/null 2>&1; then
-    echo "frontend: running pid=$frontend_pid url=$(frontend_url) health=ok log=$FRONTEND_LOG_FILE"
-  else
-    echo "frontend: running pid=$frontend_pid url=$(frontend_url) health=fail log=$FRONTEND_LOG_FILE"
+  if [ "${state_ref[pid_file_present]}" -eq 1 ]; then
+    pidfile_display="present"
+  fi
+  if [ "${state_ref[port_listening]}" -eq 1 ]; then
+    port_display="listening"
+  fi
+  if [ "${state_ref[http_reachable]}" -eq 1 ]; then
+    http_display="ok"
+  fi
+
+  printf '%s: status=%s pidfile=%s pid=%s pid_running=%s matched_pids=%s port=%s:%s http=%s url=%s log=%s' \
+    "$name" \
+    "${state_ref[status]}" \
+    "$pidfile_display" \
+    "$pid_display" \
+    "${state_ref[pid_running]}" \
+    "$matched_display" \
+    "${state_ref[port]}" \
+    "$port_display" \
+    "$http_display" \
+    "${state_ref[url]}" \
+    "$log_file"
+
+  if [ -n "${state_ref[detail]}" ]; then
+    printf ' detail=%s' "${state_ref[detail]}"
+  fi
+  printf '\n'
+
+  if [ "${state_ref[status]}" != "running" ]; then
     status=1
   fi
-else
-  fallback_frontend="$(find_frontend_pids | tr '\n' ' ' | xargs -r echo || true)"
-  if [ -n "$fallback_frontend" ]; then
-    echo "frontend: running_without_pidfile pids=$fallback_frontend url=$(frontend_url) log=$FRONTEND_LOG_FILE"
-    status=1
-  else
-    echo "frontend: stopped"
-    status=1
-  fi
-fi
+}
+
+declare -A backend_state=()
+declare -A frontend_state=()
+
+collect_service_state "$BACKEND_PID_FILE" "$BACKEND_PORT" "$(backend_url)/api/health" find_backend_pids backend_state
+collect_service_state "$FRONTEND_PID_FILE" "$FRONTEND_PORT" "$(frontend_url)" find_frontend_pids frontend_state
+
+print_service_state "backend" "$BACKEND_LOG_FILE" backend_state
+print_service_state "frontend" "$FRONTEND_LOG_FILE" frontend_state
 
 exit "$status"

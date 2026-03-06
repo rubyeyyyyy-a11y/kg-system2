@@ -6,10 +6,11 @@
 
 结论（基于本次实际运行）：
 - 后端可启动，`/api/health` 与核心接口可用。
-- 前端可启动（本机 `5173` 被占用时自动切到 `5174`）。
+- 前端可启动；标准脚本使用 `5173` 且启用了 `--strictPort`，端口冲突时会明确失败，不再静默切换端口。
 - 搜索已是 ES-first，`/api/search` 默认 nodes-first，不默认联带边。
 - 图扩展接口预算生效，返回 `stats.truncated/dropped_*/budget_applied`。
 - metadata 接口（`/api/entity_types`、`/api/relation_types`）可用，来自 Nebula metadata tags，而非请求期全图聚合。
+- 当前脚本体系已补齐 `start/check/verify/smoke/stop` 闭环：状态判断不再只依赖 pidfile，`stop` 返回前会等待真实退出。
 - 存在未闭环项：前端 lint 未通过、浏览器自动化烟测受系统依赖限制、`/api/relation_types` 返回量偏大。
 
 ## 2. 新架构说明（贴合当前仓库）
@@ -64,14 +65,22 @@
 标准脚本（当前推荐）：
 - `bash scripts/start_stack.sh`
 - `bash scripts/check_stack.sh`
+- `bash scripts/verify_stack.sh`
+- `bash scripts/smoke_api.sh`
 - `bash scripts/stop_stack.sh`
+- `bash scripts/check_stack.sh`
 
 脚本约定：
 - 默认后端：`127.0.0.1:8000`
 - 默认前端：`127.0.0.1:5173`
 - 日志目录：`.run/logs/`
 - PID 文件：`.run/backend.pid`、`.run/frontend.pid`
-- 启动前会尝试停止当前仓库同端口的旧 `uvicorn/vite` 进程，避免 split-brain
+- `start_stack.sh` 启动前会尝试停止当前仓库同端口的旧 `uvicorn/vite` 进程，避免 split-brain
+- `start_stack.sh` 先写 `.run/*.pid.starting`，只在目标进程真实占有端口且 HTTP 可达后才落正式 pidfile
+- `check_stack.sh` 组合判断 pidfile、pid、端口、HTTP，输出 `running / degraded / stale_pidfile / stopped`
+- `verify_stack.sh` 以真实可达性为准，不会因单独 pidfile 缺失而直接失败
+- `smoke_api.sh` 只依赖后端服务可达性，逐项输出各 API 的结果
+- `stop_stack.sh` 会等待进程真实退出和端口释放；若端口仍被外部进程占用，会输出 `stop_incomplete` 并返回非 0
 - 若依赖未准备好会直接失败并给出明确提示，不会自动安装
 
 前置条件：
@@ -136,9 +145,9 @@
 - 关键输出：`Uvicorn running on http://127.0.0.1:8000`
 
 前端启动成功：
-- 命令：`cd frontend && npm run dev -- --host 127.0.0.1 --port 5173`
-- 本次输出：`Port 5173 is in use, trying another one... Local: http://127.0.0.1:5174/`
-- 额外检查：`curl -I http://127.0.0.1:5173` 与 `curl -I http://127.0.0.1:5174` 均为 `200`。
+- 命令：`bash scripts/start_stack.sh`
+- 本次脚本行为：前端固定使用 `http://127.0.0.1:5173`，端口冲突时启动明确失败，不再自动切到 `5174`
+- 验证命令：`bash scripts/check_stack.sh`、`bash scripts/verify_stack.sh`
 
 ### 8.2 API 验证（你要求的接口）
 
@@ -220,6 +229,8 @@
 检查：
 - `ES_URL`、`ES_INDEX`、`ES_ENABLED`
 - ES 索引是否存在并有文档
+- 正式搜索链路应使用 `kg_entity`
+- `kg_entity_dev` 仅允许作为开发样本索引，不作为正式搜索验证依据
 
 重建索引：
 - `cd backend && .venv/bin/python scripts/build_es_index.py --batch-size 500`
@@ -239,10 +250,11 @@
 ### 10.5 前端端口冲突
 
 现象：
-- `Port 5173 is in use, trying another one...`
+- `start_stack.sh` 失败，`frontend.log` 中出现 `Port 5173 is already in use`
 
 处理：
-- 结束旧 vite 进程，或直接使用新端口。
+- 结束旧监听进程后重试 `bash scripts/start_stack.sh`
+- 用 `bash scripts/check_stack.sh` 或 `ss -ltnp '( sport = :5173 )'` 确认占用者
 
 ## 11. 仍未解决的问题与后续建议（如实）
 

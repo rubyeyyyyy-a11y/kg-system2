@@ -6,20 +6,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 SMOKE_SEARCH_Q="${SMOKE_SEARCH_Q:-ca}"
 SMOKE_ROOT_VID="${SMOKE_ROOT_VID:-1}"
 
-cleanup_stale_pid_file "$BACKEND_PID_FILE"
-cleanup_stale_pid_file "$FRONTEND_PID_FILE"
+declare -A backend_state=()
 
-backend_pid="$(read_pid_file "$BACKEND_PID_FILE" || true)"
-frontend_pid="$(read_pid_file "$FRONTEND_PID_FILE" || true)"
-
-[ -n "$backend_pid" ] && is_pid_running "$backend_pid" || fail "backend is not running; start with bash scripts/start_stack.sh"
-[ -n "$frontend_pid" ] && is_pid_running "$frontend_pid" || fail "frontend is not running; start with bash scripts/start_stack.sh"
+collect_service_state "$BACKEND_PID_FILE" "$BACKEND_PORT" "$(backend_url)/api/health" find_backend_pids backend_state
+require_service_http "backend" backend_state
 
 backend_base="$(backend_url)"
-frontend_base="$(frontend_url)"
 
-echo "[smoke] frontend entry: $frontend_base"
-curl -fsSI --max-time 5 "$frontend_base" >/dev/null
+printf '[smoke] backend state: %s\n' "$(service_state_summary backend_state)"
 
 echo "[smoke] GET /api/health"
 health_json="$(curl -fsS --max-time 10 "$backend_base/api/health")"

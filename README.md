@@ -29,6 +29,7 @@ bash scripts/check_stack.sh
 bash scripts/verify_stack.sh
 bash scripts/smoke_api.sh
 bash scripts/stop_stack.sh
+bash scripts/check_stack.sh
 ```
 
 说明：
@@ -37,9 +38,21 @@ bash scripts/stop_stack.sh
 - 默认前端地址：`http://127.0.0.1:5173`
 - 运行日志：`.run/logs/backend.log`、`.run/logs/frontend.log`
 - PID 文件：`.run/backend.pid`、`.run/frontend.pid`
-- 标准 smoke 验证：`bash scripts/verify_stack.sh`
+- 运行态验证：`bash scripts/verify_stack.sh`
 - API 回归 smoke：`bash scripts/smoke_api.sh`
 - 可覆盖环境变量：`BACKEND_HOST` / `BACKEND_PORT` / `FRONTEND_HOST` / `FRONTEND_PORT`
+- `start_stack.sh` 只会在目标进程真实占有端口且 HTTP 可达后写入正式 pidfile；启动失败不会留下脏 pidfile
+- `check_stack.sh` 组合判断 `pidfile / pid 存活 / 端口监听 / HTTP 可达`，会输出 `running / degraded / stale_pidfile / stopped`
+- `verify_stack.sh` 以真实可达性为准；即使 pidfile 缺失，只要前后端仍可访问，验证仍会继续并显示 `pidfile_missing`
+- `smoke_api.sh` 只依赖后端可达性，不依赖前端或 pidfile
+- `stop_stack.sh` 返回前会等待真实退出与端口释放；若端口被外部进程占用，会输出 `stop_incomplete` 并返回非 0
+
+常见排查：
+
+- 若 `check_stack.sh` 显示 `stale_pidfile`，说明 pidfile 仍在但服务已不在，可直接重新执行 `bash scripts/start_stack.sh`
+- 若显示 `degraded` 且带 `pidfile_missing`，优先看端口和 HTTP；这通常表示服务仍活着，但 pidfile 丢失
+- 若 `stop_stack.sh` 输出 `stop_incomplete`，用 `bash scripts/check_stack.sh` 和 `ss -ltnp '( sport = :8000 or sport = :5173 )'` 确认残留监听者
+- 详细启动/停止日志查看 `.run/logs/backend.log`、`.run/logs/frontend.log`
 
 前置条件：
 

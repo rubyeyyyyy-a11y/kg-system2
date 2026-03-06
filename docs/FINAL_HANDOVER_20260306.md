@@ -91,8 +91,8 @@ bash scripts/stop_stack.sh
 
 说明：
 
-- `stop_stack.sh` 后若立即并行执行 `check_stack.sh`，可能短暂看到后端仍在退出中的状态。
-- 最终确认关闭状态时，请串行再执行一次 `bash scripts/check_stack.sh`。
+- `start_stack.sh` 只会在目标进程真实占有端口且 HTTP 可达后写入 `.run/backend.pid`、`.run/frontend.pid`
+- `stop_stack.sh` 返回前会等待真实退出与端口释放；最终确认关闭状态时仍建议串行再执行一次 `bash scripts/check_stack.sh`
 
 ### 3.2 脚本说明
 
@@ -101,13 +101,15 @@ bash scripts/stop_stack.sh
   - 写入 `.run/backend.pid`、`.run/frontend.pid`
   - 日志输出到 `.run/logs/backend.log`、`.run/logs/frontend.log`
 - `scripts/check_stack.sh`
-  - 检查进程是否存在
-  - 检查后端 health 与前端入口可达性
+  - 组合检查 pidfile、pid、端口、HTTP
+  - 输出 `running / degraded / stale_pidfile / stopped`
 - `scripts/verify_stack.sh`
   - 做最小运行态验证
+  - 以真实可达性为准，不会因单独 pidfile 缺失而直接失败
   - 输出后端 `/api/health` 响应和前端响应头
 - `scripts/smoke_api.sh`
   - 做最小 API 回归
+  - 只依赖后端服务可达性，不依赖前端或 pidfile
   - 当前覆盖：
     - `GET /api/health`
     - `GET /api/entity_types`
@@ -116,7 +118,8 @@ bash scripts/stop_stack.sh
     - `POST /api/subgraph`
 - `scripts/stop_stack.sh`
   - 关闭前后端
-  - 清理 pid 状态
+  - 等待进程真实退出与端口释放
+  - 若残留端口由外部进程占用，输出 `stop_incomplete` 并返回非 0
 
 ### 3.3 前置条件
 

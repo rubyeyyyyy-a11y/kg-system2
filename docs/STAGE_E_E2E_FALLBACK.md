@@ -75,8 +75,8 @@ bash scripts/stop_stack.sh
 
 说明：
 
-- `verify_stack.sh`：检查前后端进程与基础可达性
-- `smoke_api.sh`：执行最小 API 回归，覆盖：
+- `verify_stack.sh`：检查前后端真实可达性，并输出运行态摘要；不会因单独 pidfile 缺失而直接失败
+- `smoke_api.sh`：只依赖后端服务可达性，执行最小 API 回归，覆盖：
   - `GET /api/health`
   - `GET /api/entity_types`
   - `GET /api/relation_types?limit=20&offset=0`
