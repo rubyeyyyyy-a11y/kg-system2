@@ -3,6 +3,7 @@ import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   edgeDetail as edgeDetailApi,
   edgeSearch as edgeSearchApi,
+  graphDiscovery as graphDiscoveryApi,
   patchEdge as patchEdgeApi,
   patchNode as patchNodeApi,
   multiEntityGraph as multiEntityGraphApi,
@@ -11,6 +12,7 @@ import {
   relationTypes as relationTypesApi,
   search as searchApi,
 } from "./api/kg";
+import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { LeftSearchPanel } from "./components/LeftSearchPanel";
 import { Resizer } from "./components/Resizer";
 import { TopBar } from "./components/TopBar";
@@ -23,10 +25,12 @@ import { useSuggest } from "./hooks/useSuggest";
 import { useVisibilityRanking } from "./hooks/useVisibilityRanking";
 import { parseApiError } from "./utils/httpError";
 import type {
+  EdgeBrief,
   EdgeDetailResp,
   EdgePatchResp,
   EdgeSearchItem,
   EdgeSearchResp,
+  GraphDiscoveryResp,
   MultiEntityGraphResp,
   NodeBrief,
   NodeDetailResp,
@@ -60,6 +64,52 @@ type MultiGraphRequest = {
   ignore_direction: boolean;
 };
 
+type LegacyWorkspaceSession =
+  | {
+      kind: "single";
+      rootVid: number;
+      hop: number;
+      relations: string[];
+    }
+  | {
+      kind: "multi";
+      params: MultiGraphParams;
+      relations: string[];
+    }
+  | null;
+
+type GraphSourceMode = "single" | "multi" | "discovery";
+
+type WorkspaceMode = "legacy" | "discovery";
+
+type DiscoveryRequest = {
+  seed_vids: number[];
+  allowed_entity_types: string[];
+  allowed_relation_types: string[];
+  max_nodes: number;
+  max_edges: number;
+  top_k_per_type: number;
+  include_candidate_candidate_edges: boolean;
+  include_seed_seed_edges: boolean;
+  hop: number;
+};
+
+type DiscoveryQueryState = {
+  allowedEntityTypes: string[];
+  allowedRelationTypes: string[];
+  maxNodes: number;
+  maxEdges: number;
+  topKPerType: number;
+  includeCandidateCandidateEdges: boolean;
+  includeSeedSeedEdges: boolean;
+  hop: number;
+};
+
+type DiscoveryRuntimeState = {
+  entityTypes: string[];
+  relationTypes: string[];
+};
+
 type UiNotice = {
   level: "error" | "warn" | "info";
   message: string;
@@ -72,6 +122,8 @@ const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_DEFAULT_WIDTH = 420;
 const EDGE_TYPE_DEFAULT = "REL2";
 const RELATION_TYPES_PAGE_SIZE = 100;
+const EMPTY_GRAPH_NODES: NodeBrief[] = [];
+const EMPTY_GRAPH_EDGES: EdgeBrief[] = [];
 const GraphCanvas = lazy(() => import("./components/GraphCanvas").then((mod) => ({ default: mod.GraphCanvas })));
 const RightDetailPanel = lazy(() =>
   import("./components/RightDetailPanel").then((mod) => ({ default: mod.RightDetailPanel }))
@@ -125,7 +177,24 @@ function LoadingPanel({ message, style }: { message: string; style?: CSSProperti
   );
 }
 
+function hashText(input: string) {
+  let hash = 0;
+  for (let i = 0; i < input.length; i += 1) hash = (hash * 31 + input.charCodeAt(i)) | 0;
+  return Math.abs(hash);
+}
+
+function discoveryTypeColor(entityType: string) {
+  const text = String(entityType || "").trim();
+  if (!text) return { fill: "#d9d9d9", stroke: "#8c8c8c" };
+  const hue = hashText(text) % 360;
+  return {
+    fill: `hsl(${hue} 68% 78%)`,
+    stroke: `hsl(${hue} 58% 42%)`,
+  };
+}
+
 export default function App() {
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("legacy");
   const [q, setQ] = useState("");
   const [searchName, setSearchName] = useState(true);
   const [searchDesc, setSearchDesc] = useState(false);
@@ -155,10 +224,29 @@ export default function App() {
   const [pendingEdgeLocate, setPendingEdgeLocate] = useState<EdgeSearchItem | null>(null);
 
   const [loadingMultiGraph, setLoadingMultiGraph] = useState(false);
+  const [loadingDiscovery, setLoadingDiscovery] = useState(false);
   const [loadingApplyPathChoice, setLoadingApplyPathChoice] = useState(false);
-  const [graphSourceMode, setGraphSourceMode] = useState<"single" | "multi">("single");
+  const [graphSourceMode, setGraphSourceMode] = useState<GraphSourceMode>("single");
+  const [legacyWorkspaceSession, setLegacyWorkspaceSession] = useState<LegacyWorkspaceSession>(null);
   const [lastMultiGraphParams, setLastMultiGraphParams] = useState<MultiGraphParams | null>(null);
   const [lastMultiGraphRequest, setLastMultiGraphRequest] = useState<MultiGraphRequest | null>(null);
+  const [lastDiscoveryRequest, setLastDiscoveryRequest] = useState<DiscoveryRequest | null>(null);
+  const [discoverySeeds, setDiscoverySeeds] = useState<SuggestItem[]>([]);
+  const [discoveryResult, setDiscoveryResult] = useState<GraphDiscoveryResp | null>(null);
+  const [discoveryQuery, setDiscoveryQuery] = useState<DiscoveryQueryState>({
+    allowedEntityTypes: [],
+    allowedRelationTypes: [],
+    maxNodes: 180,
+    maxEdges: 500,
+    topKPerType: 12,
+    includeCandidateCandidateEdges: true,
+    includeSeedSeedEdges: false,
+    hop: 1,
+  });
+  const [discoveryRuntimeFilters, setDiscoveryRuntimeFilters] = useState<DiscoveryRuntimeState>({
+    entityTypes: [],
+    relationTypes: [],
+  });
   const [pathCandidates, setPathCandidates] = useState<PairPathCandidate[]>([]);
   const [chosenPathByPair, setChosenPathByPair] = useState<Record<string, number>>({});
   const [appliedExtraPaths, setAppliedExtraPaths] = useState<Record<string, number[]>>({});
@@ -261,6 +349,70 @@ export default function App() {
         updated_by: resp.updated_by,
       };
     });
+    setDiscoverySeeds((prev) =>
+      prev.map((item) =>
+        item.vid === vid
+          ? {
+              ...item,
+              label: resp.updated.entity_name ?? item.label,
+              entity_type: resp.updated.entity_type ?? item.entity_type,
+              source: resp.updated.source ?? item.source,
+            }
+          : item
+      )
+    );
+    setDiscoveryResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        nodes: prev.nodes.map((node) =>
+          node.id === vid
+            ? {
+                ...node,
+                label: resp.updated.entity_name ?? node.label,
+                entity_type: resp.updated.entity_type ?? node.entity_type,
+                source: resp.updated.source ?? node.source,
+                snippet: resp.updated.description ?? node.snippet,
+              }
+            : node
+        ),
+      };
+    });
+    setLastMultiGraphParams((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        selectedEntities: prev.selectedEntities.map((item) =>
+          item.vid === vid
+            ? {
+                ...item,
+                label: resp.updated.entity_name ?? item.label,
+                entity_type: resp.updated.entity_type ?? item.entity_type,
+                source: resp.updated.source ?? item.source,
+              }
+            : item
+        ),
+      };
+    });
+    setLegacyWorkspaceSession((prev) => {
+      if (!prev || prev.kind !== "multi") return prev;
+      return {
+        ...prev,
+        params: {
+          ...prev.params,
+          selectedEntities: prev.params.selectedEntities.map((item) =>
+            item.vid === vid
+              ? {
+                  ...item,
+                  label: resp.updated.entity_name ?? item.label,
+                  entity_type: resp.updated.entity_type ?? item.entity_type,
+                  source: resp.updated.source ?? item.source,
+                }
+              : item
+          ),
+        },
+      };
+    });
     return resp;
   }
 
@@ -326,6 +478,25 @@ export default function App() {
         };
       }),
     }));
+    setDiscoveryResult((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        edges: prev.edges.map((edge) => {
+          const same =
+            Number(edge.source) === Number(identity.src) &&
+            Number(edge.target) === Number(identity.dst) &&
+            String(edge.rank || "0") === String(identity.rank) &&
+            String(edge.edge_type || EDGE_TYPE_DEFAULT) === String(identity.edge_type || EDGE_TYPE_DEFAULT);
+          if (!same) return edge;
+          return {
+            ...edge,
+            relation: resp.updated.relation ?? edge.relation,
+            source_db: resp.updated.source ?? edge.source_db,
+          };
+        }),
+      };
+    });
     return resp;
   }
 
@@ -371,6 +542,7 @@ export default function App() {
     revealNode,
     unrevealNode,
     collapseExpandFromNode,
+    clearGraphData,
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,
@@ -384,7 +556,7 @@ export default function App() {
     onNotice: (level, message) => setUiNotice({ level, message }),
   });
 
-  const graphBusy = loadingGraph || loadingMultiGraph || loadingApplyPathChoice;
+  const graphBusy = loadingGraph || loadingMultiGraph || loadingDiscovery || loadingApplyPathChoice;
   const [leftW, setLeftW] = useState<number>(() => loadSidebarWidth(LEFT_WIDTH_KEY));
   const [rightW, setRightW] = useState<number>(() => loadSidebarWidth(RIGHT_WIDTH_KEY));
   const resizingSideRef = useRef<"left" | "right" | null>(null);
@@ -456,6 +628,180 @@ export default function App() {
     setAppliedExtraPaths({});
   }
 
+  function rememberSingleLegacySession(nextRoot: number, nextHop: number, nextRelations: string[]) {
+    setLegacyWorkspaceSession({
+      kind: "single",
+      rootVid: nextRoot,
+      hop: nextHop,
+      relations: [...nextRelations],
+    });
+  }
+
+  function rememberCurrentLegacySession() {
+    if (graphSourceMode === "multi" && lastMultiGraphParams) {
+      setLegacyWorkspaceSession({
+        kind: "multi",
+        params: { ...lastMultiGraphParams, selectedEntities: [...lastMultiGraphParams.selectedEntities] },
+        relations: [...relations],
+      });
+      return;
+    }
+    if (graphSourceMode === "single" && rootVid != null) {
+      rememberSingleLegacySession(rootVid, hop, relations);
+    }
+  }
+
+  function applyDiscoveryPayload(
+    json: GraphDiscoveryResp,
+    request: DiscoveryRequest,
+    options?: { resetRuntimeFilters?: boolean }
+  ) {
+    const resetRuntimeFilters = options?.resetRuntimeFilters ?? true;
+    const nodeMap = new Map<number, NodeBrief>();
+    for (const node of json.nodes || []) nodeMap.set(node.id, node);
+    for (const seed of discoverySeeds) {
+      const existing = nodeMap.get(seed.vid);
+      if (!existing) {
+        nodeMap.set(seed.vid, {
+          id: seed.vid,
+          label: seed.label,
+          entity_type: seed.entity_type || "",
+          source: seed.source,
+          role: "seed",
+        });
+        continue;
+      }
+      nodeMap.set(seed.vid, {
+        ...existing,
+        label: existing.label || seed.label,
+        entity_type: existing.entity_type || seed.entity_type || "",
+        source: existing.source || seed.source,
+        role: "seed",
+      });
+    }
+
+    const nextPayload: GraphDiscoveryResp = {
+      ...json,
+      nodes: Array.from(nodeMap.values()),
+      edges: Array.isArray(json.edges) ? json.edges : [],
+    };
+
+    replaceGraphData({
+      rootVid: request.seed_vids[0],
+      nodes: nextPayload.nodes,
+      edges: nextPayload.edges,
+      stats: (nextPayload.stats || null) as Record<string, unknown> | null,
+      hop: request.hop,
+    });
+    setDiscoveryResult(nextPayload);
+    setLastDiscoveryRequest(request);
+    if (resetRuntimeFilters) {
+      setDiscoveryRuntimeFilters({
+        entityTypes: (nextPayload.facets?.entity_types || []).map((item) => item.entity_type),
+        relationTypes: (nextPayload.facets?.relation_types || []).map((item) => item.relation_type),
+      });
+    }
+    setGraphSourceMode("discovery");
+    setLastMultiGraphParams(null);
+    clearMultiPathState();
+    setRenderEdgeLabels(true);
+  }
+
+  async function restoreLegacyWorkspace() {
+    if (legacyWorkspaceSession?.kind === "multi") {
+      setRelations(legacyWorkspaceSession.relations);
+      await runMultiGraph(legacyWorkspaceSession.params, legacyWorkspaceSession.relations);
+      return;
+    }
+    if (legacyWorkspaceSession?.kind === "single") {
+      setGraphSourceMode("single");
+      setHop(legacyWorkspaceSession.hop);
+      setRelations(legacyWorkspaceSession.relations);
+      setLastMultiGraphParams(null);
+      clearMultiPathState();
+      await loadSubgraphWithParams(
+        legacyWorkspaceSession.rootVid,
+        legacyWorkspaceSession.hop,
+        legacyWorkspaceSession.relations
+      );
+      return;
+    }
+    setGraphSourceMode("single");
+    setLastMultiGraphParams(null);
+    clearMultiPathState();
+    clearGraphData();
+  }
+
+  function restoreDiscoveryWorkspace() {
+    if (!discoveryResult || !lastDiscoveryRequest) {
+      setGraphSourceMode("discovery");
+      setLastMultiGraphParams(null);
+      clearMultiPathState();
+      clearGraphData();
+      return;
+    }
+    applyDiscoveryPayload(discoveryResult, lastDiscoveryRequest, { resetRuntimeFilters: false });
+  }
+
+  async function switchWorkspaceMode(nextMode: WorkspaceMode) {
+    if (nextMode === workspaceMode) return;
+    setUiNotice(null);
+
+    if (nextMode === "discovery") {
+      if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
+      setWorkspaceMode("discovery");
+      void ensureEntityTypesLoaded();
+      restoreDiscoveryWorkspace();
+      return;
+    }
+
+    setWorkspaceMode("legacy");
+    if (graphSourceMode === "discovery") {
+      await restoreLegacyWorkspace();
+    }
+  }
+
+  function buildDiscoveryRequest(queryState = discoveryQuery): DiscoveryRequest {
+    return {
+      seed_vids: discoverySeeds.map((item) => item.vid),
+      allowed_entity_types: queryState.allowedEntityTypes,
+      allowed_relation_types: queryState.allowedRelationTypes,
+      max_nodes: queryState.maxNodes,
+      max_edges: queryState.maxEdges,
+      top_k_per_type: queryState.topKPerType,
+      include_candidate_candidate_edges: queryState.includeCandidateCandidateEdges,
+      include_seed_seed_edges: queryState.includeSeedSeedEdges,
+      hop: queryState.hop,
+    };
+  }
+
+  async function runDiscovery(requestOverride?: DiscoveryRequest) {
+    const request = requestOverride ?? buildDiscoveryRequest();
+    if (request.seed_vids.length <= 0) {
+      setUiNotice({ level: "info", message: "请先添加至少一个 seed 节点。" });
+      return;
+    }
+
+    if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
+    relationFilter.exitPreview();
+    setLoadingDiscovery(true);
+    try {
+      const json = await graphDiscoveryApi(request);
+      applyDiscoveryPayload(json, request);
+      if (json.stats?.truncated) {
+        setUiNotice({
+          level: "warn",
+          message: `统一关系发现结果已裁剪：dropped_nodes=${Number(json.stats.dropped_nodes || 0)} dropped_edges=${Number(json.stats.dropped_edges || 0)} dropped_neighbors=${Number(json.stats.dropped_neighbors || 0)}`,
+        });
+      }
+    } catch (e: unknown) {
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `统一关系发现失败：${parsed.message}` });
+    } finally {
+      setLoadingDiscovery(false);
+    }
+  }
+
   function buildChosenPathMap(nextCandidates: PairPathCandidate[]): Record<string, number> {
     const next: Record<string, number> = {};
     for (const pair of nextCandidates) {
@@ -504,6 +850,11 @@ export default function App() {
     setAppliedExtraPaths({});
     setGraphSourceMode("multi");
     setLastMultiGraphParams({ ...params, selectedEntities });
+    setLegacyWorkspaceSession({
+      kind: "multi",
+      params: { ...params, selectedEntities: [...selectedEntities] },
+      relations: [...request.relations],
+    });
     setLastMultiGraphRequest(request);
   }
 
@@ -779,6 +1130,7 @@ export default function App() {
     setLastMultiGraphParams(null);
     clearMultiPathState();
     await loadSubgraph(vid);
+    rememberSingleLegacySession(vid, hop, relations);
     if (autoSelectRoot) handleSelectNode(vid);
   }
 
@@ -793,6 +1145,10 @@ export default function App() {
   }
 
   async function reloadGraphByCurrentMode(nextRoot: number) {
+    if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
+      await runDiscovery(lastDiscoveryRequest);
+      return;
+    }
     if (graphSourceMode === "multi" && lastMultiGraphParams) {
       await runMultiGraph(lastMultiGraphParams);
       return;
@@ -802,6 +1158,14 @@ export default function App() {
 
   async function loadGraphWithFilters(nextRoot: number, nextHop: number, nextRelations: string[]) {
     relationFilter.exitPreview();
+    if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
+      await runDiscovery({
+        ...lastDiscoveryRequest,
+        allowed_relation_types: nextRelations,
+        hop: nextHop,
+      });
+      return;
+    }
     if (graphSourceMode === "multi" && lastMultiGraphParams) {
       await runMultiGraph(lastMultiGraphParams, nextRelations);
       return;
@@ -810,6 +1174,7 @@ export default function App() {
     setLastMultiGraphParams(null);
     clearMultiPathState();
     await loadSubgraphWithParams(nextRoot, nextHop, nextRelations);
+    rememberSingleLegacySession(nextRoot, nextHop, nextRelations);
   }
 
   const {
@@ -891,16 +1256,71 @@ export default function App() {
     },
   });
 
-  const effectiveGraphNodes = relationFilter.previewActive ? relationFilter.previewNodes : graphNodes;
-  const effectiveGraphEdges = relationFilter.previewActive ? relationFilter.previewEdges : graphEdges;
-  const effectiveGraphStats = relationFilter.previewActive
-    ? ({
+  const discoveryFilteredGraph = useMemo(() => {
+    if (workspaceMode !== "discovery" || graphSourceMode !== "discovery" || !discoveryResult) return null;
+
+    const seedIds = new Set<number>(
+      (graphNodes || []).filter((node) => node.role === "seed").map((node) => node.id)
+    );
+    const allowedEntityTypes = new Set(discoveryRuntimeFilters.entityTypes);
+    const allowedRelationTypes = new Set(discoveryRuntimeFilters.relationTypes);
+    const candidateAllowedIds = new Set<number>();
+    for (const node of graphNodes) {
+      if (seedIds.has(node.id)) {
+        candidateAllowedIds.add(node.id);
+        continue;
+      }
+      if (allowedEntityTypes.has(String(node.entity_type || ""))) candidateAllowedIds.add(node.id);
+    }
+
+    const filteredEdges = graphEdges.filter((edge) => {
+      if (!allowedRelationTypes.has(String(edge.relation || ""))) return false;
+      return candidateAllowedIds.has(Number(edge.source)) && candidateAllowedIds.has(Number(edge.target));
+    });
+
+    const connectedIds = new Set<number>(seedIds);
+    for (const edge of filteredEdges) {
+      connectedIds.add(Number(edge.source));
+      connectedIds.add(Number(edge.target));
+    }
+
+    const filteredNodes = graphNodes.filter((node) => seedIds.has(node.id) || connectedIds.has(node.id));
+    return {
+      nodes: filteredNodes,
+      edges: filteredEdges,
+      stats: {
         ...(graphStats || {}),
-        relation_preview: true,
-        node_count: effectiveGraphNodes.length,
-        edge_count: effectiveGraphEdges.length,
-      } as Record<string, unknown>)
-    : graphStats;
+        runtime_filter: true,
+        node_count: filteredNodes.length,
+        edge_count: filteredEdges.length,
+      } as Record<string, unknown>,
+    };
+  }, [workspaceMode, graphSourceMode, discoveryResult, graphNodes, graphEdges, graphStats, discoveryRuntimeFilters]);
+
+  const discoveryWorkspaceReady = workspaceMode === "discovery" && graphSourceMode === "discovery" && !!discoveryResult;
+  const effectiveGraphNodes =
+    workspaceMode === "discovery"
+      ? discoveryFilteredGraph?.nodes || EMPTY_GRAPH_NODES
+      : relationFilter.previewActive
+      ? relationFilter.previewNodes
+      : graphNodes;
+  const effectiveGraphEdges =
+    workspaceMode === "discovery"
+      ? discoveryFilteredGraph?.edges || EMPTY_GRAPH_EDGES
+      : relationFilter.previewActive
+      ? relationFilter.previewEdges
+      : graphEdges;
+  const effectiveGraphStats =
+    workspaceMode === "discovery"
+      ? discoveryFilteredGraph?.stats || null
+      : relationFilter.previewActive
+      ? ({
+          ...(graphStats || {}),
+          relation_preview: true,
+          node_count: effectiveGraphNodes.length,
+          edge_count: effectiveGraphEdges.length,
+        } as Record<string, unknown>)
+      : graphStats;
 
   const {
     visibleGraphNodes,
@@ -1065,6 +1485,18 @@ export default function App() {
     return seed;
   }, [graphSourceMode, lastMultiGraphParams]);
 
+  const discoverySeedVidSet = useMemo(() => {
+    if (graphSourceMode !== "discovery") return new Set<number>();
+    const seed = new Set<number>();
+    for (const item of discoverySeeds) seed.add(item.vid);
+    for (const node of discoveryResult?.nodes || []) {
+      if (node.role === "seed") seed.add(node.id);
+    }
+    return seed;
+  }, [graphSourceMode, discoveryResult, discoverySeeds]);
+
+  const activeSeedVidSet = graphSourceMode === "multi" ? multiSeedVidSet : discoverySeedVidSet;
+
   const multiEntityLabelMap = useMemo(() => {
     const m = new Map<number, string>();
     for (const item of lastMultiGraphParams?.selectedEntities || []) {
@@ -1085,13 +1517,18 @@ export default function App() {
     const nodes = visibleGraphNodes.map((n) => ({
       id: String(n.id),
       label: n.label,
-      data: {
-        ...n,
-        isSeed: multiSeedVidSet.has(n.id),
-        seedGroup: multiSeedVidSet.has(n.id) ? "multi" : undefined,
-        isRoot: rootVid != null && n.id === rootVid,
-        hopLevel: visibleNodeHopLevelMap.get(n.id) ?? 99,
-      },
+      data: (() => {
+        const typeColor = graphSourceMode === "discovery" && !activeSeedVidSet.has(n.id) ? discoveryTypeColor(n.entity_type) : null;
+        return {
+          ...n,
+          isSeed: activeSeedVidSet.has(n.id),
+          seedGroup: activeSeedVidSet.has(n.id) ? graphSourceMode : undefined,
+          isRoot: rootVid != null && n.id === rootVid,
+          hopLevel: visibleNodeHopLevelMap.get(n.id) ?? 99,
+          fillColor: typeColor?.fill,
+          strokeColor: typeColor?.stroke,
+        };
+      })(),
     }));
 
     const edgeMap = new Map<string, (typeof visibleGraphEdges)[number]>();
@@ -1109,7 +1546,7 @@ export default function App() {
     });
 
     return { g6Data: { nodes, edges }, edgeById: edgeMap };
-  }, [visibleGraphNodes, visibleGraphEdges, rootVid, visibleNodeHopLevelMap, multiSeedVidSet]);
+  }, [visibleGraphNodes, visibleGraphEdges, rootVid, visibleNodeHopLevelMap, activeSeedVidSet, graphSourceMode]);
 
   const selectEdgeWithDetail = useCallback(
     (target: EdgeSearchItem, edgeId: string | null) => {
@@ -1314,147 +1751,241 @@ export default function App() {
         </div>
       ) : null}
       <div className="kg-pane kg-pane-left">
-        <LeftSearchPanel
-          q={q}
-          onQChange={onInputChange}
-          loadingSearch={loadingSearch}
-          onSearch={handleSearchClick}
-          onSearchInputKeyDown={onKeyDown}
-          suggestWrapRef={suggestWrapRef}
-          suggestOpen={suggestOpen}
-          suggestLoading={suggestLoading}
-          suggestError={suggestError}
-          suggestItems={suggestItems}
-          suggestHighlightIndex={suggestHighlightIndex}
-          setSuggestHighlightIndex={setSuggestHighlightIndex}
-          onSelectSuggestItem={selectSuggestCandidate}
-          searchName={searchName}
-          setSearchName={setSearchName}
-          searchDesc={searchDesc}
-          setSearchDesc={setSearchDesc}
-          entityType={entityType}
-          setEntityType={setEntityType}
-          entityTypeOptions={entityTypeOptions}
-          entityTypeFallbackUsed={entityTypeFallbackUsed}
-          source={source}
-          setSource={setSource}
-          entityRawId={entityRawId}
-          onRawIdChange={onRawIdInputChange}
-          onRawIdInputKeyDown={onRawIdKeyDown}
-          rawIdSuggestWrapRef={rawIdSuggestWrapRef}
-          rawIdSuggestOpen={rawIdSuggestOpen}
-          rawIdSuggestLoading={rawIdSuggestLoading}
-          rawIdSuggestError={rawIdSuggestError}
-          rawIdSuggestItems={rawIdSuggestItems}
-          rawIdSuggestHighlightIndex={rawIdSuggestHighlightIndex}
-          setRawIdSuggestHighlightIndex={setRawIdSuggestHighlightIndex}
-          onSelectRawIdSuggestItem={selectRawIdSuggestCandidate}
-          searchData={searchData}
-          rootVid={rootVid}
-          searchSelectedVid={searchSelectedVid}
-          onSelectSearchResultNode={(vid) => setSearchSelectedVid(vid)}
-          onLoadSelectedSubgraph={(vid) => {
-            void loadSelectedSearchSubgraph(vid);
-          }}
-          graphLoadBusy={graphBusy}
-          onEntityTypeDemandLoad={() => {
-            void ensureEntityTypesLoaded();
-          }}
-          edgeQ={edgeQ}
-          onEdgeQChange={onEdgeInputChange}
-          edgeSearchLoading={loadingEdgeSearch}
-          onEdgeSearch={handleEdgeSearchClick}
-          onEdgeSearchInputKeyDown={onEdgeKeyDown}
-          edgeSuggestWrapRef={edgeSuggestWrapRef}
-          edgeSuggestOpen={edgeSuggestOpen}
-          edgeSuggestLoading={edgeSuggestLoading}
-          edgeSuggestError={edgeSuggestError}
-          edgeSuggestItems={edgeSuggestItems}
-          edgeSuggestHighlightIndex={edgeSuggestHighlightIndex}
-          setEdgeSuggestHighlightIndex={setEdgeSuggestHighlightIndex}
-          onSelectEdgeSuggestItem={selectEdgeSuggestCandidate}
-          edgeSearchInRelation={edgeSearchInRelation}
-          setEdgeSearchInRelation={setEdgeSearchInRelation}
-          edgeSearchInProps={edgeSearchInProps}
-          setEdgeSearchInProps={setEdgeSearchInProps}
-          edgeSearchSourceDb={edgeSearchSourceDb}
-          setEdgeSearchSourceDb={setEdgeSearchSourceDb}
-          edgeSearchRelation={edgeSearchRelation}
-          setEdgeSearchRelation={setEdgeSearchRelation}
-          edgeSearchData={edgeSearchData}
-          onSelectEdgeSearchItem={(item) => {
-            void handleSelectEdgeCandidate(item);
-          }}
-          edgeSearchNotice={edgeSearchNotice}
-          loadingMultiGraph={graphBusy}
-          onGenerateMultiGraph={(params) => {
-            void runMultiGraph(params);
-          }}
-          showPathCandidates={showPathCandidates}
-          pathCandidates={pathCandidates}
-          chosenPathByPair={chosenPathByPair}
-          appliedExtraPaths={appliedExtraPaths}
-          onChoosePathForPair={setChosenPathForPair}
-          onApplyPathForPair={(u, v) => {
-            void applyChosenPathForPair(u, v);
-          }}
-          onAppendPathForPair={(u, v) => {
-            appendChosenPathForPair(u, v);
-          }}
-          pathApplyLoading={loadingApplyPathChoice}
-          resolveEntityLabel={(vid) => multiEntityLabelMap.get(vid) || String(vid)}
-        />
+        <div style={{ padding: "12px 16px 0 16px", display: "flex", gap: 8 }}>
+          <button
+            onClick={() => {
+              void switchWorkspaceMode("legacy");
+            }}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #d9d9d9",
+              background: workspaceMode === "legacy" ? "#e6f4ff" : "#fff",
+              cursor: "pointer",
+              fontWeight: workspaceMode === "legacy" ? 700 : 500,
+            }}
+          >
+            旧模块
+          </button>
+          <button
+            onClick={() => {
+              void switchWorkspaceMode("discovery");
+            }}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #d9d9d9",
+              background: workspaceMode === "discovery" ? "#fff7e6" : "#fff",
+              cursor: "pointer",
+              fontWeight: workspaceMode === "discovery" ? 700 : 500,
+            }}
+          >
+            统一关系发现
+          </button>
+        </div>
+
+        {workspaceMode === "legacy" ? (
+          <LeftSearchPanel
+            q={q}
+            onQChange={onInputChange}
+            loadingSearch={loadingSearch}
+            onSearch={handleSearchClick}
+            onSearchInputKeyDown={onKeyDown}
+            suggestWrapRef={suggestWrapRef}
+            suggestOpen={suggestOpen}
+            suggestLoading={suggestLoading}
+            suggestError={suggestError}
+            suggestItems={suggestItems}
+            suggestHighlightIndex={suggestHighlightIndex}
+            setSuggestHighlightIndex={setSuggestHighlightIndex}
+            onSelectSuggestItem={selectSuggestCandidate}
+            searchName={searchName}
+            setSearchName={setSearchName}
+            searchDesc={searchDesc}
+            setSearchDesc={setSearchDesc}
+            entityType={entityType}
+            setEntityType={setEntityType}
+            entityTypeOptions={entityTypeOptions}
+            entityTypeFallbackUsed={entityTypeFallbackUsed}
+            source={source}
+            setSource={setSource}
+            entityRawId={entityRawId}
+            onRawIdChange={onRawIdInputChange}
+            onRawIdInputKeyDown={onRawIdKeyDown}
+            rawIdSuggestWrapRef={rawIdSuggestWrapRef}
+            rawIdSuggestOpen={rawIdSuggestOpen}
+            rawIdSuggestLoading={rawIdSuggestLoading}
+            rawIdSuggestError={rawIdSuggestError}
+            rawIdSuggestItems={rawIdSuggestItems}
+            rawIdSuggestHighlightIndex={rawIdSuggestHighlightIndex}
+            setRawIdSuggestHighlightIndex={setRawIdSuggestHighlightIndex}
+            onSelectRawIdSuggestItem={selectRawIdSuggestCandidate}
+            searchData={searchData}
+            rootVid={rootVid}
+            searchSelectedVid={searchSelectedVid}
+            onSelectSearchResultNode={(vid) => setSearchSelectedVid(vid)}
+            onLoadSelectedSubgraph={(vid) => {
+              void loadSelectedSearchSubgraph(vid);
+            }}
+            graphLoadBusy={graphBusy}
+            onEntityTypeDemandLoad={() => {
+              void ensureEntityTypesLoaded();
+            }}
+            edgeQ={edgeQ}
+            onEdgeQChange={onEdgeInputChange}
+            edgeSearchLoading={loadingEdgeSearch}
+            onEdgeSearch={handleEdgeSearchClick}
+            onEdgeSearchInputKeyDown={onEdgeKeyDown}
+            edgeSuggestWrapRef={edgeSuggestWrapRef}
+            edgeSuggestOpen={edgeSuggestOpen}
+            edgeSuggestLoading={edgeSuggestLoading}
+            edgeSuggestError={edgeSuggestError}
+            edgeSuggestItems={edgeSuggestItems}
+            edgeSuggestHighlightIndex={edgeSuggestHighlightIndex}
+            setEdgeSuggestHighlightIndex={setEdgeSuggestHighlightIndex}
+            onSelectEdgeSuggestItem={selectEdgeSuggestCandidate}
+            edgeSearchInRelation={edgeSearchInRelation}
+            setEdgeSearchInRelation={setEdgeSearchInRelation}
+            edgeSearchInProps={edgeSearchInProps}
+            setEdgeSearchInProps={setEdgeSearchInProps}
+            edgeSearchSourceDb={edgeSearchSourceDb}
+            setEdgeSearchSourceDb={setEdgeSearchSourceDb}
+            edgeSearchRelation={edgeSearchRelation}
+            setEdgeSearchRelation={setEdgeSearchRelation}
+            edgeSearchData={edgeSearchData}
+            onSelectEdgeSearchItem={(item) => {
+              void handleSelectEdgeCandidate(item);
+            }}
+            edgeSearchNotice={edgeSearchNotice}
+            loadingMultiGraph={graphBusy}
+            onGenerateMultiGraph={(params) => {
+              void runMultiGraph(params);
+            }}
+            showPathCandidates={showPathCandidates}
+            pathCandidates={pathCandidates}
+            chosenPathByPair={chosenPathByPair}
+            appliedExtraPaths={appliedExtraPaths}
+            onChoosePathForPair={setChosenPathForPair}
+            onApplyPathForPair={(u, v) => {
+              void applyChosenPathForPair(u, v);
+            }}
+            onAppendPathForPair={(u, v) => {
+              appendChosenPathForPair(u, v);
+            }}
+            pathApplyLoading={loadingApplyPathChoice}
+            resolveEntityLabel={(vid) => multiEntityLabelMap.get(vid) || String(vid)}
+          />
+        ) : (
+          <DiscoveryPanel
+            seeds={discoverySeeds}
+            query={discoveryQuery}
+            runtime={discoveryRuntimeFilters}
+            entityTypeOptions={entityTypeOptions}
+            resultFacets={
+              discoveryResult
+                ? {
+                    entityTypes: discoveryResult.facets.entity_types,
+                    relationTypes: discoveryResult.facets.relation_types,
+                  }
+                : null
+            }
+            loading={loadingDiscovery}
+            onAddSeed={(item) => {
+              setDiscoverySeeds((prev) => {
+                if (prev.some((seed) => seed.vid === item.vid)) return prev;
+                return [...prev, item];
+              });
+            }}
+            onRemoveSeed={(vid) => {
+              setDiscoverySeeds((prev) => prev.filter((item) => item.vid !== vid));
+            }}
+            onClearSeeds={() => setDiscoverySeeds([])}
+            onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
+            onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
+            onRun={() => {
+              void runDiscovery();
+            }}
+            onNotice={(level, message) => setUiNotice({ level, message })}
+          />
+        )}
       </div>
 
       <Resizer side="left" onPointerDown={(e) => beginResize("left", e)} />
 
       <div className="kg-center">
         <div className="kg-topbar-sticky">
-          <TopBar
-            rootVid={rootVid}
-            loadingGraph={graphBusy}
-            graphBudgetLabel={budgetPresetLabel}
-            canLoadMoreEdges={canLoadMoreEdges}
-            onLoadMoreEdges={() => {
-              void loadMoreEdges();
-            }}
-            hop={hop}
-            setHop={setHop}
-            relations={relations}
-            onOpenRelationFilter={handleOpenRelationFilter}
-            onClearRelationsAndReload={() => {
-              void (async () => {
-                const nextRelations: string[] = [];
-                setRelations(nextRelations);
-                if (rootVid != null) await loadGraphWithFilters(rootVid, hop, nextRelations);
-              })();
-            }}
-            onReloadSubgraph={() => {
-              if (rootVid != null) void reloadGraphByCurrentMode(rootVid);
-            }}
-            graphStats={effectiveGraphStats}
-            relationPreviewActive={relationFilter.previewActive}
-            onExitRelationPreview={relationFilter.exitPreview}
-          />
+          {workspaceMode === "legacy" ? (
+            <TopBar
+              rootVid={rootVid}
+              loadingGraph={graphBusy}
+              graphBudgetLabel={budgetPresetLabel}
+              canLoadMoreEdges={canLoadMoreEdges}
+              onLoadMoreEdges={() => {
+                void loadMoreEdges();
+              }}
+              hop={hop}
+              setHop={setHop}
+              relations={relations}
+              onOpenRelationFilter={handleOpenRelationFilter}
+              onClearRelationsAndReload={() => {
+                void (async () => {
+                  const nextRelations: string[] = [];
+                  setRelations(nextRelations);
+                  if (rootVid != null) await loadGraphWithFilters(rootVid, hop, nextRelations);
+                })();
+              }}
+              onReloadSubgraph={() => {
+                if (rootVid != null) void reloadGraphByCurrentMode(rootVid);
+              }}
+              graphStats={effectiveGraphStats}
+              relationPreviewActive={relationFilter.previewActive}
+              onExitRelationPreview={relationFilter.exitPreview}
+            />
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>统一关系发现</div>
+              {discoveryWorkspaceReady ? (
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  seeds={discoveryResult?.stats.seed_count ?? discoverySeeds.length} candidates=
+                  {discoveryResult?.stats.candidate_count ?? 0}
+                  {" | "}nodes={effectiveGraphNodes.length} edges={effectiveGraphEdges.length}
+                  {graphBusy ? " | 加载中…" : ""}
+                </div>
+              ) : (
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  添加 1 个或多个 seed 节点后运行 discovery，结果会以主题关系图形式渲染在这里。
+                </div>
+              )}
+              {effectiveGraphStats?.truncated ? (
+                <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
+                  图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)}
+                </div>
+              ) : null}
+            </div>
+          )}
         </div>
 
         <div className="kg-canvas-wrap">
           <Suspense fallback={<LoadingPanel message="图谱画布加载中..." style={{ minHeight: "100%" }} />}>
-            <GraphCanvas
-              g6Data={g6Data}
-              edgeById={edgeById}
-              renderNodeLabels={renderNodeLabels}
-              renderEdgeLabels={renderEdgeLabels}
-              edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
-              showSelfLoops={showSelfLoops}
-              selectedNodeId={selectedNodeId}
-              selectedEdgeId={selectedEdgeId}
-              onNodeClick={handleGraphNodeClick}
-              onEdgeClick={handleGraphEdgeClick}
-              registerApplyHighlight={(fn) => {
-                applyHighlightRef.current = fn;
-              }}
-            />
+            {workspaceMode === "discovery" && !discoveryWorkspaceReady ? (
+              <LoadingPanel message="统一关系发现结果尚未生成。请在左侧添加 seed 节点并运行 discovery。" style={{ minHeight: "100%" }} />
+            ) : (
+              <GraphCanvas
+                g6Data={g6Data}
+                edgeById={edgeById}
+                renderNodeLabels={renderNodeLabels}
+                renderEdgeLabels={renderEdgeLabels}
+                edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
+                showSelfLoops={showSelfLoops}
+                selectedNodeId={selectedNodeId}
+                selectedEdgeId={selectedEdgeId}
+                onNodeClick={handleGraphNodeClick}
+                onEdgeClick={handleGraphEdgeClick}
+                registerApplyHighlight={(fn) => {
+                  applyHighlightRef.current = fn;
+                }}
+              />
+            )}
           </Suspense>
         </div>
       </div>
@@ -1464,6 +1995,7 @@ export default function App() {
       <div className="kg-pane kg-pane-right">
         <Suspense fallback={<LoadingPanel message="右侧详情面板加载中..." />}>
           <RightDetailPanel
+            allowGraphMutationActions={workspaceMode === "legacy"}
             renderNodeLabels={renderNodeLabels}
             setRenderNodeLabels={setRenderNodeLabels}
             renderEdgeLabels={renderEdgeLabels}
@@ -1505,12 +2037,14 @@ export default function App() {
               setGraphSourceMode("single");
               setLastMultiGraphParams(null);
               clearMultiPathState();
+              rememberSingleLegacySession(vid, 1, relations);
               void reroot1hop(vid);
             }}
             expand1hop={(vid) => {
               setGraphSourceMode("single");
               setLastMultiGraphParams(null);
               clearMultiPathState();
+              if (rootVid != null) rememberSingleLegacySession(rootVid, hop, relations);
               void expand1hop(vid);
             }}
             collapseExpandFromNode={collapseExpandFromNode}
@@ -1534,7 +2068,7 @@ export default function App() {
         </Suspense>
       </div>
 
-      {relationFilter.open ? (
+      {workspaceMode === "legacy" && relationFilter.open ? (
         <Suspense fallback={<LoadingPanel message="关系筛选面板加载中..." />}>
           <RelationFilterPanel
             relationCatalogItems={relationTypeCatalogItems}

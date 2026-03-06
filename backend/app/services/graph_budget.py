@@ -16,6 +16,15 @@ def _env_int(name: str, default: int) -> int:
 class GraphQueryBudget:
     relation_filter_max: int
 
+    discovery_seed_cap: int
+    discovery_hop_max: int
+    discovery_top_k_per_type_cap: int
+    discovery_max_nodes_cap: int
+    discovery_max_edges_cap: int
+    discovery_candidate_cap: int
+    discovery_per_seed_neighbor_cap: int
+    discovery_query_edge_scan_cap: int
+
     subgraph_hop_max: int
     subgraph_max_nodes_cap: int
     subgraph_max_edges_cap: int
@@ -40,6 +49,14 @@ class GraphQueryBudget:
 
 graph_budget = GraphQueryBudget(
     relation_filter_max=max(1, min(_env_int("GRAPH_REL_FILTER_MAX", 120), 500)),
+    discovery_seed_cap=max(1, min(_env_int("GRAPH_DISCOVERY_SEED_CAP", 8), 16)),
+    discovery_hop_max=max(1, min(_env_int("GRAPH_DISCOVERY_HOP_MAX", 1), 2)),
+    discovery_top_k_per_type_cap=max(1, min(_env_int("GRAPH_DISCOVERY_TOP_K_PER_TYPE_CAP", 50), 200)),
+    discovery_max_nodes_cap=max(20, min(_env_int("GRAPH_DISCOVERY_MAX_NODES_CAP", 300), 3000)),
+    discovery_max_edges_cap=max(20, min(_env_int("GRAPH_DISCOVERY_MAX_EDGES_CAP", 1200), 10000)),
+    discovery_candidate_cap=max(1, min(_env_int("GRAPH_DISCOVERY_CANDIDATE_CAP", 240), 2000)),
+    discovery_per_seed_neighbor_cap=max(1, min(_env_int("GRAPH_DISCOVERY_PER_SEED_NEIGHBOR_CAP", 120), 2000)),
+    discovery_query_edge_scan_cap=max(100, min(_env_int("GRAPH_DISCOVERY_QUERY_EDGE_SCAN_CAP", 50000), 200000)),
     subgraph_hop_max=max(1, min(_env_int("GRAPH_SUBGRAPH_HOP_MAX", 3), 6)),
     subgraph_max_nodes_cap=max(20, min(_env_int("GRAPH_SUBGRAPH_MAX_NODES_CAP", 300), 3000)),
     subgraph_max_edges_cap=max(20, min(_env_int("GRAPH_SUBGRAPH_MAX_EDGES_CAP", 1200), 10000)),

@@ -213,7 +213,23 @@ CREATE EDGE IF NOT EXISTS REL2(
 - `updated_by` 支持全局默认（localStorage）+ 本次保存覆盖
 - 保存成功后只做局部状态更新，不重拉 subgraph
 
-### 7.6 验证命令（可复制）
+### 7.6 统一关系发现模块（阶段4集成）
+- 前端入口位于左侧工作区切换：`旧模块` / `统一关系发现`
+- `统一关系发现` 是新增高层模块，不替换旧单实体 / 多实体入口；旧链路继续保留
+- 新模块查询入口：
+  - 添加 `1..N` 个 seed 节点
+  - 配置 `allowed_entity_types / allowed_relation_types / max_nodes / max_edges / top_k_per_type / hop`
+  - 调用 `POST /api/graph/discovery`
+- 新模块结果展示：
+  - 图中同时渲染 `seed -> candidate` 与受预算限制的 `candidate -> candidate`
+  - 左侧支持按返回 facets 做查询后二次过滤
+  - 右侧详情 / 编辑 / 直接编辑仍可用
+- 兼容策略：
+  - discovery 与 legacy 通过同一 `App` 入口接入，但按 workspace 进行图上下文恢复
+  - 切到 discovery 且尚未运行时，不复用 legacy 图结果
+  - 切回 legacy 时，会优先恢复最近一次 legacy 图请求；若此前无 legacy 图，则展示空图状态
+
+### 7.7 验证命令（可复制）
 
 后端启动：
 ```bash

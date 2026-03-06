@@ -44,6 +44,7 @@ type UseGraphDataResult = {
   collapseExpandFromNode: (fromVid: number) => void;
   resetExpandProbeCache: () => void;
   probeExpand1hop: (fromVid: number) => Promise<void>;
+  clearGraphData: () => void;
   replaceGraphData: (params: {
     rootVid: number;
     nodes: NodeBrief[];
@@ -147,6 +148,21 @@ export function useGraphData({
     onClearSelection();
   }
 
+  function clearGraphData() {
+    setRootVid(null);
+    setGraphNodes([]);
+    setGraphEdges([]);
+    setGraphStats(null);
+    setManualRevealedNodeIds(new Set());
+    setManualHiddenNodeIds(new Set());
+    setNodeGroupRootById({});
+    setExpandedSourceNodeIds(new Set());
+    setHiddenNodesCollapsed(false);
+    setPanelGroupCollapsed({});
+    resetExpandProbeCache();
+    onClearSelection();
+  }
+
   function updateNodeInGraph(vid: number, patch: Partial<NodeBrief>) {
     setGraphNodes((prev) => prev.map((n) => (n.id === vid ? { ...n, ...patch } : n)));
   }
@@ -198,6 +214,8 @@ export function useGraphData({
         max_edges: budget.max_edges,
       });
 
+      setHop(nextHop);
+      setRelations(nextRelations);
       setRootVid(nextRoot);
       setGraphNodes(json.nodes);
       setGraphEdges(json.edges);
@@ -529,6 +547,7 @@ export function useGraphData({
     collapseExpandFromNode,
     resetExpandProbeCache,
     probeExpand1hop,
+    clearGraphData,
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,

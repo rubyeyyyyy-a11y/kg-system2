@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import csv
+import glob
 import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterator, List
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--es-index", type=str, default=None)
     parser.add_argument("--state-file", type=str, default=str(ROOT / "state" / "es_indexer.state"))
+    parser.add_argument(
+        "--vertices-glob",
+        type=str,
+        default="",
+        help="optional CSV glob for full vertex shards; when set, build from CSV instead of Nebula",
+    )
     return parser.parse_args()
 
 
@@ -49,6 +57,32 @@ def write_state(path: Path, last_vid: int, indexed: int) -> None:
         "updated_at": int(time.time()),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def build_doc(
+    *,
+    vid: int,
+    entity_name: object,
+    description: object,
+    entity_raw_id: object,
+    entity_type: object,
+    source: object,
+) -> Dict[str, object]:
+    raw_id = str(entity_raw_id or "")
+    raw_id_norm = normalize_raw_id(raw_id)
+    entity_type_str = str(entity_type or "")
+    return {
+        "vid": int(vid),
+        "entity_name": str(entity_name or ""),
+        "description": str(description or ""),
+        "entity_raw_id": raw_id,
+        "entity_raw_id_text": raw_id,
+        "raw_id_norm": raw_id_norm,
+        "raw_id_norm_text": raw_id_norm,
+        "entity_type": entity_type_str,
+        "entity_type_text": entity_type_str,
+        "source": str(source or ""),
+    }
 
 
 def fetch_batch(nebula: NebulaClient, last_vid: int, batch_size: int) -> List[Dict[str, object]]:
@@ -75,23 +109,15 @@ LIMIT {int(batch_size)};
 
     out: List[Dict[str, object]] = []
     for i in range(len(vids)):
-        vid = int(vw(vids[i]))
-        raw_id = str(vw(raw_ids[i]) or "")
-        raw_id_norm = normalize_raw_id(raw_id)
-        entity_type = str(vw(types[i]) or "")
         out.append(
-            {
-                "vid": vid,
-                "entity_name": str(vw(names[i]) or ""),
-                "description": str(vw(descriptions[i]) or ""),
-                "entity_raw_id": raw_id,
-                "entity_raw_id_text": raw_id,
-                "raw_id_norm": raw_id_norm,
-                "raw_id_norm_text": raw_id_norm,
-                "entity_type": entity_type,
-                "entity_type_text": entity_type,
-                "source": str(vw(sources[i]) or ""),
-            }
+            build_doc(
+                vid=int(vw(vids[i])),
+                entity_name=vw(names[i]),
+                description=vw(descriptions[i]),
+                entity_raw_id=vw(raw_ids[i]),
+                entity_type=vw(types[i]),
+                source=vw(sources[i]),
+            )
         )
     return out
 
@@ -122,25 +148,54 @@ RETURN id(v) AS vid,
 
     out: List[Dict[str, object]] = []
     for i in range(len(vids_col)):
-        vid = int(vw(vids_col[i]))
-        raw_id = str(vw(raw_ids[i]) or "")
-        raw_id_norm = normalize_raw_id(raw_id)
-        entity_type = str(vw(types[i]) or "")
         out.append(
-            {
-                "vid": vid,
-                "entity_name": str(vw(names[i]) or ""),
-                "description": str(vw(descriptions[i]) or ""),
-                "entity_raw_id": raw_id,
-                "entity_raw_id_text": raw_id,
-                "raw_id_norm": raw_id_norm,
-                "raw_id_norm_text": raw_id_norm,
-                "entity_type": entity_type,
-                "entity_type_text": entity_type,
-                "source": str(vw(sources[i]) or ""),
-            }
+            build_doc(
+                vid=int(vw(vids_col[i])),
+                entity_name=vw(names[i]),
+                description=vw(descriptions[i]),
+                entity_raw_id=vw(raw_ids[i]),
+                entity_type=vw(types[i]),
+                source=vw(sources[i]),
+            )
         )
     return out
+
+
+def iter_csv_batches(vertices_glob: str, since: int, batch_size: int) -> Iterator[List[Dict[str, object]]]:
+    pattern = str(vertices_glob or "").strip()
+    if not pattern:
+        return
+
+    matches = [Path(p) for p in sorted(glob.glob(pattern))]
+    if not matches:
+        raise RuntimeError(f"no vertex shard files matched: {pattern}")
+
+    batch: List[Dict[str, object]] = []
+    for path in matches:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                raw_vid = row.get("ID") or row.get("vid") or row.get("Vid") or ""
+                if not raw_vid:
+                    continue
+                vid = int(raw_vid)
+                if vid <= since:
+                    continue
+                batch.append(
+                    build_doc(
+                        vid=vid,
+                        entity_name=row.get("entity_name"),
+                        description=row.get("description"),
+                        entity_raw_id=row.get("entity_raw_id"),
+                        entity_type=row.get("entity_type"),
+                        source=row.get("source"),
+                    )
+                )
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+    if batch:
+        yield batch
 
 
 def main() -> int:
@@ -152,6 +207,11 @@ def main() -> int:
     resume_vid = read_state(state_path)
     last_vid = int(args.since) if args.since is not None else resume_vid
     seed_vids = [int(x.strip()) for x in str(args.seed_vids or "").split(",") if x.strip()]
+    vertices_glob = str(args.vertices_glob or "").strip()
+
+    if seed_vids and vertices_glob:
+        print("[indexer] error: --seed-vids cannot be combined with --vertices-glob")
+        return 2
 
     nebula = NebulaClient()
     es = ElasticsearchClient(index=args.es_index)
@@ -162,7 +222,7 @@ def main() -> int:
         return 2
 
     print(
-        f"[indexer] start batch_size={batch_size} max={max_docs} since={last_vid} index={es.index} seed_count={len(seed_vids)}"
+        f"[indexer] start batch_size={batch_size} max={max_docs} since={last_vid} index={es.index} seed_count={len(seed_vids)} vertices_glob={vertices_glob or '-'}"
     )
     total = 0
     loop = 0
@@ -182,6 +242,38 @@ def main() -> int:
         print(
             f"[indexer] seed-mode batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
         )
+        print(f"[indexer] done total={total} last_vid={last_vid} elapsed_s={elapsed:.2f}")
+        return 0
+
+    if vertices_glob:
+        for docs in iter_csv_batches(vertices_glob, since=last_vid, batch_size=batch_size):
+            loop += 1
+
+            if max_docs > 0 and total + len(docs) > max_docs:
+                docs = docs[: max_docs - total]
+
+            ok_count, fail_count, bulk_ms = es.bulk_upsert(docs, index_name=args.es_index)
+            total += ok_count
+
+            if docs:
+                last_vid = int(docs[-1]["vid"])
+                write_state(state_path, last_vid=last_vid, indexed=total)
+
+            if total % 1000 == 0 or loop == 1 or fail_count > 0:
+                elapsed = time.perf_counter() - started
+                rate = (total / elapsed) if elapsed > 0 else 0.0
+                print(
+                    f"[indexer] loop={loop} last_vid={last_vid} batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
+                )
+
+            if fail_count > 0:
+                print("[indexer] warning: bulk has failed documents, please inspect ES logs")
+                return 3
+
+            if max_docs > 0 and total >= max_docs:
+                break
+
+        elapsed = time.perf_counter() - started
         print(f"[indexer] done total={total} last_vid={last_vid} elapsed_s={elapsed:.2f}")
         return 0
 

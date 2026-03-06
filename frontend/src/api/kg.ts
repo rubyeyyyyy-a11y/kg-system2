@@ -6,6 +6,7 @@ import type {
   EntityTypeItem,
   EdgeSearchResp,
   EdgeSuggestResp,
+  GraphDiscoveryResp,
   MultiEntityGraphResp,
   ExpandResp,
   NodeDetailResp,
@@ -97,6 +98,18 @@ type MultiEntityGraphApplyPathsParams = {
     v: number;
     chosen_index: number;
   }>;
+};
+
+type GraphDiscoveryParams = {
+  seed_vids: number[];
+  allowed_entity_types: string[];
+  allowed_relation_types: string[];
+  max_nodes: number;
+  max_edges: number;
+  top_k_per_type: number;
+  include_candidate_candidate_edges: boolean;
+  include_seed_seed_edges?: boolean;
+  hop: number;
 };
 
 export async function search(params: SearchParams): Promise<SearchResp> {
@@ -250,6 +263,10 @@ export async function multiEntityGraph(body: MultiEntityGraphParams): Promise<Mu
 
 export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPathsParams): Promise<MultiEntityGraphResp> {
   return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph_apply_paths", body);
+}
+
+export async function graphDiscovery(body: GraphDiscoveryParams): Promise<GraphDiscoveryResp> {
+  return apiPost<GraphDiscoveryResp>("/api/graph/discovery", body);
 }
 
 async function apiFetchJson<T>(path: string, init: RequestInit): Promise<T> {

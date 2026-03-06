@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Any, Dict
 
@@ -15,6 +16,8 @@ from app.db.nebula_client import NebulaExecutionError, execute_ngql_safe
 from app.schemas.edit import EdgePatchRequest, NodePatchRequest
 from app.services import metadata_service
 from app.services.common import vw
+
+logger = logging.getLogger(__name__)
 
 
 def editable_fields() -> Dict[str, Any]:
@@ -45,6 +48,23 @@ def _detail_text(detail: Any) -> str:
         if msg is not None:
             return str(msg)
     return str(detail)
+
+
+def _as_text(value: Any) -> str:
+    raw = vw(value)
+    if raw is None:
+        return ""
+    return str(raw)
+
+
+def _as_int(value: Any) -> int:
+    raw = vw(value)
+    if raw in (None, ""):
+        return 0
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _audit(
@@ -80,18 +100,16 @@ def _audit(
 
 def _node_snapshot(vid: int) -> Dict[str, Any]:
     ngql = f"""
-    MATCH (v:`Entity`)
-    WHERE id(v) == {int(vid)}
-    RETURN id(v) AS vid,
-           coalesce(v.`Entity`.`entity_name`, "") AS entity_name,
-           coalesce(v.`Entity`.`entity_type`, "") AS entity_type,
-           coalesce(v.`Entity`.`source`, "") AS source,
-           coalesce(v.`Entity`.`description`, "") AS description,
-           coalesce(v.`Entity`.`entity_raw_id`, "") AS entity_raw_id,
-           coalesce(v.`Entity`.`version`, 0) AS version,
-           coalesce(v.`Entity`.`updated_at`, 0) AS updated_at,
-           coalesce(v.`Entity`.`updated_by`, "") AS updated_by
-    LIMIT 1;
+    FETCH PROP ON `Entity` {int(vid)}
+    YIELD id(vertex) AS vid,
+          properties(vertex).entity_name AS entity_name,
+          properties(vertex).entity_type AS entity_type,
+          properties(vertex).source AS source,
+          properties(vertex).description AS description,
+          properties(vertex).entity_raw_id AS entity_raw_id,
+          properties(vertex).version AS version,
+          properties(vertex).updated_at AS updated_at,
+          properties(vertex).updated_by AS updated_by;
     """
     res = execute_ngql_safe(ngql)
     if len(res.rows()) == 0:
@@ -108,15 +126,15 @@ def _node_snapshot(vid: int) -> Dict[str, Any]:
         "updated_by": res.column_values("updated_by"),
     }
     return {
-        "vid": int(vw(cols["vid"][0])),
-        "entity_name": str(vw(cols["entity_name"][0]) or ""),
-        "entity_type": str(vw(cols["entity_type"][0]) or ""),
-        "source": str(vw(cols["source"][0]) or ""),
-        "description": str(vw(cols["description"][0]) or ""),
-        "entity_raw_id": str(vw(cols["entity_raw_id"][0]) or ""),
-        "version": int(vw(cols["version"][0]) or 0),
-        "updated_at": int(vw(cols["updated_at"][0]) or 0),
-        "updated_by": str(vw(cols["updated_by"][0]) or ""),
+        "vid": _as_int(cols["vid"][0]),
+        "entity_name": _as_text(cols["entity_name"][0]),
+        "entity_type": _as_text(cols["entity_type"][0]),
+        "source": _as_text(cols["source"][0]),
+        "description": _as_text(cols["description"][0]),
+        "entity_raw_id": _as_text(cols["entity_raw_id"][0]),
+        "version": _as_int(cols["version"][0]),
+        "updated_at": _as_int(cols["updated_at"][0]),
+        "updated_by": _as_text(cols["updated_by"][0]),
     }
 
 
@@ -167,10 +185,12 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
     actor = ""
     expected_version = int(req.expected_version) if isinstance(req.expected_version, int) else -1
     identity = {"vid": int(vid)}
+    phase = "validate"
     try:
         actor = validate_updated_by(req.updated_by)
         expected_version = _ensure_expected_version(req.expected_version)
         incoming_set = field_policy.validate_node_patch_set(req.set)
+        phase = "snapshot_before"
         before = _node_snapshot(vid=int(vid))
         before_version = int(before.get("version") or 0)
         if before_version != expected_version:
@@ -212,7 +232,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 max_len=config.ENTITY_FIELD_MAX_LEN[field_name],
                 multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
             )
-            set_clauses.append(f'`Entity`.`{field_name}` = "{escaped}"')
+            set_clauses.append(f'`{field_name}` = "{escaped}"')
             updated_values[field_name] = cleaned
             old_value = str(before.get(field_name) or "")
             if old_value != cleaned:
@@ -223,17 +243,19 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
         actor_escaped = escape_ngql_string(actor, "updated_by", config.SYSTEM_FIELD_MAX_LEN["updated_by"], False)
         set_clauses.extend(
             [
-                f"`Entity`.`version` = {new_version}",
-                f"`Entity`.`updated_at` = {now_sec}",
-                f'`Entity`.`updated_by` = "{actor_escaped}"',
+                f"`version` = {new_version}",
+                f"`updated_at` = {now_sec}",
+                f'`updated_by` = "{actor_escaped}"',
             ]
         )
         update_ngql = f"""
         UPDATE VERTEX ON `Entity` {int(vid)}
         SET {", ".join(set_clauses)}
-        YIELD properties(vertex);
+        ;
         """
+        phase = "update"
         execute_ngql_safe(update_ngql)
+        phase = "snapshot_after"
         after = _node_snapshot(vid=int(vid))
         if "entity_type" in incoming_set:
             metadata_service.sync_entity_type_change(
@@ -259,6 +281,13 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
             "updated_by": str(after["updated_by"]),
         }
     except HTTPException as exc:
+        logger.warning(
+            "node patch http error phase=%s vid=%s status=%s detail=%s",
+            phase,
+            int(vid),
+            exc.status_code,
+            exc.detail,
+        )
         if exc.status_code == 422:
             _audit(
                 actor=actor or str(req.updated_by or ""),
@@ -270,7 +299,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="validation_error",
                 error_code="VALIDATION_ERROR",
-                error_message=_detail_text(exc.detail),
+                error_message=f"{phase}: {_detail_text(exc.detail)}",
             )
         elif exc.status_code == 404:
             _audit(
@@ -283,7 +312,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code="NOT_FOUND",
-                error_message=_detail_text(exc.detail),
+                error_message=f"{phase}: {_detail_text(exc.detail)}",
             )
         elif exc.status_code not in (409,):
             _audit(
@@ -296,10 +325,11 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
                 diff={},
                 result="fail",
                 error_code=f"HTTP_{exc.status_code}",
-                error_message=_detail_text(exc.detail),
+                error_message=f"{phase}: {_detail_text(exc.detail)}",
             )
         raise
     except NebulaExecutionError as exc:
+        logger.exception("node patch nebula error phase=%s vid=%s", phase, int(vid))
         _audit(
             actor=actor or str(req.updated_by or ""),
             object_type="node",
@@ -310,7 +340,7 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
             diff={},
             result="fail",
             error_code=exc.code,
-            error_message=exc.message,
+            error_message=f"{phase}: {exc.message}",
         )
         raise HTTPException(
             status_code=500,
@@ -394,7 +424,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
         update_ngql = f"""
         UPDATE EDGE ON `{config.EDGE_TYPE}` {int(req.src)}->{int(req.dst)}@{rank_int}
         SET {", ".join(set_clauses)}
-        YIELD properties(edge);
+        ;
         """
         execute_ngql_safe(update_ngql)
         after = _edge_snapshot(src=int(req.src), dst=int(req.dst), rank=rank_int)

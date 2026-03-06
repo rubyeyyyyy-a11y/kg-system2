@@ -163,11 +163,13 @@
 - `GET /api/entity_types` -> `200`（返回13类）
 - `GET /api/relation_types` -> `200`（当前 limit=5000）
 - `POST /api/subgraph`（`root_vid=1`）-> `200`（`truncated=true`, `dropped_neighbors=679`）
+- `POST /api/graph/discovery`（`seed_vids=[1]`）-> `200`（`seed_count=1`, `candidate_count=26`, `node_count=27`, `edge_count=37`, `truncated=true`）
 
 补充验证：
 - `POST /api/search` with `include_edges=true` -> `meta.include_edges_legacy_note` 存在，兼容提示生效。
 - `POST /api/expand`、`POST /api/multi_entity_graph` 返回 `stats.dropped_*` 与 `truncated`。
 - 高风险请求期聚合路径检查：`rg -n 'COUNT\\(|DISTINCT' backend/app/services/search_service.py backend/app/services/graph_service.py backend/app/routers -S` 返回空（未发现实时全图聚合字样）。
+- `scripts/smoke_api.sh` 已补 discovery 校验，后续标准 smoke 会覆盖新接口。
 
 ### 8.3 关键前端交互验证
 
@@ -187,9 +189,42 @@
 ### 8.4 回归构建/测试
 
 - 后端编译：`cd backend && .venv/bin/python -m compileall app/services app/schemas app/routers` -> 成功
-- 后端单测：`cd backend && .venv/bin/python -m unittest discover -s tests -p 'test_*.py'` -> `Ran 5 tests, OK`
+- 后端单测：`cd backend && .venv/bin/python -m unittest tests.test_graph_discovery_service tests.test_edit_service tests.test_relation_types_service tests.test_metadata_ids tests.test_raw_id_normalization` -> `Ran 16 tests, OK`
 - 前端构建：`cd frontend && npm run build` -> 成功
-- 前端 lint：`cd frontend && npm run lint` -> 失败（57 errors / 16 warnings）
+- 前端 lint：本阶段未重新全量执行；已验证 `src/App.tsx`、`src/hooks/useGraphData.ts` 局部 eslint 通过
+
+### 8.5 统一关系发现与编辑写回专项回归（2026-03-06 17:45 CST）
+
+本次实际执行：
+- `bash scripts/start_stack.sh` -> 成功
+- `bash scripts/check_stack.sh` -> `backend/frontend status=running`
+- `bash scripts/verify_stack.sh` -> 成功
+- `bash scripts/smoke_api.sh` -> 成功，已包含 `/api/graph/discovery`
+
+discovery 最小联调：
+- 请求：`seed_vids=[1]`, `max_nodes=80`, `max_edges=200`, `top_k_per_type=10`, `hop=1`
+- 返回：`seed_count=1`, `candidate_count=26`, `node_count=27`, `edge_count=37`, `truncated=true`
+- 预算信息：`recall_candidate_count=119`, `kept_candidate_count=26`, `dropped_nodes=93`, `dropped_neighbors=1350`
+
+编辑写回往返验证：
+- 节点：`GET /api/node/1` -> `PATCH /api/node/1`（description 追加阶段标记）-> `GET /api/node/1` -> 回滚恢复原 description
+- 边：`POST /api/edge_detail`(`REL2`, `1 -> 35076`, rank=`0`) -> `PATCH /api/edge`（evidence 追加阶段标记）-> 再次查询 -> 回滚恢复原 evidence
+- 验证结果：
+  - node version: `8 -> 9 -> 10`
+  - edge version: `8 -> 9 -> 10`
+  - 两条链路都能正确写入、返回新版本，并恢复原值
+
+前端统一关系发现手工验证步骤：
+1. 执行 `bash scripts/start_stack.sh`
+2. 打开 `http://127.0.0.1:5173`
+3. 左侧切换到 `统一关系发现`
+4. 通过名称或 raw id 添加 1 个或多个 seed 节点
+5. 保持默认 `hop=1`，设置合适的 `max_nodes / max_edges / top_k_per_type`
+6. 点击运行 discovery，确认画布出现 `seed + candidates + candidate-candidate edges`
+7. 在左侧 runtime facets 勾选/取消 `entity types` 与 `relation types`，确认图即时重绘
+8. 点击节点，确认右侧详情正常加载；切到 `编辑 / 直接编辑` 页签，保存一个可回退字段后再恢复
+9. 点击边，确认边详情和边编辑写回正常
+10. 切回 `旧模块`，确认 legacy 搜索/子图/多实体入口仍可访问
 
 ## 9. 重构前后对比
 
@@ -267,6 +302,7 @@
 后续建议：
 1. 增加 CI 门禁：后端测试 + 前端 build + 关键 API smoke（health/search/subgraph）。
 2. 为前端补可执行 E2E（Playwright），在具备浏览器依赖的 runner 上执行。
-3. 给 `relation_types` 增加分页/分组或 topN+搜索式下拉，避免一次返回 5000。
-4. 前端做代码分包（dynamic import/manualChunks），降低首包体积。
-5. 收敛并最终删除遗留 fallback 代码路径，避免误开风险。
+3. 给 discovery 追加前端自动化回归，至少覆盖 seed 添加、运行查询、runtime filter、详情编辑入口。
+4. 给 `relation_types` 增加分页/分组或 topN+搜索式下拉，避免一次返回 5000。
+5. 前端做代码分包（dynamic import/manualChunks），降低首包体积。
+6. 收敛并最终删除遗留 fallback 代码路径，避免误开风险。

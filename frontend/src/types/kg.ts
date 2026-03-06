@@ -6,6 +6,10 @@ export type NodeBrief = {
   source?: string;
   score?: number;
   snippet?: string;
+  role?: "seed" | "candidate";
+  seed_support_count?: number;
+  seed_support_vids?: number[];
+  score_breakdown?: Record<string, unknown>;
 };
 
 export type EdgeBrief = {
@@ -16,6 +20,7 @@ export type EdgeBrief = {
   relation?: string;
   source_db?: string;
   is_explain?: boolean;
+  role?: "seed_candidate" | "candidate_candidate" | "seed_seed";
 };
 
 export type SearchResp = {
@@ -198,6 +203,43 @@ export type MultiEntityGraphResp = {
     [k: string]: unknown;
   };
   path_candidates?: PairPathCandidate[];
+};
+
+export type GraphDiscoveryEntityFacetItem = {
+  entity_type: string;
+  count: number;
+  seed_count: number;
+  candidate_count: number;
+};
+
+export type GraphDiscoveryRelationFacetItem = {
+  relation_type: string;
+  count: number;
+  seed_candidate_count: number;
+  candidate_candidate_count: number;
+  seed_seed_count: number;
+};
+
+export type GraphDiscoveryResp = {
+  nodes: NodeBrief[];
+  edges: EdgeBrief[];
+  facets: {
+    entity_types: GraphDiscoveryEntityFacetItem[];
+    relation_types: GraphDiscoveryRelationFacetItem[];
+  };
+  stats: {
+    seed_count: number;
+    candidate_count: number;
+    node_count: number;
+    edge_count: number;
+    truncated: boolean;
+    dropped_nodes: number;
+    dropped_edges: number;
+    dropped_neighbors: number;
+    recall_candidate_count: number;
+    kept_candidate_count: number;
+    budget_applied?: Record<string, unknown>;
+  };
 };
 
 export type EditableFieldSpec = {

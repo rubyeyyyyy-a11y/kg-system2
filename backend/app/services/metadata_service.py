@@ -169,7 +169,7 @@ def _update_stat_vertex(
         `{tag}`.`count` = {max(0, int(count))},
         `{tag}`.`updated_at` = {now_sec},
         `{tag}`.`updated_by` = "{esc(actor)}"
-    YIELD properties(vertex);
+    ;
     """
     execute_ngql_safe(ngql)
 

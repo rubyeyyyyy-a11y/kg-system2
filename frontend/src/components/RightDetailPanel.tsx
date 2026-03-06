@@ -20,6 +20,7 @@ type PanelGroup = {
 };
 
 type RightDetailPanelProps = {
+  allowGraphMutationActions?: boolean;
   renderNodeLabels: boolean;
   setRenderNodeLabels: (v: boolean) => void;
   renderEdgeLabels: boolean;
@@ -91,6 +92,7 @@ type RightDetailPanelProps = {
 };
 
 export function RightDetailPanel({
+  allowGraphMutationActions = true,
   renderNodeLabels,
   setRenderNodeLabels,
   renderEdgeLabels,
@@ -160,7 +162,9 @@ export function RightDetailPanel({
       }}
     >
       <h3 style={{ margin: 0 }}>详情</h3>
-      <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>点击节点/边查看；节点支持 Expand（合并 1-hop）</div>
+      <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
+        {allowGraphMutationActions ? "点击节点/边查看；节点支持 Expand（合并 1-hop）" : "点击节点/边查看详情；可继续编辑写回"}
+      </div>
 
       <div
         style={{
@@ -450,63 +454,69 @@ export function RightDetailPanel({
             {selectedNodeBrief?.source} | hop_level={visibleNodeHopLevelMap.get(sel.vid) ?? "-"}
           </div>
 
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              onClick={() => reroot1hop(sel.vid)}
-              disabled={loadingGraph}
-              style={{ padding: "8px 12px" }}
-              title="以当前节点作为新 Root，重新加载 1-hop 子图（替换当前图）"
-            >
-              设为 Root 并展开（1-hop）
-            </button>
+          {allowGraphMutationActions ? (
+            <>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => reroot1hop(sel.vid)}
+                  disabled={loadingGraph}
+                  style={{ padding: "8px 12px" }}
+                  title="以当前节点作为新 Root，重新加载 1-hop 子图（替换当前图）"
+                >
+                  设为 Root 并展开（1-hop）
+                </button>
 
-            <button
-              onClick={() => expand1hop(sel.vid)}
-              disabled={expandButtonDisabled}
-              style={{ padding: "8px 12px" }}
-              title={
-                selectedNodeProbeState === "noextra"
-                  ? "该节点在当前图上下文中没有可新增的 1-hop 邻居（无多余相关节点）"
-                  : selectedNodeProbeState === "loading"
-                  ? "正在检测该节点是否有可新增的 1-hop 邻居…"
-                  : `追加该节点 1-hop 邻居到当前图；新增节点前 ${EXPAND_AUTO_REVEAL_TOPK} 个自动显示`
-              }
-            >
-              {expandButtonText}
-            </button>
+                <button
+                  onClick={() => expand1hop(sel.vid)}
+                  disabled={expandButtonDisabled}
+                  style={{ padding: "8px 12px" }}
+                  title={
+                    selectedNodeProbeState === "noextra"
+                      ? "该节点在当前图上下文中没有可新增的 1-hop 邻居（无多余相关节点）"
+                      : selectedNodeProbeState === "loading"
+                      ? "正在检测该节点是否有可新增的 1-hop 邻居…"
+                      : `追加该节点 1-hop 邻居到当前图；新增节点前 ${EXPAND_AUTO_REVEAL_TOPK} 个自动显示`
+                  }
+                >
+                  {expandButtonText}
+                </button>
 
-            <button
-              onClick={() => collapseExpandFromNode(sel.vid)}
-              disabled={!selectedNodeExpandClosable || loadingGraph}
-              style={{ padding: "8px 12px" }}
-              title={
-                selectedNodeExpandClosable
-                  ? "关闭以该节点为来源的 Expand 展开（撤销该批节点渲染）"
-                  : "该节点尚未执行 Expand 或已关闭"
-              }
-            >
-              关闭Expand
-            </button>
+                <button
+                  onClick={() => collapseExpandFromNode(sel.vid)}
+                  disabled={!selectedNodeExpandClosable || loadingGraph}
+                  style={{ padding: "8px 12px" }}
+                  title={
+                    selectedNodeExpandClosable
+                      ? "关闭以该节点为来源的 Expand 展开（撤销该批节点渲染）"
+                      : "该节点尚未执行 Expand 或已关闭"
+                  }
+                >
+                  关闭Expand
+                </button>
 
-            <button
-              onClick={() => unrevealNode(sel.vid)}
-              disabled={!selectedNodeIsVisible || selectedNodeIsRoot}
-              style={{ padding: "8px 12px" }}
-              title={selectedNodeIsRoot ? "Root 节点不允许隐藏" : "将该节点从图谱中隐藏（可撤销）"}
-            >
-              隐藏节点（可撤销）
-            </button>
-          </div>
+                <button
+                  onClick={() => unrevealNode(sel.vid)}
+                  disabled={!selectedNodeIsVisible || selectedNodeIsRoot}
+                  style={{ padding: "8px 12px" }}
+                  title={selectedNodeIsRoot ? "Root 节点不允许隐藏" : "将该节点从图谱中隐藏（可撤销）"}
+                >
+                  隐藏节点（可撤销）
+                </button>
+              </div>
 
-          <div style={{ fontSize: 12, color: "#666" }}>
-            {selectedNodeIsRoot
-              ? "当前节点是 Root（不可隐藏）"
-              : selectedNodeIsAutoTop
-              ? "当前节点属于 TopN 默认显示（可隐藏并在右侧列表恢复）"
-              : "当前节点为低优先级节点（可在右侧列表恢复/取消渲染）"}
-            {selectedNodeExpandClosable ? " ｜该节点存在可关闭的 Expand 展开内容" : ""}
-            {selectedNodeProbeState === "noextra" ? " ｜Expand：无多余相关节点" : ""}
-          </div>
+              <div style={{ fontSize: 12, color: "#666" }}>
+                {selectedNodeIsRoot
+                  ? "当前节点是 Root（不可隐藏）"
+                  : selectedNodeIsAutoTop
+                  ? "当前节点属于 TopN 默认显示（可隐藏并在右侧列表恢复）"
+                  : "当前节点为低优先级节点（可在右侧列表恢复/取消渲染）"}
+                {selectedNodeExpandClosable ? " ｜该节点存在可关闭的 Expand 展开内容" : ""}
+                {selectedNodeProbeState === "noextra" ? " ｜Expand：无多余相关节点" : ""}
+              </div>
+            </>
+          ) : (
+            <div style={{ fontSize: 12, color: "#666" }}>统一关系发现模式下禁用 Root/Expand/隐藏节点等 legacy 子图操作。</div>
+          )}
 
           <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>
 

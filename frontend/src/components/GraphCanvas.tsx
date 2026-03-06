@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
-import { Graph } from "@antv/g6";
+import { Text } from "@antv/g";
+import { Circle as G6Circle, Graph, register } from "@antv/g6";
 import type { EdgeBrief } from "../types/kg";
 import { relationDisplay } from "../utils/kg";
 import { applyVisibility, createVisibilitySnapshot } from "../utils/visibilityManager";
@@ -23,6 +24,67 @@ type G6Data = {
   nodes: G6Node[];
   edges: G6Edge[];
 };
+
+const NODE_TITLE_COLOR = "#262626";
+const NODE_SUBTITLE_COLOR = "#8c8c8c";
+const TWO_LINE_NODE_TYPE = "kg-two-line-circle";
+const TWO_LINE_NODE_REGISTER_FLAG = "__kg_two_line_circle_registered__";
+
+class TwoLineCircleNode extends G6Circle {
+  protected drawLabelShape(attributes: any, container: any): void {
+    const titleText = String(attributes?.labelText || "").trim();
+    const subtitleText = String(attributes?.subtitleText || "").trim();
+    const keyShape = this.getShape<any>("key");
+    const radius =
+      Number(keyShape?.attributes?.r || 0) || Math.max(12, Math.min(...this.getSize(attributes)) / 2);
+    const titleY = radius + 6;
+    const titleFontSize = Number(attributes?.labelFontSize || 12);
+    const subtitleFontSize = Math.max(10, titleFontSize - 1);
+    const labelVisible = attributes?.label !== false && !!titleText;
+
+    this.upsert(
+      "title",
+      Text,
+      labelVisible
+        ? {
+            x: 0,
+            y: titleY,
+            text: titleText,
+            fill: String(attributes?.labelFill || NODE_TITLE_COLOR),
+            fontSize: titleFontSize,
+            fontWeight: 500,
+            textAlign: "center",
+            textBaseline: "top",
+            pointerEvents: "none",
+          }
+        : false,
+      container
+    );
+
+    this.upsert(
+      "subtitle",
+      Text,
+      labelVisible && subtitleText
+        ? {
+            x: 0,
+            y: titleY + titleFontSize + 2,
+            text: subtitleText,
+            fill: NODE_SUBTITLE_COLOR,
+            fontSize: subtitleFontSize,
+            textAlign: "center",
+            textBaseline: "top",
+            pointerEvents: "none",
+          }
+        : false,
+      container
+    );
+  }
+}
+
+if (!(globalThis as Record<string, unknown>)[TWO_LINE_NODE_REGISTER_FLAG]) {
+  register("node", TWO_LINE_NODE_TYPE, TwoLineCircleNode);
+  (globalThis as Record<string, unknown>)[TWO_LINE_NODE_REGISTER_FLAG] = true;
+}
 
 type GraphCanvasProps = {
   g6Data: G6Data;
@@ -197,9 +259,11 @@ export function GraphCanvas({
         data: { nodes: [], edges: [] },
         layout: { type: "force" },
         node: {
+          type: TWO_LINE_NODE_TYPE,
           style: {
             labelText: (d: any) => (renderNodeLabelsRef.current ? String(d.label || "") : ""),
-            labelPlacement: "bottom",
+            subtitleText: (d: any) =>
+              renderNodeLabelsRef.current ? String(d?.data?.entity_type || "") : "",
             size: (d: any) => {
               if (isSeedNode(d)) return 33;
               const lvl = Number(d?.data?.hopLevel ?? 99);
@@ -210,6 +274,7 @@ export function GraphCanvas({
             },
             fill: (d: any) => {
               if (isSeedNode(d)) return "#bae637";
+              if (d?.data?.fillColor) return String(d.data.fillColor);
               const lvl = Number(d?.data?.hopLevel ?? 99);
               if (lvl === 0) return "#ff7a45";
               if (lvl === 1) return "#ffa940";
@@ -218,6 +283,7 @@ export function GraphCanvas({
             },
             stroke: (d: any) => {
               if (isSeedNode(d)) return "#389e0d";
+              if (d?.data?.strokeColor) return String(d.data.strokeColor);
               const lvl = Number(d?.data?.hopLevel ?? 99);
               if (lvl === 0) return "#d4380d";
               if (lvl === 1) return "#d46b08";
