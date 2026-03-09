@@ -17,6 +17,7 @@ export type NodeBrief = {
   seed_support_count?: number;
   seed_support_vids?: number[];
   score_breakdown?: Record<string, unknown>;
+  source_tags?: string[];
 };
 
 export type EdgeBrief = {
@@ -33,6 +34,7 @@ export type EdgeBrief = {
   seed_support_vids?: number[];
   path_pair?: string;
   is_backbone?: boolean;
+  source_tags?: string[];
 };
 
 export type SearchResp = {
@@ -267,6 +269,65 @@ export type GraphDiscoverySeedFacetItem = {
   core_path_count: number;
 };
 
+export type DiscoveryDroppedReason = "budget" | "type_filter" | "relation_filter";
+
+export type GraphDiscoveryDroppedCandidate = {
+  node_id: number;
+  label: string;
+  entity_type: string;
+  raw_id: string;
+  source: string;
+  snippet: string;
+  reason: DiscoveryDroppedReason;
+  source_node_id?: number | null;
+  support_edges: EdgeBrief[];
+};
+
+export type GraphDiscoveryNodeCapability = {
+  node_id: number;
+  expandable: boolean;
+  terminal: boolean;
+};
+
+export type GraphDiscoveryExpandResp = {
+  new_nodes: NodeBrief[];
+  new_edges: EdgeBrief[];
+  support_edges: EdgeBrief[];
+  dropped_candidates: GraphDiscoveryDroppedCandidate[];
+  has_more_candidates_before_budget: boolean;
+  has_more_candidates_after_filters: boolean;
+  terminal: boolean;
+  stats: {
+    candidate_neighbor_count: number;
+    filtered_candidate_count: number;
+    new_nodes_count: number;
+    new_edges_count: number;
+    dropped_by_budget: number;
+    dropped_by_type_filter: number;
+    dropped_by_relation_filter: number;
+    dropped_neighbors: number;
+    scanned_rows: number;
+    budget_applied?: Record<string, unknown>;
+  };
+};
+
+export type DiscoveryGraphSourceTag = "discovery_base" | "forced_render" | "manual_restore" | `expand:${string}`;
+
+export type DiscoveryNodeExpandUiState = "collapsed" | "expanding" | "expanded" | "terminal";
+
+export type NodeExpandSession = {
+  sourceNodeId: string;
+  isExpanded: boolean;
+  requestFingerprint: string;
+  addedNodeIds: string[];
+  addedEdgeIds: string[];
+  droppedNodeIds: string[];
+  filtersSnapshot: {
+    entityTypes: string[];
+    relationTypes: string[];
+  };
+};
+
 export type GraphDiscoveryResp = {
   nodes: NodeBrief[];
   edges: EdgeBrief[];
@@ -301,6 +362,8 @@ export type GraphDiscoveryResp = {
     kept_candidate_count: number;
     budget_applied?: Record<string, unknown>;
   };
+  dropped_candidates?: GraphDiscoveryDroppedCandidate[];
+  node_capabilities?: GraphDiscoveryNodeCapability[];
 };
 
 export type DiscoveryEntityCandidateQueryState = {

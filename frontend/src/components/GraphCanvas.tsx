@@ -101,6 +101,7 @@ type GraphCanvasProps = {
   registerApplyHighlight?: (
     fn: (nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void
   ) => void;
+  registerFocusNode?: (fn: (nodeId: string) => void) => void;
 };
 
 export function GraphCanvas({
@@ -116,6 +117,7 @@ export function GraphCanvas({
   onEdgeClick,
   containerStyle,
   registerApplyHighlight,
+  registerFocusNode,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
@@ -241,9 +243,36 @@ export function GraphCanvas({
     if (force && !nextEdgeId && prevEdgeId) safeSetState(prevEdgeId, []);
   }
 
+  function focusNode(nodeId: string) {
+    applyHighlight(nodeId, null, true);
+    const g: any = graphRef.current;
+    if (!g) return;
+    try {
+      if (typeof g.focusElement === "function") {
+        g.focusElement(nodeId, true);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      if (typeof g.focusItem === "function") {
+        g.focusItem(nodeId, true);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    safeFitView();
+  }
+
   useEffect(() => {
     if (registerApplyHighlight) registerApplyHighlight(applyHighlight);
   }, [registerApplyHighlight]);
+
+  useEffect(() => {
+    if (registerFocusNode) registerFocusNode(focusNode);
+  }, [registerFocusNode]);
 
   useEffect(() => {
     if (!containerRef.current) return;

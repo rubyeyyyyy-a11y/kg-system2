@@ -45,6 +45,11 @@ type UseGraphDataResult = {
   resetExpandProbeCache: () => void;
   probeExpand1hop: (fromVid: number) => Promise<void>;
   clearGraphData: () => void;
+  mergeGraphData: (params: {
+    nodes?: NodeBrief[];
+    edges?: EdgeBrief[];
+    stats?: Record<string, unknown> | null;
+  }) => void;
   replaceGraphData: (params: {
     rootVid: number;
     nodes: NodeBrief[];
@@ -161,6 +166,43 @@ export function useGraphData({
     setPanelGroupCollapsed({});
     resetExpandProbeCache();
     onClearSelection();
+  }
+
+  function mergeGraphData(params: {
+    nodes?: NodeBrief[];
+    edges?: EdgeBrief[];
+    stats?: Record<string, unknown> | null;
+  }) {
+    if (params.nodes) {
+      setGraphNodes((prev) => {
+        const next = new Map<number, NodeBrief>();
+        for (const node of prev) next.set(node.id, node);
+        for (const node of params.nodes || []) next.set(node.id, node);
+        return Array.from(next.values());
+      });
+    }
+    if (params.edges) {
+      setGraphEdges((prev) => {
+        const next: EdgeBrief[] = [];
+        const seen = new Set<string>();
+        for (const edge of prev) {
+          const key = edgeKey(edge);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          next.push(edge);
+        }
+        for (const edge of params.edges || []) {
+          const key = edgeKey(edge);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          next.push(edge);
+        }
+        return next;
+      });
+    }
+    if (params.stats !== undefined) {
+      setGraphStats(params.stats);
+    }
   }
 
   function updateNodeInGraph(vid: number, patch: Partial<NodeBrief>) {
@@ -548,6 +590,7 @@ export function useGraphData({
     resetExpandProbeCache,
     probeExpand1hop,
     clearGraphData,
+    mergeGraphData,
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,

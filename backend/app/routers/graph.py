@@ -3,6 +3,8 @@ from fastapi import APIRouter, Query
 from app.schemas.discovery import (
     DiscoveryEntityCandidatesRequest,
     DiscoveryEntityCandidatesResp,
+    GraphDiscoveryExpandRequest,
+    GraphDiscoveryExpandResp,
     GraphDiscoveryRequest,
     GraphDiscoveryResp,
 )
@@ -16,7 +18,7 @@ from app.schemas.graph import (
     SubgraphResp,
     SubgraphRequest,
 )
-from app.services import discovery_entity_candidate_service, graph_discovery_service, graph_service
+from app.services import discovery_entity_candidate_service, graph_discovery_expand_service, graph_discovery_service, graph_service
 
 router = APIRouter(prefix="/api")
 
@@ -53,6 +55,11 @@ def multi_entity_graph_apply_paths(req: MultiEntityGraphApplyPathsRequest):
 @router.post("/graph/discovery", response_model=GraphDiscoveryResp)
 def graph_discovery(req: GraphDiscoveryRequest):
     return graph_discovery_service.discovery(req)
+
+
+@router.post("/graph/discovery/expand", response_model=GraphDiscoveryExpandResp)
+def graph_discovery_expand(req: GraphDiscoveryExpandRequest):
+    return graph_discovery_expand_service.expand(req)
 
 
 @router.post("/discovery/entity_candidates", response_model=DiscoveryEntityCandidatesResp)

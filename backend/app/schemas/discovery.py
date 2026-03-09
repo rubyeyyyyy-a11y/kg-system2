@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel
@@ -150,8 +151,70 @@ class GraphDiscoveryStats(BaseModel):
     budget_applied: Dict[str, Any] = {}
 
 
+class DiscoveryDroppedReason(str, Enum):
+    BUDGET = "budget"
+    TYPE_FILTER = "type_filter"
+    RELATION_FILTER = "relation_filter"
+
+
+class GraphDiscoveryDroppedCandidate(BaseModel):
+    node_id: int
+    label: str = ""
+    entity_type: str = ""
+    raw_id: str = ""
+    source: str = ""
+    snippet: str = ""
+    reason: DiscoveryDroppedReason
+    source_node_id: Optional[int] = None
+    support_edges: List[GraphEdge] = []
+
+
+class GraphDiscoveryNodeCapability(BaseModel):
+    node_id: int
+    expandable: bool = True
+    terminal: bool = False
+
+
+class GraphDiscoveryExpandRequest(BaseModel):
+    target_node_id: int
+    rendered_node_ids: List[int] = []
+    rendered_edge_ids: List[str] = []
+    allowed_entity_types: List[str] = []
+    allowed_relation_types: List[str] = []
+    expand_max_new_nodes: int = 20
+    expand_max_new_edges: int = 30
+    expand_top_k_per_type: int = 8
+    expand_max_hop: int = 1
+
+
+class GraphDiscoveryExpandStats(BaseModel):
+    candidate_neighbor_count: int = 0
+    filtered_candidate_count: int = 0
+    new_nodes_count: int = 0
+    new_edges_count: int = 0
+    dropped_by_budget: int = 0
+    dropped_by_type_filter: int = 0
+    dropped_by_relation_filter: int = 0
+    dropped_neighbors: int = 0
+    scanned_rows: int = 0
+    budget_applied: Dict[str, Any] = {}
+
+
+class GraphDiscoveryExpandResp(BaseModel):
+    new_nodes: List[GraphDiscoveryNode] = []
+    new_edges: List[GraphDiscoveryEdge] = []
+    support_edges: List[GraphDiscoveryEdge] = []
+    dropped_candidates: List[GraphDiscoveryDroppedCandidate] = []
+    has_more_candidates_before_budget: bool = False
+    has_more_candidates_after_filters: bool = False
+    terminal: bool = True
+    stats: GraphDiscoveryExpandStats = GraphDiscoveryExpandStats()
+
+
 class GraphDiscoveryResp(BaseModel):
     nodes: List[GraphDiscoveryNode]
     edges: List[GraphDiscoveryEdge]
     facets: GraphDiscoveryFacets
     stats: GraphDiscoveryStats
+    dropped_candidates: List[GraphDiscoveryDroppedCandidate] = []
+    node_capabilities: List[GraphDiscoveryNodeCapability] = []

@@ -15,6 +15,7 @@ import type {
   GraphDiscoveryQuerySummary,
   GraphDiscoveryRelationFacetItem,
   GraphDiscoverySeedFacetItem,
+  NodeBrief,
   SuggestItem,
 } from "../types/kg";
 import { relationDisplay } from "../utils/kg";
@@ -76,6 +77,27 @@ type DiscoveryPanelProps = {
   } | null;
   loading: boolean;
   hasPendingChanges: boolean;
+  renderedNodes: NodeBrief[];
+  hiddenNodes: NodeBrief[];
+  droppedNodes: {
+    droppedByBudget: Array<{
+      node: NodeBrief;
+      supportEdgesCount: number;
+      sourceNodeId: number | null;
+    }>;
+    droppedByTypeFilter: Array<{
+      node: NodeBrief;
+      supportEdgesCount: number;
+      sourceNodeId: number | null;
+    }>;
+    droppedByRelationFilter: Array<{
+      node: NodeBrief;
+      supportEdgesCount: number;
+      sourceNodeId: number | null;
+    }>;
+  };
+  renderedPanelCollapsed: boolean;
+  droppedPanelCollapsed: boolean;
   onRemoveSeed: (vid: number) => void;
   onClearSeeds: () => void;
   onUpdateSearchQuery: (patch: Partial<DiscoveryEntityCandidateQueryState>) => void;
@@ -93,6 +115,13 @@ type DiscoveryPanelProps = {
   onLoadCandidateSubgraph: (item: DiscoveryEntityCandidateItem) => void;
   onUpdateQuery: (patch: Partial<DiscoveryQueryState>) => void;
   onUpdateRuntime: (patch: Partial<DiscoveryRuntimeState>) => void;
+  onSetRenderedPanelCollapsed: (next: boolean) => void;
+  onSetDroppedPanelCollapsed: (next: boolean) => void;
+  onLocateNode: (vid: number) => void;
+  onHideRenderedNode: (vid: number) => void;
+  onRestoreHiddenNode: (vid: number, locate?: boolean) => void;
+  onForceRenderDroppedNode: (vid: number, locate?: boolean) => void;
+  onViewNodeDetailById: (vid: number) => void;
   onRun: () => void;
 };
 
@@ -150,6 +179,82 @@ function CheckboxList({
   );
 }
 
+function ManagedNodeList({
+  title,
+  items,
+  emptyText,
+  primaryActionLabel,
+  onPrimaryAction,
+  onLocate,
+  onViewDetail,
+  locateDisabled,
+  isPrimaryDisabled,
+}: {
+  title: string;
+  items: Array<{
+    node: NodeBrief;
+    meta?: string;
+  }>;
+  emptyText: string;
+  primaryActionLabel: string | ((node: NodeBrief) => string);
+  onPrimaryAction: (vid: number) => void;
+  onLocate?: (vid: number) => void;
+  onViewDetail: (vid: number) => void;
+  locateDisabled?: boolean;
+  isPrimaryDisabled?: (node: NodeBrief) => boolean;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontSize: 12, fontWeight: 600 }}>{title}</div>
+      {items.length === 0 ? (
+        <div style={{ fontSize: 12, color: "#666" }}>{emptyText}</div>
+      ) : (
+        items.map(({ node, meta }) => (
+          <div
+            key={node.id}
+            style={{
+              border: "1px solid #f0f0f0",
+              borderRadius: 8,
+              background: "#fff",
+              padding: 8,
+              display: "grid",
+              gap: 6,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 600 }}>{node.label || `node ${node.id}`}</div>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              vid={node.id}
+              {node.entity_type ? ` | ${node.entity_type}` : ""}
+              {meta ? ` | ${meta}` : ""}
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => onPrimaryAction(node.id)}
+                  disabled={Boolean(isPrimaryDisabled?.(node))}
+                  style={{ padding: "6px 8px", fontSize: 12 }}
+                >
+                  {typeof primaryActionLabel === "function" ? primaryActionLabel(node) : primaryActionLabel}
+                </button>
+              {onLocate ? (
+                <button
+                  onClick={() => onLocate(node.id)}
+                  disabled={locateDisabled}
+                  style={{ padding: "6px 8px", fontSize: 12 }}
+                >
+                  定位到图中
+                </button>
+              ) : null}
+              <button onClick={() => onViewDetail(node.id)} style={{ padding: "6px 8px", fontSize: 12 }}>
+                查看详情
+              </button>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
 export function DiscoveryPanel({
   seeds,
   searchQuery,
@@ -165,6 +270,11 @@ export function DiscoveryPanel({
   resultStats,
   loading,
   hasPendingChanges,
+  renderedNodes,
+  hiddenNodes,
+  droppedNodes,
+  renderedPanelCollapsed,
+  droppedPanelCollapsed,
   onRemoveSeed,
   onClearSeeds,
   onUpdateSearchQuery,
@@ -182,6 +292,13 @@ export function DiscoveryPanel({
   onLoadCandidateSubgraph,
   onUpdateQuery,
   onUpdateRuntime,
+  onSetRenderedPanelCollapsed,
+  onSetDroppedPanelCollapsed,
+  onLocateNode,
+  onHideRenderedNode,
+  onRestoreHiddenNode,
+  onForceRenderDroppedNode,
+  onViewNodeDetailById,
   onRun,
 }: DiscoveryPanelProps) {
   const searchWrapRef = useRef<HTMLDivElement>(null);
@@ -431,6 +548,104 @@ export function DiscoveryPanel({
         ) : null}
       </div>
 
+      <div style={{ border: "1px solid #eee", borderRadius: 8, overflow: "hidden", background: "#fafafa" }}>
+        <button
+          onClick={() => onSetRenderedPanelCollapsed(!renderedPanelCollapsed)}
+          style={{
+            width: "100%",
+            textAlign: "left",
+            border: "none",
+            background: "#fafafa",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 700,
+          }}
+        >
+          {renderedPanelCollapsed ? "▶" : "▼"} Rendered Nodes（{renderedNodes.length}）
+        </button>
+        {!renderedPanelCollapsed ? (
+          <div style={{ borderTop: "1px solid #eee", padding: 12, display: "grid", gap: 8 }}>
+            <ManagedNodeList
+              title="当前已渲染节点"
+              items={renderedNodes.map((node) => ({ node }))}
+              emptyText="当前没有已渲染节点"
+              primaryActionLabel={(node) => (seedIdSet.has(node.id) ? "Seed 仅支持删除" : "取消渲染")}
+              onPrimaryAction={onHideRenderedNode}
+              onLocate={onLocateNode}
+              onViewDetail={onViewNodeDetailById}
+              isPrimaryDisabled={(node) => seedIdSet.has(node.id)}
+            />
+          </div>
+        ) : null}
+      </div>
+
+      <div style={{ border: "1px solid #eee", borderRadius: 8, overflow: "hidden", background: "#fafafa" }}>
+        <button
+          onClick={() => onSetDroppedPanelCollapsed(!droppedPanelCollapsed)}
+          style={{
+            width: "100%",
+            textAlign: "left",
+            border: "none",
+            background: "#fafafa",
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontSize: 13,
+            fontWeight: 700,
+          }}
+        >
+          {droppedPanelCollapsed ? "▶" : "▼"} Dropped / Hidden Nodes（
+          {hiddenNodes.length + droppedNodes.droppedByBudget.length + droppedNodes.droppedByTypeFilter.length + droppedNodes.droppedByRelationFilter.length}
+          ）
+        </button>
+        {!droppedPanelCollapsed ? (
+          <div style={{ borderTop: "1px solid #eee", padding: 12, display: "grid", gap: 12 }}>
+            <ManagedNodeList
+              title="Hidden by User"
+              items={hiddenNodes.map((node) => ({ node, meta: "hidden_by_user" }))}
+              emptyText="当前没有用户隐藏节点"
+              primaryActionLabel="恢复显示"
+              onPrimaryAction={(vid) => onRestoreHiddenNode(vid, false)}
+              onLocate={(vid) => onRestoreHiddenNode(vid, true)}
+              onViewDetail={onViewNodeDetailById}
+            />
+            <ManagedNodeList
+              title="Budget Dropped"
+              items={droppedNodes.droppedByBudget.map((item) => ({
+                node: item.node,
+                meta: `support_edges=${item.supportEdgesCount}${item.sourceNodeId != null ? ` | source=${item.sourceNodeId}` : ""}`,
+              }))}
+              emptyText="当前没有 budget dropped 节点"
+              primaryActionLabel="加入渲染"
+              onPrimaryAction={(vid) => onForceRenderDroppedNode(vid, false)}
+              onViewDetail={onViewNodeDetailById}
+            />
+            <ManagedNodeList
+              title="Type Filtered"
+              items={droppedNodes.droppedByTypeFilter.map((item) => ({
+                node: item.node,
+                meta: `support_edges=${item.supportEdgesCount}${item.sourceNodeId != null ? ` | source=${item.sourceNodeId}` : ""}`,
+              }))}
+              emptyText="当前没有 type filtered 节点"
+              primaryActionLabel="强制显示"
+              onPrimaryAction={(vid) => onForceRenderDroppedNode(vid, false)}
+              onViewDetail={onViewNodeDetailById}
+            />
+            <ManagedNodeList
+              title="Relation Filtered"
+              items={droppedNodes.droppedByRelationFilter.map((item) => ({
+                node: item.node,
+                meta: `support_edges=${item.supportEdgesCount}${item.sourceNodeId != null ? ` | source=${item.sourceNodeId}` : ""}`,
+              }))}
+              emptyText="当前没有 relation filtered 节点"
+              primaryActionLabel="强制显示"
+              onPrimaryAction={(vid) => onForceRenderDroppedNode(vid, false)}
+              onViewDetail={onViewNodeDetailById}
+            />
+          </div>
+        ) : null}
+      </div>
+
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
         <div style={{ fontSize: 13, fontWeight: 700 }}>Filters & Info</div>
 
@@ -469,7 +684,7 @@ export function DiscoveryPanel({
         </div>
 
         <div style={{ fontSize: 12, color: "#666" }}>
-          这些筛选先作用于当前图；点击“重新生成关系图”后，同一组 entity/relation 选择会作为后端 discovery 条件。
+          这些是全局 discovery 过滤条件，仅用于下一次“重新生成关系图”。节点级 expand 使用独立的本次 expand 过滤器。
         </div>
       </div>
 
@@ -593,7 +808,7 @@ export function DiscoveryPanel({
             {loading ? "生成中…" : "重新生成关系图"}
           </button>
           <div style={{ fontSize: 12, color: "#666" }}>
-            勾选变化会先即时过滤当前图；点击这里后，才会按当前左侧筛选条件重跑 discovery。
+            当前 seeds 或全局 discovery 过滤条件变更后，点击这里会按最新条件重跑 discovery。
           </div>
           {hasPendingChanges ? (
             <div style={{ fontSize: 12, color: "#ad6800" }}>当前 seeds 或 discovery 参数已变更，需重新生成后才会同步到图结果。</div>

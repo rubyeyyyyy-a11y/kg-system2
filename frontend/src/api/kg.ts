@@ -7,6 +7,7 @@ import type {
   EdgeSearchResp,
   EdgeSuggestResp,
   DiscoveryEntityCandidatesResp,
+  GraphDiscoveryExpandResp,
   GraphDiscoveryResp,
   MultiEntityGraphResp,
   ExpandResp,
@@ -284,6 +285,20 @@ export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPath
 
 export async function graphDiscovery(body: GraphDiscoveryParams): Promise<GraphDiscoveryResp> {
   return apiPost<GraphDiscoveryResp>("/api/graph/discovery", body);
+}
+
+export async function graphDiscoveryExpand(body: {
+  target_node_id: number;
+  rendered_node_ids: number[];
+  rendered_edge_ids?: string[];
+  allowed_entity_types: string[];
+  allowed_relation_types: string[];
+  expand_max_new_nodes: number;
+  expand_max_new_edges: number;
+  expand_top_k_per_type: number;
+  expand_max_hop: number;
+}): Promise<GraphDiscoveryExpandResp> {
+  return apiPost<GraphDiscoveryExpandResp>("/api/graph/discovery/expand", body);
 }
 
 export async function discoveryEntityCandidates(

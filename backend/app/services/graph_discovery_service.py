@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from app.core import config
 from app.db.nebula import EDGE_TAG, execute_ngql
-from app.schemas.discovery import GraphDiscoveryRequest
+from app.schemas.discovery import DiscoveryDroppedReason, GraphDiscoveryRequest
 from app.services.common import truncate_by_degree, uniq_edges, vw
 from app.services.graph_budget import graph_budget
 from app.services.graph_service import _find_shortest_path_candidates_bfs
@@ -307,6 +307,41 @@ LIMIT {len(ids)};
             "snippet": (descr[:160] + "…") if descr and len(descr) > 160 else (descr or ""),
         }
     return node_map
+
+
+def _build_dropped_candidate_payload(
+    node: Dict[str, Any],
+    *,
+    reason: DiscoveryDroppedReason,
+    support_edges: Iterable[Dict[str, Any]],
+    seed_set: Set[int],
+) -> Dict[str, Any]:
+    return {
+        "node_id": int(node["id"]),
+        "label": str(node.get("label") or ""),
+        "entity_type": str(node.get("entity_type") or ""),
+        "raw_id": str(node.get("raw_id") or ""),
+        "source": str(node.get("source") or ""),
+        "snippet": str(node.get("snippet") or ""),
+        "reason": reason,
+        "support_edges": [
+            {
+                "source": int(edge["source"]),
+                "target": int(edge["target"]),
+                "rank": str(edge.get("rank") or "0"),
+                "edge_type": str(edge.get("edge_type") or config.EDGE_TYPE),
+                "relation": str(edge.get("relation") or ""),
+                "source_db": str(edge.get("source_db") or ""),
+                "role": _edge_role_for_nodes(int(edge["source"]), int(edge["target"]), seed_set),
+                "layer": "supplement",
+                "priority_score": 1.0,
+                "seed_support_vids": [],
+                "path_pair": "",
+                "is_backbone": False,
+            }
+            for edge in support_edges or []
+        ],
+    }
 
 
 def _go_edges_from(
@@ -1317,6 +1352,7 @@ def _discovery_layered(req: GraphDiscoveryRequest) -> Dict[str, Any]:
 
         scored_candidates: List[Dict[str, Any]] = []
         dropped_by_entity_filter = 0
+        dropped_by_entity_filter_items: Dict[int, Dict[str, Any]] = {}
         for vid, support in candidate_support.items():
             node = candidate_node_map.get(int(vid))
             if not node:
@@ -1325,6 +1361,10 @@ def _discovery_layered(req: GraphDiscoveryRequest) -> Dict[str, Any]:
             if allowed_entity_types and entity_type_norm not in allowed_entity_types:
                 dropped_nodes += 1
                 dropped_by_entity_filter += 1
+                dropped_by_entity_filter_items[int(vid)] = {
+                    **node,
+                    "support_edges": list(support["support_edges"]),
+                }
                 continue
 
             matched_seed_count = len(support["seed_support_vids"])
@@ -1530,6 +1570,27 @@ def _discovery_layered(req: GraphDiscoveryRequest) -> Dict[str, Any]:
             and int(item["id"]) not in dropped_generic_hub_ids
             and int(item["id"]) not in dropped_by_type_budget_ids
         }
+        dropped_candidates: List[Dict[str, Any]] = []
+        for vid, node in sorted(dropped_by_entity_filter_items.items()):
+            dropped_candidates.append(
+                _build_dropped_candidate_payload(
+                    node,
+                    reason=DiscoveryDroppedReason.TYPE_FILTER,
+                    support_edges=node.get("support_edges") or [],
+                    seed_set=seed_set,
+                )
+            )
+        for item in sorted(scored_candidates, key=_layer_sort_key):
+            if int(item["id"]) not in dropped_by_budget_ids:
+                continue
+            dropped_candidates.append(
+                _build_dropped_candidate_payload(
+                    item,
+                    reason=DiscoveryDroppedReason.BUDGET,
+                    support_edges=item.get("support_edges") or [],
+                    seed_set=seed_set,
+                )
+            )
         eligible_candidate_count = len(scored_candidates)
         if len(selected_candidates) < eligible_candidate_count:
             dropped_nodes += eligible_candidate_count - len(selected_candidates)
@@ -1861,6 +1922,7 @@ def _discovery_layered(req: GraphDiscoveryRequest) -> Dict[str, Any]:
             "nodes": final_nodes,
             "edges": final_edges,
             "facets": facets,
+            "dropped_candidates": dropped_candidates,
             "stats": {
                 "ranking_mode": "layered_multiseed",
                 "seed_count": len(seed_vids),

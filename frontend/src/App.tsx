@@ -19,6 +19,7 @@ import { TopBar } from "./components/TopBar";
 import { useDiscoveryCandidateResults } from "./hooks/useDiscoveryCandidateResults";
 import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch";
 import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
+import { useDiscoveryGraphState } from "./hooks/useDiscoveryGraphState";
 import { useDiscoverySeeds } from "./hooks/useDiscoverySeeds";
 import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
@@ -260,6 +261,12 @@ export default function App() {
     entityTypes: [],
     relationTypes: [],
   });
+  const [discoveryExpandFilters, setDiscoveryExpandFilters] = useState<DiscoveryRuntimeState>({
+    entityTypes: [],
+    relationTypes: [],
+  });
+  const [discoveryRenderedPanelCollapsed, setDiscoveryRenderedPanelCollapsed] = useState(true);
+  const [discoveryDroppedPanelCollapsed, setDiscoveryDroppedPanelCollapsed] = useState(false);
   const [pathCandidates, setPathCandidates] = useState<PairPathCandidate[]>([]);
   const [chosenPathByPair, setChosenPathByPair] = useState<Record<string, number>>({});
   const [appliedExtraPaths, setAppliedExtraPaths] = useState<Record<string, number[]>>({});
@@ -269,6 +276,8 @@ export default function App() {
   const [edgeDetail, setEdgeDetail] = useState<EdgeDetailResp | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [selectedEdgeGraphId, setSelectedEdgeGraphId] = useState<string | null>(null);
+  const [discoveryExpandProbeNodeId, setDiscoveryExpandProbeNodeId] = useState<number | null>(null);
+  const discoveryExpandProbeTokenRef = useRef(0);
 
   const [relationTypeCatalogItems, setRelationTypeCatalogItems] = useState<RelationTypeItem[]>([]);
   const [relationTypeCatalogQuery, setRelationTypeCatalogQuery] = useState("");
@@ -288,6 +297,7 @@ export default function App() {
 
   const applyHighlightRef =
     useRef<((nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void) | null>(null);
+  const focusNodeRef = useRef<((nodeId: string) => void) | null>(null);
 
   const loadNodeDetail = useCallback(async (vid: number) => {
     setDetailLoading(true);
@@ -573,6 +583,7 @@ export default function App() {
     unrevealNode,
     collapseExpandFromNode,
     clearGraphData,
+    mergeGraphData,
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,
@@ -725,6 +736,7 @@ export default function App() {
     });
     setDiscoveryResult(nextPayload);
     setLastDiscoveryRequest(request);
+    discoveryGraphState.initializeFromDiscovery(nextPayload);
     if (resetRuntimeFilters) {
       const nextEntityFacetValues = (nextPayload.facets?.entity_types || []).map((item) => item.entity_type);
       const nextRelationFacetValues = (nextPayload.facets?.relation_types || []).map((item) => item.relation_type);
@@ -734,7 +746,7 @@ export default function App() {
         const allowed = new Set(requestValues);
         return allValues.filter((item) => allowed.has(item));
       };
-      setDiscoveryRuntimeFilters({
+      const nextRuntimeFilters = {
         entityTypes: restoreSelectedFilters(
           request.allowed_entity_types,
           nextEntityFacetValues,
@@ -745,6 +757,11 @@ export default function App() {
           nextRelationFacetValues,
           DISCOVERY_NONE_RELATION_TYPE
         ),
+      };
+      setDiscoveryRuntimeFilters(nextRuntimeFilters);
+      setDiscoveryExpandFilters({
+        entityTypes: [...nextRuntimeFilters.entityTypes],
+        relationTypes: [...nextRuntimeFilters.relationTypes],
       });
     }
     setGraphSourceMode("discovery");
@@ -784,6 +801,7 @@ export default function App() {
       setLastMultiGraphParams(null);
       clearMultiPathState();
       clearGraphData();
+      discoveryGraphState.resetState();
       return;
     }
     applyDiscoveryPayload(discoveryResult, lastDiscoveryRequest, { resetRuntimeFilters: false });
@@ -860,6 +878,24 @@ export default function App() {
 
   function addDiscoverySeedItems(items: SuggestItem[]) {
     discoverySeedsState.addItems(items);
+  }
+
+  async function handleRemoveDiscoverySeed(vid: number) {
+    const nextSeeds = discoverySeeds.filter((item) => item.vid !== vid);
+    discoverySeedsState.removeItem(vid);
+    if (graphSourceMode !== "discovery" || !lastDiscoveryRequest) return;
+    if (nextSeeds.length <= 0) {
+      setDiscoveryResult(null);
+      setLastDiscoveryRequest(null);
+      clearGraphData();
+      discoveryGraphState.resetState();
+      handleClearSelection();
+      return;
+    }
+    await runDiscovery({
+      ...buildDiscoveryRequest(),
+      seed_vids: nextSeeds.map((item) => item.vid),
+    });
   }
 
   function candidateItemToSeed(item: DiscoveryEntityCandidateItem): SuggestItem {
@@ -1388,63 +1424,65 @@ export default function App() {
     },
   });
 
-  const discoveryFilteredGraph = useMemo(() => {
-    if (workspaceMode !== "discovery" || graphSourceMode !== "discovery" || !discoveryResult) return null;
+  const discoverySelectedSeedVidSet = useMemo(() => {
+    const seed = new Set<number>();
+    for (const item of discoverySeeds) seed.add(item.vid);
+    return seed;
+  }, [discoverySeeds]);
 
-    const seedIds = new Set<number>(
-      (graphNodes || []).filter((node) => node.role === "seed").map((node) => node.id)
-    );
-    const allowedEntityTypes = new Set(discoveryRuntimeFilters.entityTypes);
-    const allowedRelationTypes = new Set(discoveryRuntimeFilters.relationTypes);
-    const candidateAllowedIds = new Set<number>();
-    for (const node of graphNodes) {
-      if (seedIds.has(node.id)) {
-        candidateAllowedIds.add(node.id);
-        continue;
+  const discoveryRunSeedVidSet = useMemo(() => {
+    if (graphSourceMode !== "discovery") return new Set<number>();
+    const seed = new Set<number>();
+    for (const vid of lastDiscoveryRequest?.seed_vids || []) seed.add(Number(vid));
+    if (seed.size === 0) {
+      for (const node of discoveryResult?.nodes || []) {
+        if (node.role === "seed") seed.add(node.id);
       }
-      if (allowedEntityTypes.has(String(node.entity_type || ""))) candidateAllowedIds.add(node.id);
     }
+    return seed;
+  }, [graphSourceMode, discoveryResult, lastDiscoveryRequest]);
 
-    const filteredEdges = graphEdges.filter((edge) => {
-      if (!allowedRelationTypes.has(String(edge.relation || ""))) return false;
-      return candidateAllowedIds.has(Number(edge.source)) && candidateAllowedIds.has(Number(edge.target));
-    });
-
-    const connectedIds = new Set<number>(seedIds);
-    for (const edge of filteredEdges) {
-      connectedIds.add(Number(edge.source));
-      connectedIds.add(Number(edge.target));
-    }
-
-    const filteredNodes = graphNodes.filter((node) => seedIds.has(node.id) || connectedIds.has(node.id));
-    return {
-      nodes: filteredNodes,
-      edges: filteredEdges,
-      stats: {
-        ...(graphStats || {}),
-        runtime_filter: true,
-        node_count: filteredNodes.length,
-        edge_count: filteredEdges.length,
-      } as Record<string, unknown>,
-    };
-  }, [workspaceMode, graphSourceMode, discoveryResult, graphNodes, graphEdges, graphStats, discoveryRuntimeFilters]);
+  const discoveryGraphState = useDiscoveryGraphState({
+    graphNodes,
+    graphEdges,
+    maxNodes: lastDiscoveryRequest?.max_nodes ?? discoveryQuery.maxNodes,
+    maxEdges: lastDiscoveryRequest?.max_edges ?? discoveryQuery.maxEdges,
+    seedNodeIds: discoveryRunSeedVidSet,
+    onMergeGraphData: mergeGraphData,
+    onNotice: (level, message) => setUiNotice({ level, message }),
+  });
+  const currentDiscoveryExpandFingerprint = useMemo(
+    () =>
+      JSON.stringify({
+        entityTypes: [...discoveryExpandFilters.entityTypes].sort((a, b) => a.localeCompare(b)),
+        relationTypes: [...discoveryExpandFilters.relationTypes].sort((a, b) => a.localeCompare(b)),
+      }),
+    [discoveryExpandFilters.entityTypes, discoveryExpandFilters.relationTypes]
+  );
 
   const discoveryWorkspaceReady = workspaceMode === "discovery" && graphSourceMode === "discovery" && !!discoveryResult;
   const effectiveGraphNodes =
     workspaceMode === "discovery"
-      ? discoveryFilteredGraph?.nodes || EMPTY_GRAPH_NODES
+      ? discoveryGraphState.visibleGraphNodes || EMPTY_GRAPH_NODES
       : relationFilter.previewActive
       ? relationFilter.previewNodes
       : graphNodes;
   const effectiveGraphEdges =
     workspaceMode === "discovery"
-      ? discoveryFilteredGraph?.edges || EMPTY_GRAPH_EDGES
+      ? discoveryGraphState.visibleGraphEdges || EMPTY_GRAPH_EDGES
       : relationFilter.previewActive
       ? relationFilter.previewEdges
       : graphEdges;
   const effectiveGraphStats =
     workspaceMode === "discovery"
-      ? discoveryFilteredGraph?.stats || null
+      ? ({
+          ...(discoveryResult?.stats || {}),
+          node_count: discoveryGraphState.visibleGraphNodes.length,
+          edge_count: discoveryGraphState.visibleGraphEdges.length,
+          rendered_nodes: discoveryGraphState.renderedNodeIds.size,
+          rendered_edges: discoveryGraphState.renderedEdgeIds.size,
+          hidden_by_user: discoveryGraphState.hiddenNodeIds.size,
+        } as Record<string, unknown>)
       : relationFilter.previewActive
       ? ({
           ...(graphStats || {}),
@@ -1483,9 +1521,9 @@ export default function App() {
   const discoveryVisibleNodeIdSet = useMemo(() => {
     const next = new Set<number>();
     if (workspaceMode !== "discovery") return next;
-    for (const node of effectiveGraphNodes) next.add(node.id);
+    for (const node of discoveryGraphState.visibleGraphNodes) next.add(node.id);
     return next;
-  }, [workspaceMode, effectiveGraphNodes]);
+  }, [workspaceMode, discoveryGraphState.visibleGraphNodes]);
 
   const visibleGraphNodes =
     workspaceMode === "discovery" ? effectiveGraphNodes : visibilityRanking.visibleGraphNodes;
@@ -1497,12 +1535,12 @@ export default function App() {
     workspaceMode === "discovery"
       ? showSelfLoops
         ? 0
-        : effectiveGraphEdges.filter((edge) => edge.source === edge.target).length
+        : discoveryGraphState.visibleGraphEdges.filter((edge) => edge.source === edge.target).length
       : visibilityRanking.hiddenSelfLoopCount;
   const visibleSelfLoopCount =
     workspaceMode === "discovery"
       ? showSelfLoops
-        ? effectiveGraphEdges.filter((edge) => edge.source === edge.target).length
+        ? discoveryGraphState.visibleGraphEdges.filter((edge) => edge.source === edge.target).length
         : 0
       : visibilityRanking.visibleSelfLoopCount;
   const autoVisibleTopIds =
@@ -1511,9 +1549,10 @@ export default function App() {
     workspaceMode === "discovery" ? discoveryVisibleNodeHopLevelMap : visibilityRanking.visibleNodeHopLevelMap;
   const panelNodes = workspaceMode === "discovery" ? EMPTY_GRAPH_NODES : visibilityRanking.panelNodes;
   const panelGroups = workspaceMode === "discovery" ? [] : visibilityRanking.panelGroups;
-  const hiddenCount = workspaceMode === "discovery" ? 0 : visibilityRanking.hiddenCount;
+  const hiddenCount =
+    workspaceMode === "discovery" ? discoveryGraphState.hiddenNodeIds.size : visibilityRanking.hiddenCount;
   const visibleCount =
-    workspaceMode === "discovery" ? effectiveGraphNodes.length : visibilityRanking.visibleCount;
+    workspaceMode === "discovery" ? discoveryGraphState.visibleGraphNodes.length : visibilityRanking.visibleCount;
 
   useEffect(() => {
     if (workspaceMode === "discovery") return;
@@ -1656,24 +1695,6 @@ export default function App() {
     return seed;
   }, [graphSourceMode, lastMultiGraphParams]);
 
-  const discoverySelectedSeedVidSet = useMemo(() => {
-    const seed = new Set<number>();
-    for (const item of discoverySeeds) seed.add(item.vid);
-    return seed;
-  }, [discoverySeeds]);
-
-  const discoveryRunSeedVidSet = useMemo(() => {
-    if (graphSourceMode !== "discovery") return new Set<number>();
-    const seed = new Set<number>();
-    for (const vid of lastDiscoveryRequest?.seed_vids || []) seed.add(Number(vid));
-    if (seed.size === 0) {
-      for (const node of discoveryResult?.nodes || []) {
-        if (node.role === "seed") seed.add(node.id);
-      }
-    }
-    return seed;
-  }, [graphSourceMode, discoveryResult, lastDiscoveryRequest]);
-
   const activeSeedVidSet = graphSourceMode === "multi" ? multiSeedVidSet : discoveryRunSeedVidSet;
 
   const multiEntityLabelMap = useMemo(() => {
@@ -1764,6 +1785,52 @@ export default function App() {
     return true;
   }
 
+  useEffect(() => {
+    if (workspaceMode !== "discovery" || graphSourceMode !== "discovery") return;
+    if (sel.kind !== "node") return;
+    setDiscoveryExpandFilters({
+      entityTypes: [...discoveryRuntimeFilters.entityTypes],
+      relationTypes: [...discoveryRuntimeFilters.relationTypes],
+    });
+  }, [workspaceMode, graphSourceMode, sel, discoveryRuntimeFilters]);
+
+  useEffect(() => {
+    if (workspaceMode !== "discovery" || graphSourceMode !== "discovery" || !discoveryWorkspaceReady) return;
+    if (sel.kind !== "node") return;
+    const nodeId = sel.vid;
+    if (!discoveryGraphState.graphEntityMap.has(nodeId)) return;
+    if (discoveryGraphState.getNodeExpandUiState(nodeId, currentDiscoveryExpandFingerprint) === "expanded") {
+      setDiscoveryExpandProbeNodeId((prev) => (prev === nodeId ? null : prev));
+      return;
+    }
+    const nextToken = discoveryExpandProbeTokenRef.current + 1;
+    discoveryExpandProbeTokenRef.current = nextToken;
+    setDiscoveryExpandProbeNodeId(nodeId);
+    void discoveryGraphState
+      .probeNodeExpand({
+        targetNodeId: nodeId,
+        allowedEntityTypes: discoveryExpandFilters.entityTypes,
+        allowedRelationTypes: discoveryExpandFilters.relationTypes,
+        expandTopKPerType: 8,
+      })
+      .catch((e: unknown) => {
+        const parsed = parseApiError(e);
+        setUiNotice({ level: "error", message: `Expand 探测失败：${parsed.message}` });
+      })
+      .finally(() => {
+        if (discoveryExpandProbeTokenRef.current !== nextToken) return;
+        setDiscoveryExpandProbeNodeId((prev) => (prev === nodeId ? null : prev));
+      });
+  }, [
+    workspaceMode,
+    graphSourceMode,
+    discoveryWorkspaceReady,
+    sel,
+    discoveryExpandFilters,
+    currentDiscoveryExpandFingerprint,
+    discoveryGraphState.graphEntityMap,
+  ]);
+
   async function handleSelectEdgeCandidate(item: EdgeSearchItem) {
     setEdgeSearchNotice(null);
 
@@ -1819,7 +1886,10 @@ export default function App() {
 
   const selectedNodeBrief = useMemo(() => {
     if (sel.kind !== "node") return null;
-    const graphNode = effectiveGraphNodes.find((n) => n.id === sel.vid);
+    const graphNode =
+      workspaceMode === "discovery"
+        ? discoveryGraphState.graphEntityMap.get(sel.vid) || null
+        : effectiveGraphNodes.find((n) => n.id === sel.vid) || null;
     if (graphNode) return graphNode;
     if (workspaceMode === "discovery") {
       const candidateNode = discoveryCandidateResults.result.items.find((item) => item.vid === sel.vid);
@@ -1836,23 +1906,60 @@ export default function App() {
       }
     }
     return searchData.nodes.find((n) => n.id === sel.vid) || null;
-  }, [sel, effectiveGraphNodes, workspaceMode, discoveryCandidateResults.result.items, discoverySeeds, searchData.nodes]);
+  }, [
+    sel,
+    effectiveGraphNodes,
+    workspaceMode,
+    discoveryGraphState.graphEntityMap,
+    discoveryCandidateResults.result.items,
+    discoverySeeds,
+    searchData.nodes,
+  ]);
 
   const selectedNodeIsRoot = sel.kind === "node" && rootVid != null && sel.vid === rootVid;
   const selectedNodeIsVisible = sel.kind === "node" ? visibleNodeIdSet.has(sel.vid) : false;
   const selectedNodeIsAutoTop = sel.kind === "node" ? autoVisibleTopIds.has(sel.vid) : false;
   const selectedNodeExpandClosable = sel.kind === "node" && expandedSourceNodeIds.has(sel.vid);
+  const discoverySelectedExpandSession =
+    sel.kind === "node" ? discoveryGraphState.expandSessionMap[String(sel.vid)] : undefined;
+  const discoverySelectedNodeExpandUiState =
+    sel.kind === "node"
+      ? discoveryGraphState.getNodeExpandUiState(sel.vid, currentDiscoveryExpandFingerprint)
+      : "collapsed";
+  const discoverySelectedExpandFilterMismatch = Boolean(
+    discoverySelectedExpandSession?.isExpanded &&
+      discoverySelectedExpandSession.requestFingerprint !== currentDiscoveryExpandFingerprint
+  );
 
-  const selectedNodeProbeState = sel.kind === "node" ? expandProbeByVid[sel.vid] : undefined;
+  const selectedNodeProbeState =
+    workspaceMode === "discovery" ? undefined : sel.kind === "node" ? expandProbeByVid[sel.vid] : undefined;
 
   const expandButtonDisabled =
-    graphBusy ||
-    sel.kind !== "node" ||
-    selectedNodeProbeState === "loading" ||
-    selectedNodeProbeState === "noextra";
+    workspaceMode === "discovery"
+      ? graphBusy ||
+        sel.kind !== "node" ||
+        (sel.kind === "node" && discoveryExpandProbeNodeId === sel.vid && discoverySelectedNodeExpandUiState !== "expanded") ||
+        discoverySelectedNodeExpandUiState === "expanding" ||
+        (discoverySelectedNodeExpandUiState === "terminal" && discoveryExpandProbeNodeId !== sel.vid)
+      : graphBusy ||
+        sel.kind !== "node" ||
+        selectedNodeProbeState === "loading" ||
+        selectedNodeProbeState === "noextra";
 
   const expandButtonText =
-    selectedNodeProbeState === "noextra" ? "Expand（无多余相关节点）" : "Expand（合并 1-hop）";
+    workspaceMode === "discovery"
+      ? discoverySelectedNodeExpandUiState === "expanded"
+        ? "关闭该展开"
+        : discoverySelectedNodeExpandUiState === "expanding"
+          ? "展开中"
+          : sel.kind === "node" && discoveryExpandProbeNodeId === sel.vid
+            ? "展开该节点（检测中）"
+            : discoverySelectedNodeExpandUiState === "terminal"
+              ? "无更多相关节点"
+              : "展开该节点"
+      : selectedNodeProbeState === "noextra"
+        ? "Expand（无多余相关节点）"
+        : "Expand（合并 1-hop）";
 
   const selectedNodeId = sel.kind === "node" ? String(sel.vid) : null;
   const selectedEdgeId = sel.kind === "edge" ? selectedEdgeGraphId : null;
@@ -1871,6 +1978,57 @@ export default function App() {
 
   function handleGraphNodeClick(vid: number) {
     handleSelectNode(vid);
+  }
+
+  function locateNodeInGraph(vid: number) {
+    handleSelectNode(vid);
+    requestAnimationFrame(() => {
+      focusNodeRef.current?.(String(vid));
+    });
+  }
+
+  async function handleDiscoveryExpandNode(vid: number) {
+    try {
+      const result = await discoveryGraphState.toggleNodeExpand({
+        targetNodeId: vid,
+        allowedEntityTypes: discoveryExpandFilters.entityTypes,
+        allowedRelationTypes: discoveryExpandFilters.relationTypes,
+        expandMaxNewNodes: 20,
+        expandMaxNewEdges: 30,
+        expandTopKPerType: 8,
+      });
+      if (result.action === "collapsed") {
+        locateNodeInGraph(vid);
+        return;
+      }
+      const resp = result.response;
+      if (!resp || ((resp.new_nodes?.length || 0) <= 0 && (resp.new_edges?.length || 0) <= 0 && (resp.support_edges?.length || 0) <= 0)) {
+        setUiNotice({
+          level: resp?.terminal ? "info" : "warn",
+          message: resp?.terminal ? "该节点当前过滤条件下无更多相关节点。" : "该节点本次 expand 未补入新的节点或边。",
+        });
+        return;
+      }
+      locateNodeInGraph(result.firstNodeId ?? vid);
+    } catch (e: unknown) {
+      const parsed = parseApiError(e);
+      setUiNotice({ level: "error", message: `Expand 失败：${parsed.message}` });
+    }
+  }
+
+  function handleHideDiscoveryNode(vid: number) {
+    const changed = discoveryGraphState.hideRenderedNode(vid);
+    if (changed && sel.kind === "node" && sel.vid === vid) handleClearSelection();
+  }
+
+  function handleRestoreHiddenDiscoveryNode(vid: number, locate = false) {
+    const changed = discoveryGraphState.restoreHiddenNode(vid);
+    if (changed && locate) locateNodeInGraph(vid);
+  }
+
+  function handleForceRenderDiscoveryNode(vid: number, locate = false) {
+    const changed = discoveryGraphState.forceRenderDroppedNode(vid);
+    if (changed && locate) locateNodeInGraph(vid);
   }
 
   function handleGraphEdgeClick(edgeId: string, edge: (typeof visibleGraphEdges)[number]) {
@@ -2096,6 +2254,27 @@ export default function App() {
             resultStats={discoveryResult?.stats || null}
             loading={loadingDiscovery}
             hasPendingChanges={discoveryHasPendingChanges}
+            renderedNodes={discoveryGraphState.renderedNodes}
+            hiddenNodes={discoveryGraphState.hiddenNodes}
+            droppedNodes={{
+              droppedByBudget: discoveryGraphState.droppedGroups.droppedByBudget.map((item) => ({
+                node: item.node,
+                supportEdgesCount: item.supportEdges.length,
+                sourceNodeId: item.sourceNodeId,
+              })),
+              droppedByTypeFilter: discoveryGraphState.droppedGroups.droppedByTypeFilter.map((item) => ({
+                node: item.node,
+                supportEdgesCount: item.supportEdges.length,
+                sourceNodeId: item.sourceNodeId,
+              })),
+              droppedByRelationFilter: discoveryGraphState.droppedGroups.droppedByRelationFilter.map((item) => ({
+                node: item.node,
+                supportEdgesCount: item.supportEdges.length,
+                sourceNodeId: item.sourceNodeId,
+              })),
+            }}
+            renderedPanelCollapsed={discoveryRenderedPanelCollapsed}
+            droppedPanelCollapsed={discoveryDroppedPanelCollapsed}
             onUpdateSearchQuery={discoveryCandidateSearch.updateQuery}
             onToggleSearchAdvanced={discoveryCandidateSearch.toggleAdvancedOpen}
             onSubmitSearch={() => {
@@ -2115,7 +2294,9 @@ export default function App() {
               addDiscoverySeedItems([candidateItemToSeed(item)]);
               discoveryCandidateResults.removeSelected([item.vid]);
             }}
-            onRemoveSeed={discoverySeedsState.removeItem}
+            onRemoveSeed={(vid) => {
+              void handleRemoveDiscoverySeed(vid);
+            }}
             onClearSeeds={discoverySeedsState.clear}
             onLoadMoreCandidates={() => {
               void discoveryCandidateResults.loadMore();
@@ -2131,6 +2312,13 @@ export default function App() {
             }}
             onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
             onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
+            onSetRenderedPanelCollapsed={setDiscoveryRenderedPanelCollapsed}
+            onSetDroppedPanelCollapsed={setDiscoveryDroppedPanelCollapsed}
+            onLocateNode={locateNodeInGraph}
+            onHideRenderedNode={handleHideDiscoveryNode}
+            onRestoreHiddenNode={handleRestoreHiddenDiscoveryNode}
+            onForceRenderDroppedNode={handleForceRenderDiscoveryNode}
+            onViewNodeDetailById={handleSelectNode}
             onRun={() => {
               void runDiscovery();
             }}
@@ -2219,6 +2407,9 @@ export default function App() {
                 registerApplyHighlight={(fn) => {
                   applyHighlightRef.current = fn;
                 }}
+                registerFocusNode={(fn) => {
+                  focusNodeRef.current = fn;
+                }}
               />
             )}
           </Suspense>
@@ -2231,6 +2422,7 @@ export default function App() {
         <Suspense fallback={<LoadingPanel message="右侧详情面板加载中..." />}>
           <RightDetailPanel
             allowGraphMutationActions={workspaceMode === "legacy"}
+            discoveryMode={workspaceMode === "discovery"}
             renderNodeLabels={renderNodeLabels}
             setRenderNodeLabels={setRenderNodeLabels}
             renderEdgeLabels={renderEdgeLabels}
@@ -2299,6 +2491,29 @@ export default function App() {
             onReloadEdgeDetail={reloadEdgeDetailByIdentity}
             onSaveNodeEdit={saveNodeEdit}
             onSaveEdgeEdit={saveEdgeEdit}
+            discoverySeedNodeIds={discoveryRunSeedVidSet}
+            discoveryExpandEntityOptions={(discoveryResult?.facets.entity_types || []).map((item) => item.entity_type)}
+            discoveryExpandRelationOptions={(discoveryResult?.facets.relation_types || []).map((item) => item.relation_type)}
+            discoveryExpandFilters={discoveryExpandFilters}
+            discoveryExpandFilterHint={
+              discoverySelectedExpandFilterMismatch ? "当前节点已展开；修改过滤器后需先关闭，再按新条件重新展开。" : undefined
+            }
+            onUpdateDiscoveryExpandFilters={(patch) => {
+              setDiscoveryExpandFilters((prev) => ({
+                entityTypes: patch.entityTypes ?? prev.entityTypes,
+                relationTypes: patch.relationTypes ?? prev.relationTypes,
+              }));
+              if (discoverySelectedExpandSession?.isExpanded) {
+                setUiNotice({
+                  level: "info",
+                  message: "当前节点已展开；修改 Expand 过滤器后需先关闭，再按新条件重新展开。",
+                });
+              }
+            }}
+            onExpandDiscoveryNode={(vid) => {
+              void handleDiscoveryExpandNode(vid);
+            }}
+            onHideDiscoveryNode={handleHideDiscoveryNode}
           />
         </Suspense>
       </div>

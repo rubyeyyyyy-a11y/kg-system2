@@ -21,6 +21,7 @@ type PanelGroup = {
 
 type RightDetailPanelProps = {
   allowGraphMutationActions?: boolean;
+  discoveryMode?: boolean;
   renderNodeLabels: boolean;
   setRenderNodeLabels: (v: boolean) => void;
   renderEdgeLabels: boolean;
@@ -89,6 +90,22 @@ type RightDetailPanelProps = {
     expectedVersion: number,
     updatedBy: string
   ) => Promise<EdgePatchResp>;
+  discoverySeedNodeIds?: Set<number>;
+  discoveryExpandEntityOptions?: string[];
+  discoveryExpandRelationOptions?: string[];
+  discoveryExpandFilters?: {
+    entityTypes: string[];
+    relationTypes: string[];
+  };
+  discoveryExpandFilterHint?: string;
+  onUpdateDiscoveryExpandFilters?: (
+    patch: Partial<{
+      entityTypes: string[];
+      relationTypes: string[];
+    }>
+  ) => void;
+  onExpandDiscoveryNode?: (vid: number) => void;
+  onHideDiscoveryNode?: (vid: number) => void;
 };
 
 const DESCRIPTION_SUMMARY_LIMIT = 200;
@@ -101,6 +118,7 @@ function buildDescriptionSummary(snippet?: string, description?: string) {
 
 export function RightDetailPanel({
   allowGraphMutationActions = true,
+  discoveryMode = false,
   renderNodeLabels,
   setRenderNodeLabels,
   renderEdgeLabels,
@@ -157,6 +175,14 @@ export function RightDetailPanel({
   onReloadEdgeDetail,
   onSaveNodeEdit,
   onSaveEdgeEdit,
+  discoverySeedNodeIds,
+  discoveryExpandEntityOptions,
+  discoveryExpandRelationOptions,
+  discoveryExpandFilters,
+  discoveryExpandFilterHint,
+  onUpdateDiscoveryExpandFilters,
+  onExpandDiscoveryNode,
+  onHideDiscoveryNode,
 }: RightDetailPanelProps) {
   const [editorTab, setEditorTab] = useState<"detail" | "edit" | "direct">("detail");
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
@@ -173,6 +199,14 @@ export function RightDetailPanel({
   const nodeSummaryDescription = buildDescriptionSummary(selectedNodeBrief?.snippet, nodeFullDescription);
   const nodeDescriptionText = descriptionExpanded && nodeFullDescription ? nodeFullDescription : nodeSummaryDescription || nodeFullDescription;
   const canToggleDescription = Boolean(nodeFullDescription) && Boolean(nodeSummaryDescription) && nodeSummaryDescription !== nodeFullDescription;
+  const selectedNodeIsSeed = sel.kind === "node" ? Boolean(discoverySeedNodeIds?.has(sel.vid)) : false;
+
+  function toggleExpandFilter(list: string[], value: string) {
+    const next = new Set(list);
+    if (next.has(value)) next.delete(value);
+    else next.add(value);
+    return Array.from(next).sort((a, b) => a.localeCompare(b));
+  }
 
   return (
     <div
@@ -185,7 +219,11 @@ export function RightDetailPanel({
     >
       <h3 style={{ margin: 0 }}>详情</h3>
       <div style={{ marginTop: 8, fontSize: 12, color: "#666" }}>
-        {allowGraphMutationActions ? "点击节点/边查看；节点支持 Expand（合并 1-hop）" : "点击节点/边查看详情；可继续编辑写回"}
+        {discoveryMode
+          ? "点击节点查看详情；节点支持展开该节点，非 seed 节点支持取消渲染，本次 expand 过滤器仅作用于当前展开。"
+          : allowGraphMutationActions
+            ? "点击节点/边查看；节点支持 Expand（合并 1-hop）"
+            : "点击节点/边查看详情；可继续编辑写回"}
       </div>
 
       <div
@@ -346,6 +384,7 @@ export function RightDetailPanel({
         </div>
       </div>
 
+      {!discoveryMode ? (
       <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 8 }}>
         <button
           onClick={() => setHiddenNodesCollapsed((v) => !v)}
@@ -451,6 +490,7 @@ export function RightDetailPanel({
           </div>
         )}
       </div>
+      ) : null}
 
       <hr style={{ margin: "12px 0" }} />
       <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
@@ -505,7 +545,81 @@ export function RightDetailPanel({
             </div>
           </div>
 
-          {allowGraphMutationActions ? (
+          {discoveryMode ? (
+            <>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={() => onExpandDiscoveryNode?.(sel.vid)}
+                  disabled={expandButtonDisabled}
+                  style={{ padding: "8px 12px" }}
+                >
+                  {expandButtonText}
+                </button>
+
+                {!selectedNodeIsSeed ? (
+                  <button
+                    onClick={() => onHideDiscoveryNode?.(sel.vid)}
+                    disabled={!selectedNodeIsVisible}
+                    style={{ padding: "8px 12px" }}
+                  >
+                    取消渲染
+                  </button>
+                ) : null}
+              </div>
+
+              <div style={{ fontSize: 12, color: "#666" }}>
+                {selectedNodeIsSeed
+                  ? "当前节点是 seed，不能执行普通取消渲染；请从左侧 seed 列表删除后触发全局 discovery 重跑。"
+                  : "当前节点是普通节点，可取消渲染并在左侧 Hidden by User 中恢复。"}
+                {expandButtonText === "无更多相关节点" ? " ｜该节点当前过滤条件下无更多相关节点。" : ""}
+                {discoveryExpandFilterHint ? ` ｜${discoveryExpandFilterHint}` : ""}
+              </div>
+
+              <div style={{ display: "grid", gap: 10, border: "1px solid #f0f0f0", borderRadius: 8, background: "#fff", padding: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 600 }}>本次 Expand 过滤器</div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, color: "#666" }}>Expand Entity Types</div>
+                  <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
+                    {(discoveryExpandEntityOptions || []).map((item) => (
+                      <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(discoveryExpandFilters?.entityTypes.includes(item))}
+                          onChange={() =>
+                            onUpdateDiscoveryExpandFilters?.({
+                              entityTypes: toggleExpandFilter(discoveryExpandFilters?.entityTypes || [], item),
+                            })
+                          }
+                        />
+                        {item}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, color: "#666" }}>Expand Relation Types</div>
+                  <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
+                    {(discoveryExpandRelationOptions || []).map((item) => (
+                      <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(discoveryExpandFilters?.relationTypes.includes(item))}
+                          onChange={() =>
+                            onUpdateDiscoveryExpandFilters?.({
+                              relationTypes: toggleExpandFilter(discoveryExpandFilters?.relationTypes || [], item),
+                            })
+                          }
+                        />
+                        {relationDisplay(item) || item}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : allowGraphMutationActions ? (
             <>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button
