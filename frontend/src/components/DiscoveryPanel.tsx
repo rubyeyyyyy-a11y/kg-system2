@@ -1,18 +1,22 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { KeyboardEvent } from "react";
 
-import { relationTypes as relationTypesApi } from "../api/kg";
-import { useRawIdSuggest } from "../hooks/useRawIdSuggest";
-import { useSuggest } from "../hooks/useSuggest";
 import type {
+  DiscoveryCandidatePreviewState,
+  DiscoveryCandidateResultState,
+} from "../hooks/useDiscoveryCandidateResults";
+import { EntityCandidateCard } from "./EntityCandidateCard";
+import type {
+  DiscoveryEntityCandidateItem,
+  DiscoveryEntityCandidateQueryState,
   EntityTypeItem,
   GraphDiscoveryEntityFacetItem,
+  GraphDiscoveryLayerFacetItem,
+  GraphDiscoveryQuerySummary,
   GraphDiscoveryRelationFacetItem,
-  RelationTypeItem,
-  RawIdSuggestItem,
+  GraphDiscoverySeedFacetItem,
   SuggestItem,
 } from "../types/kg";
-import { parseApiError } from "../utils/httpError";
 import { relationDisplay } from "../utils/kg";
 
 type DiscoveryQueryState = {
@@ -33,24 +37,64 @@ type DiscoveryRuntimeState = {
 
 type DiscoveryPanelProps = {
   seeds: SuggestItem[];
+  searchQuery: DiscoveryEntityCandidateQueryState;
+  searchAdvancedOpen: boolean;
+  preview: DiscoveryCandidatePreviewState;
+  candidateResult: DiscoveryCandidateResultState;
+  selectedCandidateIds: Set<number>;
+  seedIdSet: Set<number>;
   query: DiscoveryQueryState;
   runtime: DiscoveryRuntimeState;
   entityTypeOptions: EntityTypeItem[];
   resultFacets: {
     entityTypes: GraphDiscoveryEntityFacetItem[];
     relationTypes: GraphDiscoveryRelationFacetItem[];
+    querySummary: GraphDiscoveryQuerySummary;
+    layers: GraphDiscoveryLayerFacetItem[];
+    seeds: GraphDiscoverySeedFacetItem[];
+  } | null;
+  resultStats: {
+    ranking_mode?: "v1" | "layered_multiseed";
+    seed_count: number;
+    seeds_count?: number;
+    candidate_count: number;
+    node_count: number;
+    edge_count: number;
+    final_nodes?: number;
+    final_edges?: number;
+    truncated: boolean;
+    core_count?: number;
+    shared_count?: number;
+    local_count?: number;
+    supplement_count?: number;
+    dropped_nodes?: number;
+    dropped_edges?: number;
+    dropped_neighbors?: number;
+    dropped_by_budget?: number;
+    dropped_by_type_budget?: number;
+    dropped_generic_hubs?: number;
   } | null;
   loading: boolean;
-  onAddSeed: (item: SuggestItem) => void;
+  hasPendingChanges: boolean;
   onRemoveSeed: (vid: number) => void;
   onClearSeeds: () => void;
+  onUpdateSearchQuery: (patch: Partial<DiscoveryEntityCandidateQueryState>) => void;
+  onToggleSearchAdvanced: () => void;
+  onSubmitSearch: () => void;
+  onClosePreview: () => void;
+  onSetPreviewHighlightIndex: (index: number) => void;
+  onSelectPreviewItem: (item: DiscoveryEntityCandidateItem) => void;
+  onLoadMoreCandidates: () => void;
+  onToggleCandidateSelect: (id: number) => void;
+  onClearCandidateSelection: () => void;
+  onAddSelectedCandidates: () => void;
+  onAddCandidateSeed: (item: DiscoveryEntityCandidateItem) => void;
+  onViewCandidateDetail: (item: DiscoveryEntityCandidateItem) => void;
+  onLoadCandidateSubgraph: (item: DiscoveryEntityCandidateItem) => void;
   onUpdateQuery: (patch: Partial<DiscoveryQueryState>) => void;
   onUpdateRuntime: (patch: Partial<DiscoveryRuntimeState>) => void;
   onRun: () => void;
-  onNotice: (level: "error" | "warn" | "info", message: string) => void;
 };
-
-const RELATION_TYPES_PAGE_SIZE = 100;
 
 function CheckboxList({
   items,
@@ -108,143 +152,54 @@ function CheckboxList({
 
 export function DiscoveryPanel({
   seeds,
+  searchQuery,
+  searchAdvancedOpen,
+  preview,
+  candidateResult,
+  selectedCandidateIds,
+  seedIdSet,
   query,
   runtime,
   entityTypeOptions,
   resultFacets,
+  resultStats,
   loading,
-  onAddSeed,
+  hasPendingChanges,
   onRemoveSeed,
   onClearSeeds,
+  onUpdateSearchQuery,
+  onToggleSearchAdvanced,
+  onSubmitSearch,
+  onClosePreview,
+  onSetPreviewHighlightIndex,
+  onSelectPreviewItem,
+  onLoadMoreCandidates,
+  onToggleCandidateSelect,
+  onClearCandidateSelection,
+  onAddSelectedCandidates,
+  onAddCandidateSeed,
+  onViewCandidateDetail,
+  onLoadCandidateSubgraph,
   onUpdateQuery,
   onUpdateRuntime,
   onRun,
-  onNotice,
 }: DiscoveryPanelProps) {
-  const [nameQ, setNameQ] = useState("");
-  const [rawIdQ, setRawIdQ] = useState("");
-  const [seedEntityType, setSeedEntityType] = useState("");
+  const searchWrapRef = useRef<HTMLDivElement>(null);
 
-  const [relationCatalogItems, setRelationCatalogItems] = useState<RelationTypeItem[]>([]);
-  const [relationCatalogQuery, setRelationCatalogQuery] = useState("");
-  const [relationCatalogLoading, setRelationCatalogLoading] = useState(false);
-  const [relationCatalogHasMore, setRelationCatalogHasMore] = useState(false);
-  const [relationCatalogNextOffset, setRelationCatalogNextOffset] = useState<number | null>(0);
-
-  const queryEntityTypeSet = useMemo(() => new Set(query.allowedEntityTypes), [query.allowedEntityTypes]);
-  const queryRelationTypeSet = useMemo(() => new Set(query.allowedRelationTypes), [query.allowedRelationTypes]);
   const runtimeEntityTypeSet = useMemo(() => new Set(runtime.entityTypes), [runtime.entityTypes]);
   const runtimeRelationTypeSet = useMemo(() => new Set(runtime.relationTypes), [runtime.relationTypes]);
 
-  const {
-    suggestOpen,
-    suggestItems,
-    suggestLoading,
-    suggestError,
-    suggestHighlightIndex,
-    suggestWrapRef,
-    onInputChange,
-    onKeyDown,
-    setSuggestHighlightIndex,
-    selectSuggestCandidate,
-  } = useSuggest({
-    q: nameQ,
-    entityType: seedEntityType,
-    source: "",
-    onSelect: (item) => {
-      onAddSeed(item);
-      setNameQ("");
-      setRawIdQ("");
-    },
-    onQueryChange: setNameQ,
-    onSearch: () => {},
-  });
-
-  const {
-    suggestOpen: rawIdSuggestOpen,
-    suggestItems: rawIdSuggestItems,
-    suggestLoading: rawIdSuggestLoading,
-    suggestError: rawIdSuggestError,
-    suggestHighlightIndex: rawIdSuggestHighlightIndex,
-    suggestWrapRef: rawIdSuggestWrapRef,
-    onInputChange: onRawIdInputChange,
-    onKeyDown: onRawIdKeyDown,
-    setSuggestHighlightIndex: setRawIdSuggestHighlightIndex,
-    selectSuggestCandidate: selectRawIdSuggestCandidate,
-  } = useRawIdSuggest({
-    q: rawIdQ,
-    entityType: seedEntityType,
-    source: "",
-    onSelect: (item: RawIdSuggestItem) => {
-      onAddSeed({
-        vid: item.vid,
-        label: item.label || item.entity_raw_id,
-        entity_type: item.entity_type,
-        source: item.source,
-      });
-      setNameQ("");
-      setRawIdQ("");
-    },
-    onQueryChange: setRawIdQ,
-    onSearch: () => {},
-  });
-
   useEffect(() => {
-    const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => {
-      setRelationCatalogLoading(true);
-      void relationTypesApi({
-        q: relationCatalogQuery,
-        limit: RELATION_TYPES_PAGE_SIZE,
-        offset: 0,
-        signal: controller.signal,
-      })
-        .then((resp) => {
-          setRelationCatalogItems(resp.items);
-          setRelationCatalogHasMore(resp.has_more);
-          setRelationCatalogNextOffset(resp.next_offset);
-        })
-        .catch((e: unknown) => {
-          if (e instanceof Error && e.name === "AbortError") return;
-          const parsed = parseApiError(e);
-          onNotice("warn", `relation metadata 加载失败：${parsed.message}`);
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setRelationCatalogLoading(false);
-        });
-    }, 180);
-
-    return () => {
-      controller.abort();
-      window.clearTimeout(timeoutId);
+    if (!preview.open) return;
+    const onDocMouseDown = (e: MouseEvent) => {
+      const el = searchWrapRef.current;
+      if (el && !el.contains(e.target as Node)) onClosePreview();
     };
-  }, [onNotice, relationCatalogQuery]);
-
-  const handleLoadMoreRelationTypes = useCallback(async () => {
-    if (relationCatalogLoading) return;
-    if (!relationCatalogHasMore || relationCatalogNextOffset == null) return;
-    setRelationCatalogLoading(true);
-    try {
-      const resp = await relationTypesApi({
-        q: relationCatalogQuery,
-        limit: RELATION_TYPES_PAGE_SIZE,
-        offset: relationCatalogNextOffset,
-      });
-      setRelationCatalogItems((prev) => {
-        const merged = new Map<string, RelationTypeItem>();
-        for (const item of prev) merged.set(item.relation_type, item);
-        for (const item of resp.items) merged.set(item.relation_type, item);
-        return Array.from(merged.values());
-      });
-      setRelationCatalogHasMore(resp.has_more);
-      setRelationCatalogNextOffset(resp.next_offset);
-    } catch (e: unknown) {
-      const parsed = parseApiError(e);
-      onNotice("warn", `relation metadata 加载失败：${parsed.message}`);
-    } finally {
-      setRelationCatalogLoading(false);
-    }
-  }, [onNotice, relationCatalogHasMore, relationCatalogLoading, relationCatalogNextOffset, relationCatalogQuery]);
+    document.addEventListener("mousedown", onDocMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown);
+    };
+  }, [onClosePreview, preview.open]);
 
   function toggleArrayValue(list: string[], value: string) {
     const key = String(value || "").trim();
@@ -255,212 +210,271 @@ export function DiscoveryPanel({
     return Array.from(next).sort((a, b) => a.localeCompare(b));
   }
 
-  function handleNameKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    onKeyDown(e);
-    if (e.key === "Enter" && suggestItems[suggestHighlightIndex]) {
+  function handleSearchKeyDown(e: KeyboardEvent<HTMLInputElement>) {
+    if (e.key === "ArrowDown") {
+      if (!preview.open || preview.items.length === 0) return;
       e.preventDefault();
-      selectSuggestCandidate(suggestItems[suggestHighlightIndex]);
+      const nextIndex = preview.highlightIndex < 0 ? 0 : (preview.highlightIndex + 1) % preview.items.length;
+      onSetPreviewHighlightIndex(nextIndex);
+      return;
+    }
+
+    if (e.key === "ArrowUp") {
+      if (!preview.open || preview.items.length === 0) return;
+      e.preventDefault();
+      const nextIndex =
+        preview.highlightIndex < 0
+          ? preview.items.length - 1
+          : preview.highlightIndex <= 0
+            ? preview.items.length - 1
+            : preview.highlightIndex - 1;
+      onSetPreviewHighlightIndex(nextIndex);
+      return;
+    }
+
+    if (e.key === "Escape" && preview.open) {
+      e.preventDefault();
+      onClosePreview();
+      return;
+    }
+
+    if (e.key === "Enter") {
+      e.preventDefault();
+      onSubmitSearch();
     }
   }
 
-  function handleRawIdKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    onRawIdKeyDown(e);
-    if (e.key === "Enter" && rawIdSuggestItems[rawIdSuggestHighlightIndex]) {
-      e.preventDefault();
-      selectRawIdSuggestCandidate(rawIdSuggestItems[rawIdSuggestHighlightIndex]);
-    }
+  const summary = resultFacets?.querySummary || null;
+  const layerItems = resultFacets?.layers || [];
+  const seedSummaryItems = resultFacets?.seeds || [];
+  const layerCountMap = useMemo(() => {
+    const next = new Map<string, GraphDiscoveryLayerFacetItem>();
+    for (const item of layerItems) next.set(item.layer, item);
+    return next;
+  }, [layerItems]);
+  const selectedSeedItems = summary?.selected_seeds?.length
+    ? summary.selected_seeds
+    : seeds.map((seed) => ({
+        id: seed.vid,
+        label: seed.label,
+        entity_type: seed.entity_type || "",
+      }));
+  const availableEntityFacetKeys = (resultFacets?.entityTypes || []).map((item) => item.entity_type);
+  const availableRelationFacetKeys = (resultFacets?.relationTypes || []).map((item) => item.relation_type);
+
+  function applyEntityFacetSelection(nextEntityTypes: string[]) {
+    onUpdateRuntime({ entityTypes: nextEntityTypes });
+    onUpdateQuery({ allowedEntityTypes: nextEntityTypes });
   }
 
-  const queryEntityTypeItems = useMemo(
-    () => entityTypeOptions.map((item) => item.entity_type),
-    [entityTypeOptions]
-  );
-  const queryRelationTypeItems = useMemo(
-    () => relationCatalogItems.map((item) => item.relation_type),
-    [relationCatalogItems]
-  );
+  function applyRelationFacetSelection(nextRelationTypes: string[]) {
+    onUpdateRuntime({ relationTypes: nextRelationTypes });
+    onUpdateQuery({ allowedRelationTypes: nextRelationTypes });
+  }
+
+  const statsItems = resultStats
+    ? [
+        { label: "seeds_count", value: Number(resultStats.seeds_count ?? resultStats.seed_count ?? seeds.length) },
+        { label: "core_count", value: Number(resultStats.core_count ?? layerCountMap.get("core")?.node_count ?? 0) },
+        { label: "shared_count", value: Number(resultStats.shared_count ?? layerCountMap.get("shared")?.node_count ?? 0) },
+        { label: "local_count", value: Number(resultStats.local_count ?? layerCountMap.get("local")?.node_count ?? 0) },
+        { label: "supplement_count", value: Number(resultStats.supplement_count ?? layerCountMap.get("supplement")?.node_count ?? 0) },
+        { label: "dropped_nodes", value: Number(resultStats.dropped_nodes ?? 0) },
+        { label: "dropped_edges", value: Number(resultStats.dropped_edges ?? 0) },
+        { label: "dropped_neighbors", value: Number(resultStats.dropped_neighbors ?? 0) },
+        { label: "dropped_by_budget", value: Number(resultStats.dropped_by_budget ?? 0) },
+        { label: "dropped_by_type_budget", value: Number(resultStats.dropped_by_type_budget ?? 0) },
+        { label: "dropped_generic_hubs", value: Number(resultStats.dropped_generic_hubs ?? 0) },
+        { label: "final_nodes", value: Number(resultStats.final_nodes ?? resultStats.node_count ?? 0) },
+        { label: "final_edges", value: Number(resultStats.final_edges ?? resultStats.edge_count ?? 0) },
+      ]
+    : [];
 
   return (
     <div style={{ padding: 16, display: "grid", gap: 14 }}>
       <div>
         <h3 style={{ margin: 0 }}>统一关系发现</h3>
         <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
-          添加 1 个或多个 seed，按实体/关系类型做查询前过滤，生成主题关系图。
+          统一搜索、加入 seeds，并基于当前 seeds 生成主题关系图。
         </div>
       </div>
 
-      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>Seed 节点</div>
-
-        <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
-          <span>seed entity_type（可选）</span>
-          <select value={seedEntityType} onChange={(e) => setSeedEntityType(e.target.value)} style={{ padding: 8 }}>
-            <option value="">全部</option>
-            {entityTypeOptions.map((opt) => (
-              <option key={opt.entity_type} value={opt.entity_type}>
-                {opt.entity_type} ({opt.count})
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <div ref={suggestWrapRef} style={{ position: "relative" }}>
-          <input
-            value={nameQ}
-            onChange={(e) => onInputChange(e.target.value)}
-            onKeyDown={handleNameKeyDown}
-            placeholder="按 entity_name 搜索 seed"
-            style={{ width: "100%", padding: 8 }}
-          />
-          {suggestOpen ? (
-            <div style={{ position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 30, border: "1px solid #e5e6eb", borderRadius: 8, background: "#fff", boxShadow: "0 8px 24px rgba(0,0,0,0.12)", maxHeight: 240, overflow: "auto" }}>
-              {suggestLoading ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>加载中…</div>
-              ) : suggestError ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#d4380d" }}>候选加载失败</div>
-              ) : suggestItems.length === 0 ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>无匹配候选</div>
-              ) : (
-                suggestItems.map((item, idx) => (
-                  <div
-                    key={`${item.vid}-${item.label}-${idx}`}
-                    onMouseEnter={() => setSuggestHighlightIndex(idx)}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => selectSuggestCandidate(item)}
-                    style={{ padding: "8px 10px", cursor: "pointer", background: idx === suggestHighlightIndex ? "#e6f4ff" : "#fff" }}
-                  >
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.label}</div>
-                    <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                      vid={item.vid}
-                      {item.entity_type ? ` | ${item.entity_type}` : ""}
-                      {item.source ? ` | ${item.source}` : ""}
-                    </div>
-                  </div>
-                ))
-              )}
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 10, background: "#fafafa" }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Query Summary</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 8 }}>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Search Type</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>
+              {summary?.search_type || resultStats?.ranking_mode || "layered_multiseed"}
             </div>
-          ) : null}
+          </div>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Selected Seeds</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>{summary?.selected_seed_count ?? seeds.length}</div>
+          </div>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Total Entities</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>{summary?.total_entities ?? resultStats?.node_count ?? 0}</div>
+          </div>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Relationships</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>
+              {summary?.total_relationships ?? resultStats?.edge_count ?? 0}
+            </div>
+          </div>
         </div>
 
-        <div ref={rawIdSuggestWrapRef} style={{ position: "relative" }}>
-          <input
-            value={rawIdQ}
-            onChange={(e) => onRawIdInputChange(e.target.value)}
-            onKeyDown={handleRawIdKeyDown}
-            placeholder="按 entity_raw_id 搜索 seed"
-            style={{ width: "100%", padding: 8 }}
-          />
-          {rawIdSuggestOpen ? (
-            <div style={{ position: "absolute", left: 0, right: 0, top: "calc(100% + 6px)", zIndex: 29, border: "1px solid #e5e6eb", borderRadius: 8, background: "#fff", boxShadow: "0 8px 24px rgba(0,0,0,0.12)", maxHeight: 240, overflow: "auto" }}>
-              {rawIdSuggestLoading ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>加载中…</div>
-              ) : rawIdSuggestError ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#d4380d" }}>候选加载失败</div>
-              ) : rawIdSuggestItems.length === 0 ? (
-                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>无匹配候选</div>
-              ) : (
-                rawIdSuggestItems.map((item, idx) => (
-                  <div
-                    key={`${item.vid}-${item.entity_raw_id}-${idx}`}
-                    onMouseEnter={() => setRawIdSuggestHighlightIndex(idx)}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => selectRawIdSuggestCandidate(item)}
-                    style={{ padding: "8px 10px", cursor: "pointer", background: idx === rawIdSuggestHighlightIndex ? "#e6f4ff" : "#fff" }}
-                  >
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{item.entity_raw_id}</div>
-                    <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                      {item.label || "(无名称)"} | vid={item.vid}
-                      {item.entity_type ? ` | ${item.entity_type}` : ""}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          ) : null}
+        <div style={{ display: "grid", gap: 6 }}>
+          <div style={{ fontSize: 12, color: "#666" }}>Selected Seeds</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {selectedSeedItems.length === 0 ? (
+              <div style={{ fontSize: 12, color: "#999" }}>尚未添加 seed 节点</div>
+            ) : (
+              selectedSeedItems.map((item) => (
+                <span
+                  key={item.id}
+                  style={{
+                    border: "1px solid #d9d9d9",
+                    borderRadius: 999,
+                    background: "#fff",
+                    padding: "4px 8px",
+                    fontSize: 12,
+                  }}
+                >
+                  {item.label}
+                  {item.entity_type ? ` · ${item.entity_type}` : ""}
+                </span>
+              ))
+            )}
+          </div>
         </div>
 
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={onClearSeeds} disabled={loading || seeds.length === 0} style={{ padding: "6px 10px", fontSize: 12 }}>
-            清空 Seed
-          </button>
-          <div style={{ fontSize: 12, color: "#666", alignSelf: "center" }}>已选 {seeds.length}</div>
+        {layerItems.length > 0 ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ fontSize: 12, color: "#666" }}>Layer Summary</div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {layerItems.map((item) => (
+                <div
+                  key={item.layer}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    border: "1px solid #eee",
+                    borderRadius: 8,
+                    background: "#fff",
+                    padding: "6px 8px",
+                    fontSize: 12,
+                  }}
+                >
+                  <span>{item.layer}</span>
+                  <span>
+                    nodes={item.node_count} edges={item.edge_count}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {seedSummaryItems.length > 0 ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ fontSize: 12, color: "#666" }}>Seed Coverage</div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {seedSummaryItems.map((item) => (
+                <div
+                  key={item.seed_vid}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    gap: 8,
+                    border: "1px solid #eee",
+                    borderRadius: 8,
+                    background: "#fff",
+                    padding: "6px 8px",
+                    fontSize: 12,
+                  }}
+                >
+                  <span>
+                    {item.label || `seed ${item.seed_vid}`}
+                    {item.entity_type ? ` · ${item.entity_type}` : ""}
+                  </span>
+                  <span>
+                    core={item.core_path_count} shared={item.shared_touch_count} local={item.local_count}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {statsItems.length > 0 ? (
+          <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ fontSize: 12, color: "#666" }}>Discovery Stats</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(148px, 1fr))", gap: 8 }}>
+              {statsItems.map((item) => (
+                <div
+                  key={item.label}
+                  style={{
+                    border: "1px solid #eee",
+                    borderRadius: 8,
+                    background: "#fff",
+                    padding: "8px 10px",
+                  }}
+                >
+                  <div style={{ fontSize: 11, color: "#666" }}>{item.label}</div>
+                  <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>{item.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Filters & Info</div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Entity Types</div>
+          <CheckboxList
+            items={availableEntityFacetKeys}
+            checked={runtimeEntityTypeSet}
+            renderLabel={(key) => {
+              const found = resultFacets?.entityTypes.find((item) => item.entity_type === key);
+              if (!found) return key;
+              return `${key} (${found.count})`;
+            }}
+            onToggle={(key) => applyEntityFacetSelection(toggleArrayValue(runtime.entityTypes, key))}
+            onSelectAll={() => applyEntityFacetSelection([...availableEntityFacetKeys])}
+            onClear={() => applyEntityFacetSelection([])}
+            emptyText="运行 discovery 后显示"
+          />
         </div>
 
         <div style={{ display: "grid", gap: 8 }}>
-          {seeds.length === 0 ? (
-            <div style={{ fontSize: 12, color: "#666" }}>尚未添加 seed 节点</div>
-          ) : (
-            seeds.map((seed) => (
-              <div key={seed.vid} style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", border: "1px solid #f0f0f0", borderRadius: 8, padding: 8, background: "#fafafa" }}>
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{seed.label}</div>
-                  <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
-                    vid={seed.vid}
-                    {seed.entity_type ? ` | ${seed.entity_type}` : ""}
-                    {seed.source ? ` | ${seed.source}` : ""}
-                  </div>
-                </div>
-                <button onClick={() => onRemoveSeed(seed.vid)} style={{ padding: "6px 8px", fontSize: 12 }}>
-                  删除
-                </button>
-              </div>
-            ))
-          )}
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Relationship Types</div>
+          <CheckboxList
+            items={availableRelationFacetKeys}
+            checked={runtimeRelationTypeSet}
+            renderLabel={(key) => {
+              const found = resultFacets?.relationTypes.find((item) => item.relation_type === key);
+              const display = relationDisplay(key) || key;
+              return found ? `${display} (${found.count})` : display;
+            }}
+            onToggle={(key) => applyRelationFacetSelection(toggleArrayValue(runtime.relationTypes, key))}
+            onSelectAll={() => applyRelationFacetSelection([...availableRelationFacetKeys])}
+            onClear={() => applyRelationFacetSelection([])}
+            emptyText="运行 discovery 后显示"
+          />
+        </div>
+
+        <div style={{ fontSize: 12, color: "#666" }}>
+          这些筛选先作用于当前图；点击“重新生成关系图”后，同一组 entity/relation 选择会作为后端 discovery 条件。
         </div>
       </div>
 
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>查询前配置</div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 600 }}>allowed_entity_types</div>
-          <CheckboxList
-            items={queryEntityTypeItems}
-            checked={queryEntityTypeSet}
-            renderLabel={(key) => {
-              const found = entityTypeOptions.find((item) => item.entity_type === key);
-              return found ? `${key} (${found.count})` : key;
-            }}
-            onToggle={(key) => onUpdateQuery({ allowedEntityTypes: toggleArrayValue(query.allowedEntityTypes, key) })}
-            onSelectAll={() => onUpdateQuery({ allowedEntityTypes: [...queryEntityTypeItems] })}
-            onClear={() => onUpdateQuery({ allowedEntityTypes: [] })}
-            emptyText="暂无 entity_type metadata"
-          />
-        </div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-            <div style={{ fontSize: 12, fontWeight: 600 }}>allowed_relation_types</div>
-            <button
-              onClick={() => {
-                void handleLoadMoreRelationTypes();
-              }}
-              disabled={relationCatalogLoading || !relationCatalogHasMore}
-              style={{ padding: "6px 8px", fontSize: 12 }}
-            >
-              {relationCatalogHasMore ? "加载更多" : "已无更多"}
-            </button>
-          </div>
-          <input
-            value={relationCatalogQuery}
-            onChange={(e) => setRelationCatalogQuery(e.target.value)}
-            placeholder="搜索 relation metadata"
-            style={{ width: "100%", padding: 8 }}
-          />
-          <CheckboxList
-            items={queryRelationTypeItems}
-            checked={queryRelationTypeSet}
-            renderLabel={(key) => {
-              const found = relationCatalogItems.find((item) => item.relation_type === key);
-              const display = relationDisplay(key) || key;
-              return found ? `${display} (${found.count})` : display;
-            }}
-            onToggle={(key) => onUpdateQuery({ allowedRelationTypes: toggleArrayValue(query.allowedRelationTypes, key) })}
-            onSelectAll={() => onUpdateQuery({ allowedRelationTypes: [...queryRelationTypeItems] })}
-            onClear={() => onUpdateQuery({ allowedRelationTypes: [] })}
-            emptyText={relationCatalogLoading ? "relation metadata 加载中…" : "暂无 relation metadata"}
-          />
-        </div>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Discovery Settings</div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
@@ -479,6 +493,8 @@ export function DiscoveryPanel({
             <span>hop</span>
             <select value={query.hop} onChange={(e) => onUpdateQuery({ hop: Number(e.target.value) || 1 })} style={{ padding: 8 }}>
               <option value={1}>1</option>
+              <option value={2}>2</option>
+              <option value={3}>3</option>
             </select>
           </label>
         </div>
@@ -500,48 +516,338 @@ export function DiscoveryPanel({
           />
           include_seed_seed_edges
         </label>
+      </div>
 
-        <button onClick={onRun} disabled={loading || seeds.length === 0} style={{ padding: "10px 12px" }}>
-          {loading ? "生成中…" : "生成主题关系图"}
-        </button>
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>已选 Seeds</div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginLeft: "auto" }}>
+            <div style={{ fontSize: 12, color: "#666" }}>已选 {seeds.length}</div>
+            <button onClick={onClearSeeds} disabled={loading || seeds.length === 0} style={{ padding: "6px 10px", fontSize: 12 }}>
+              清空
+            </button>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          {seeds.length === 0 ? (
+            <div style={{ fontSize: 12, color: "#666" }}>尚未添加 seed 节点</div>
+          ) : (
+            seeds.map((seed) => (
+              <div
+                key={seed.vid}
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap",
+                  border: "1px solid #f0f0f0",
+                  borderRadius: 8,
+                  padding: 8,
+                  background: "#fafafa",
+                }}
+              >
+                <div style={{ minWidth: 0, flex: "1 1 220px" }}>
+                  <div
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {seed.label}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#666", marginTop: 2 }}>
+                    vid={seed.vid}
+                    {seed.entity_type ? ` | ${seed.entity_type}` : ""}
+                    {seed.source ? ` | ${seed.source}` : ""}
+                  </div>
+                </div>
+                <button onClick={() => onRemoveSeed(seed.vid)} style={{ padding: "6px 8px", fontSize: 12, marginLeft: "auto" }}>
+                  删除
+                </button>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <button
+            onClick={onRun}
+            disabled={loading || seeds.length === 0}
+            style={{
+              padding: "10px 12px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 8,
+              border: "1px solid #1677ff",
+              background: loading || seeds.length === 0 ? "#f5f5f5" : "#1677ff",
+              color: loading || seeds.length === 0 ? "#999" : "#fff",
+              cursor: loading || seeds.length === 0 ? "not-allowed" : "pointer",
+              width: "100%",
+            }}
+          >
+            {loading ? "生成中…" : "重新生成关系图"}
+          </button>
+          <div style={{ fontSize: 12, color: "#666" }}>
+            勾选变化会先即时过滤当前图；点击这里后，才会按当前左侧筛选条件重跑 discovery。
+          </div>
+          {hasPendingChanges ? (
+            <div style={{ fontSize: 12, color: "#ad6800" }}>当前 seeds 或 discovery 参数已变更，需重新生成后才会同步到图结果。</div>
+          ) : null}
+        </div>
       </div>
 
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>查询后二次过滤</div>
-
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 600 }}>entity type facets</div>
-          <CheckboxList
-            items={(resultFacets?.entityTypes || []).map((item) => item.entity_type)}
-            checked={runtimeEntityTypeSet}
-            renderLabel={(key) => {
-              const found = resultFacets?.entityTypes.find((item) => item.entity_type === key);
-              return found ? `${key} (${found.count})` : key;
-            }}
-            onToggle={(key) => onUpdateRuntime({ entityTypes: toggleArrayValue(runtime.entityTypes, key) })}
-            onSelectAll={() => onUpdateRuntime({ entityTypes: (resultFacets?.entityTypes || []).map((item) => item.entity_type) })}
-            onClear={() => onUpdateRuntime({ entityTypes: [] })}
-            emptyText="运行 discovery 后显示"
-          />
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>搜索并添加实体</div>
+          <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
+            输入时展示轻量预览候选，提交后展示完整 Top100 候选列表。
+          </div>
         </div>
 
-        <div style={{ display: "grid", gap: 8 }}>
-          <div style={{ fontSize: 12, fontWeight: 600 }}>relation type facets</div>
-          <CheckboxList
-            items={(resultFacets?.relationTypes || []).map((item) => item.relation_type)}
-            checked={runtimeRelationTypeSet}
-            renderLabel={(key) => {
-              const found = resultFacets?.relationTypes.find((item) => item.relation_type === key);
-              const display = relationDisplay(key) || key;
-              return found ? `${display} (${found.count})` : display;
-            }}
-            onToggle={(key) => onUpdateRuntime({ relationTypes: toggleArrayValue(runtime.relationTypes, key) })}
-            onSelectAll={() => onUpdateRuntime({ relationTypes: (resultFacets?.relationTypes || []).map((item) => item.relation_type) })}
-            onClear={() => onUpdateRuntime({ relationTypes: [] })}
-            emptyText="运行 discovery 后显示"
+        <div ref={searchWrapRef} style={{ position: "relative" }}>
+          <input
+            value={searchQuery.q}
+            onChange={(e) => onUpdateSearchQuery({ q: e.target.value })}
+            onKeyDown={handleSearchKeyDown}
+            placeholder="搜索实体名称、描述等"
+            style={{ width: "100%", padding: "10px 12px" }}
           />
+          {preview.open ? (
+            <div
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                top: "calc(100% + 6px)",
+                zIndex: 30,
+                border: "1px solid #e5e6eb",
+                borderRadius: 8,
+                background: "#fff",
+                boxShadow: "0 8px 24px rgba(0,0,0,0.12)",
+                maxHeight: 280,
+                overflow: "auto",
+              }}
+            >
+              {preview.loading ? (
+                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>候选预览加载中…</div>
+              ) : preview.error ? (
+                <div style={{ padding: 10, fontSize: 13, color: "#d4380d" }}>候选预览失败：{preview.error}</div>
+              ) : preview.items.length === 0 ? (
+                <div style={{ padding: 10, fontSize: 13, color: "#666" }}>无匹配候选</div>
+              ) : (
+                preview.items.map((item, idx) => {
+                  const active = idx === preview.highlightIndex;
+                  return (
+                    <button
+                      key={`${item.vid}-${idx}`}
+                      type="button"
+                      onMouseEnter={() => onSetPreviewHighlightIndex(idx)}
+                      onClick={() => onSelectPreviewItem(item)}
+                      style={{
+                        width: "100%",
+                        border: "none",
+                        borderBottom: idx === preview.items.length - 1 ? "none" : "1px solid #f0f0f0",
+                        background: active ? "#e6f4ff" : "#fff",
+                        padding: "10px 12px",
+                        textAlign: "left",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{item.label}</div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
+                        vid={item.vid}
+                        {item.entity_type ? ` | ${item.entity_type}` : ""}
+                        {item.source ? ` | ${item.source}` : ""}
+                      </div>
+                      {item.snippet ? (
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#444", lineHeight: 1.5 }}>{item.snippet}</div>
+                      ) : null}
+                    </button>
+                  );
+                })
+              )}
+            </div>
+          ) : null}
         </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
+          <button onClick={onSubmitSearch} disabled={candidateResult.loading} style={{ padding: "8px 12px", width: "100%" }}>
+            {candidateResult.loading ? "搜索中…" : "搜索候选"}
+          </button>
+          <button onClick={onToggleSearchAdvanced} style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}>
+            {searchAdvancedOpen ? "收起高级筛选" : "展开高级筛选"}
+          </button>
+        </div>
+
+        {searchAdvancedOpen ? (
+          <div style={{ border: "1px solid #f0f0f0", borderRadius: 8, padding: 12, display: "grid", gap: 8, background: "#fafafa" }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>高级筛选</div>
+
+            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+              <span>entity_raw_id</span>
+              <input
+                value={searchQuery.entityRawId}
+                onChange={(e) => onUpdateSearchQuery({ entityRawId: e.target.value })}
+                placeholder="可选：按 entity_raw_id 搜索"
+                style={{ width: "100%", padding: 8 }}
+              />
+            </label>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 8 }}>
+              <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+                <span>entity_type</span>
+                <select
+                  value={searchQuery.entityType}
+                  onChange={(e) => onUpdateSearchQuery({ entityType: e.target.value })}
+                  style={{ padding: 8 }}
+                >
+                  <option value="">全部</option>
+                  {entityTypeOptions.map((opt) => (
+                    <option key={opt.entity_type} value={opt.entity_type}>
+                      {opt.entity_type} ({opt.count})
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+                <span>entity_raw_id_mode</span>
+                <select
+                  value={searchQuery.entityRawIdMode}
+                  onChange={(e) =>
+                    onUpdateSearchQuery({
+                      entityRawIdMode: e.target.value as DiscoveryEntityCandidateQueryState["entityRawIdMode"],
+                    })
+                  }
+                  style={{ padding: 8 }}
+                >
+                  <option value="contains">contains</option>
+                  <option value="prefix">prefix</option>
+                  <option value="exact">exact</option>
+                </select>
+              </label>
+            </div>
+
+            <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
+              <span>source</span>
+              <input
+                value={searchQuery.source}
+                onChange={(e) => onUpdateSearchQuery({ source: e.target.value })}
+                placeholder="可选：过滤 source"
+                style={{ width: "100%", padding: 8 }}
+              />
+            </label>
+
+            <div style={{ display: "grid", gap: 6, fontSize: 12 }}>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={searchQuery.searchInName}
+                  onChange={(e) => onUpdateSearchQuery({ searchInName: e.target.checked })}
+                />
+                搜索 entity_name
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={searchQuery.searchInDescription}
+                  onChange={(e) => onUpdateSearchQuery({ searchInDescription: e.target.checked })}
+                />
+                搜索 description
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={searchQuery.searchInType}
+                  onChange={(e) => onUpdateSearchQuery({ searchInType: e.target.checked })}
+                />
+                搜索 entity_type
+              </label>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={searchQuery.searchInRawId}
+                  onChange={(e) => onUpdateSearchQuery({ searchInRawId: e.target.checked })}
+                />
+                搜索 entity_raw_id
+              </label>
+            </div>
+          </div>
+        ) : null}
       </div>
+
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>完整候选列表</div>
+            <div style={{ marginTop: 4, fontSize: 12, color: "#666" }}>
+              已加载 {candidateResult.items.length} 条
+              {candidateResult.page > 0 ? ` | 当前页 ${candidateResult.page}` : ""}
+              {candidateResult.has_more ? " | 还有更多候选" : candidateResult.items.length > 0 ? " | 已无更多" : ""}
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8, width: "100%" }}>
+            <button
+              onClick={onAddSelectedCandidates}
+              disabled={selectedCandidateIds.size === 0}
+              style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}
+            >
+              加入已选候选（{selectedCandidateIds.size}）
+            </button>
+            <button
+              onClick={onClearCandidateSelection}
+              disabled={selectedCandidateIds.size === 0}
+              style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}
+            >
+              清空勾选
+            </button>
+          </div>
+        </div>
+
+        {candidateResult.error ? (
+          <div style={{ fontSize: 12, color: "#d4380d" }}>候选搜索失败：{candidateResult.error}</div>
+        ) : null}
+
+        <div style={{ display: "grid", gap: 10 }}>
+          {candidateResult.loading ? (
+            <div style={{ fontSize: 12, color: "#666" }}>候选加载中…</div>
+          ) : candidateResult.items.length === 0 ? (
+            <div style={{ fontSize: 12, color: "#666" }}>暂无候选实体，请先输入关键词并提交搜索。</div>
+          ) : (
+            candidateResult.items.map((item) => (
+              <EntityCandidateCard
+                key={item.vid}
+                item={item}
+                checked={selectedCandidateIds.has(item.vid)}
+                seeded={seedIdSet.has(item.vid)}
+                onToggleChecked={onToggleCandidateSelect}
+                onAddSeed={onAddCandidateSeed}
+                onViewDetail={onViewCandidateDetail}
+                onLoadSubgraph={onLoadCandidateSubgraph}
+              />
+            ))
+          )}
+        </div>
+
+        {candidateResult.items.length > 0 ? (
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <button
+              onClick={onLoadMoreCandidates}
+              disabled={!candidateResult.has_more || candidateResult.loadingMore}
+              style={{ padding: "8px 12px" }}
+            >
+              {candidateResult.loadingMore ? "加载中…" : candidateResult.has_more ? "加载更多" : "已无更多"}
+            </button>
+          </div>
+        ) : null}
+      </div>
+
     </div>
   );
 }

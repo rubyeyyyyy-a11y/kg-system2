@@ -6,6 +6,7 @@ import type {
   EntityTypeItem,
   EdgeSearchResp,
   EdgeSuggestResp,
+  DiscoveryEntityCandidatesResp,
   GraphDiscoveryResp,
   MultiEntityGraphResp,
   ExpandResp,
@@ -110,6 +111,22 @@ type GraphDiscoveryParams = {
   include_candidate_candidate_edges: boolean;
   include_seed_seed_edges?: boolean;
   hop: number;
+  ranking_mode?: "v1" | "layered_multiseed";
+};
+
+type DiscoveryEntityCandidatesParams = {
+  q: string;
+  page: number;
+  page_size: number;
+  search_in_name: boolean;
+  search_in_description: boolean;
+  search_in_type: boolean;
+  search_in_raw_id: boolean;
+  entity_type: string | null;
+  source: string | null;
+  entity_raw_id: string | null;
+  entity_raw_id_mode: "contains" | "prefix" | "exact";
+  signal?: AbortSignal;
 };
 
 export async function search(params: SearchParams): Promise<SearchResp> {
@@ -267,6 +284,13 @@ export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPath
 
 export async function graphDiscovery(body: GraphDiscoveryParams): Promise<GraphDiscoveryResp> {
   return apiPost<GraphDiscoveryResp>("/api/graph/discovery", body);
+}
+
+export async function discoveryEntityCandidates(
+  params: DiscoveryEntityCandidatesParams
+): Promise<DiscoveryEntityCandidatesResp> {
+  const { signal, ...body } = params;
+  return apiPost<DiscoveryEntityCandidatesResp>("/api/discovery/entity_candidates", body, { signal });
 }
 
 async function apiFetchJson<T>(path: string, init: RequestInit): Promise<T> {

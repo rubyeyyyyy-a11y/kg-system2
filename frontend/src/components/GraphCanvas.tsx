@@ -323,7 +323,19 @@ export function GraphCanvas({
             labelBackground: true,
             cursor: "pointer",
             interactive: true as any,
-            lineWidth: 2,
+            lineWidth: (d: any) => {
+              if (d?.data?.is_backbone) return 3;
+              if (String(d?.data?.layer || "") === "shared") return 2.5;
+              return 2;
+            },
+            stroke: (d: any) => {
+              if (d?.data?.is_backbone) return "#d4380d";
+              const layer = String(d?.data?.layer || "");
+              if (layer === "shared") return "#1677ff";
+              if (layer === "local") return "#595959";
+              if (layer === "supplement") return "#bfbfbf";
+              return "#8c8c8c";
+            },
           },
           state: {
             selected: {

@@ -164,7 +164,23 @@ def _fetch_edges_limited(nodes: List[CandidateNode]) -> Tuple[List[Dict[str, Any
         )
 
 
-def _search_candidates(req: SearchRequest) -> Tuple[List[Tuple[int, float]], float, str]:
+def _validate_search_input(req: SearchRequest, request_id: str) -> Tuple[str, str]:
+    q = (req.q or "").strip()
+    raw_id_q = (req.entity_raw_id or "").strip()
+    if not q and not raw_id_q:
+        err = mk_search_error(
+            code=SearchErrorCode.VALIDATION_ERROR,
+            message="either q or entity_raw_id must be provided",
+            status_code=400,
+            reason="empty_query",
+        )
+        raise to_http_exception(err, request_id)
+    return q, raw_id_q
+
+
+def _search_candidates(req: SearchRequest, *, limit: Optional[int] = None, offset: int = 0) -> Tuple[List[Tuple[int, float]], float, str]:
+    effective_limit = max(1, min(int(limit or search_budget.es_topk), 500))
+    effective_offset = max(0, int(offset))
     raw_id_query = (req.entity_raw_id or "").strip()
     if raw_id_query:
         raw_norm = normalize_raw_id(raw_id_query)
@@ -175,7 +191,8 @@ def _search_candidates(req: SearchRequest) -> Tuple[List[Tuple[int, float]], flo
                 raw_norm,
                 raw_id_original=raw_id_query,
                 mode=req.entity_raw_id_mode,
-                limit=search_budget.es_topk,
+                limit=effective_limit,
+                offset=effective_offset,
                 entity_type=req.entity_type,
                 source=req.source,
             )
@@ -189,7 +206,8 @@ def _search_candidates(req: SearchRequest) -> Tuple[List[Tuple[int, float]], flo
     try:
         result, took_ms = es_client.search_entity_vids(
             q,
-            limit=search_budget.es_topk,
+            limit=effective_limit,
+            offset=effective_offset,
             search_in_name=req.search_in_name,
             search_in_description=req.search_in_description,
             search_in_type=req.search_in_type,
@@ -244,6 +262,79 @@ def _search_payload(
     }
 
 
+def search_candidates_page(req: SearchRequest, *, offset: int, limit: int) -> Dict[str, Any]:
+    started = time.perf_counter()
+    request_id = _request_id()
+    es_ms = 0.0
+    fetch_ms = 0.0
+    safe_limit = max(1, min(int(limit), 100))
+    safe_offset = max(0, int(offset))
+
+    q, raw_id_q = _validate_search_input(req, request_id)
+    if not raw_id_q and len(q) < search_budget.min_query_len:
+        total_ms = (time.perf_counter() - started) * 1000.0
+        return {
+            "nodes": [],
+            "has_more": False,
+            "meta": {
+                "request_id": request_id,
+                "strategy": "ES_V2",
+                "reason": "q_too_short",
+                "timings_ms": {
+                    "es_ms": 0.0,
+                    "fetch_ms": 0.0,
+                    "total_ms": round(total_ms, 3),
+                },
+                "offset": safe_offset,
+                "limit": safe_limit,
+            },
+        }
+
+    try:
+        es_ms += _ensure_es_available()
+        vids_scores, query_ms, query_reason = _search_candidates(req, limit=safe_limit + 1, offset=safe_offset)
+        es_ms += query_ms
+        has_more = len(vids_scores) > safe_limit
+        page_vids_scores = vids_scores[:safe_limit]
+        nodes: List[CandidateNode] = []
+        if page_vids_scores:
+            nodes, node_fetch_ms = _fetch_nodes(page_vids_scores)
+            fetch_ms += node_fetch_ms
+
+        total_ms = (time.perf_counter() - started) * 1000.0
+        reason = "es_ok" if query_reason == "text_es" else query_reason
+        return {
+            "nodes": nodes,
+            "has_more": bool(has_more),
+            "meta": {
+                "request_id": request_id,
+                "strategy": "ES_V2",
+                "reason": reason if nodes else (query_reason if query_reason != "text_es" else "es_no_hits"),
+                "timings_ms": {
+                    "es_ms": round(es_ms, 3),
+                    "fetch_ms": round(fetch_ms, 3),
+                    "total_ms": round(total_ms, 3),
+                },
+                "offset": safe_offset,
+                "limit": safe_limit,
+            },
+        }
+    except SearchServiceError as err:
+        logger.warning("search_v2 candidate_page error request_id=%s code=%s reason=%s", request_id, err.code.value, err.reason)
+        raise to_http_exception(err, request_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("search_v2 candidate_page unexpected error request_id=%s", request_id)
+        err = mk_search_error(
+            code=SearchErrorCode.INTERNAL_ERROR,
+            message="search candidate page internal error",
+            status_code=500,
+            reason=str(exc),
+        )
+        raise to_http_exception(err, request_id)
+
+
 def search(req: SearchRequest) -> Dict[str, Any]:
     started = time.perf_counter()
     request_id = _request_id()
@@ -253,16 +344,7 @@ def search(req: SearchRequest) -> Dict[str, Any]:
     include_edges_requested = bool(req.include_edges)
     include_edges_applied = bool(include_edges_requested and search_budget.include_edges_allow)
 
-    q = (req.q or "").strip()
-    raw_id_q = (req.entity_raw_id or "").strip()
-    if not q and not raw_id_q:
-        err = mk_search_error(
-            code=SearchErrorCode.VALIDATION_ERROR,
-            message="either q or entity_raw_id must be provided",
-            status_code=400,
-            reason="empty_query",
-        )
-        raise to_http_exception(err, request_id)
+    q, raw_id_q = _validate_search_input(req, request_id)
     if not raw_id_q and len(q) < search_budget.min_query_len:
         total_ms = (time.perf_counter() - started) * 1000.0
         return _search_payload(

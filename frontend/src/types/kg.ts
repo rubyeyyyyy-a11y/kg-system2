@@ -6,7 +6,14 @@ export type NodeBrief = {
   source?: string;
   score?: number;
   snippet?: string;
+  description?: string;
   role?: "seed" | "candidate";
+  layer?: "core" | "shared" | "local" | "supplement" | "";
+  priority_score?: number;
+  min_seed_distance?: number;
+  bridge_seed_count?: number;
+  local_anchor_seed?: number | null;
+  matched_seed_pairs?: string[];
   seed_support_count?: number;
   seed_support_vids?: number[];
   score_breakdown?: Record<string, unknown>;
@@ -21,6 +28,11 @@ export type EdgeBrief = {
   source_db?: string;
   is_explain?: boolean;
   role?: "seed_candidate" | "candidate_candidate" | "seed_seed";
+  layer?: "core" | "shared" | "local" | "supplement" | "";
+  priority_score?: number;
+  seed_support_vids?: number[];
+  path_pair?: string;
+  is_backbone?: boolean;
 };
 
 export type SearchResp = {
@@ -210,6 +222,10 @@ export type GraphDiscoveryEntityFacetItem = {
   count: number;
   seed_count: number;
   candidate_count: number;
+  core_count: number;
+  shared_count: number;
+  local_count: number;
+  supplement_count: number;
 };
 
 export type GraphDiscoveryRelationFacetItem = {
@@ -218,6 +234,37 @@ export type GraphDiscoveryRelationFacetItem = {
   seed_candidate_count: number;
   candidate_candidate_count: number;
   seed_seed_count: number;
+  core_count: number;
+  shared_count: number;
+  local_count: number;
+  supplement_count: number;
+};
+
+export type GraphDiscoveryQuerySummary = {
+  search_type: string;
+  selected_seed_count: number;
+  selected_seeds: Array<{
+    id: number;
+    label: string;
+    entity_type: string;
+  }>;
+  total_entities: number;
+  total_relationships: number;
+};
+
+export type GraphDiscoveryLayerFacetItem = {
+  layer: "core" | "shared" | "local" | "supplement";
+  node_count: number;
+  edge_count: number;
+};
+
+export type GraphDiscoverySeedFacetItem = {
+  seed_vid: number;
+  label: string;
+  entity_type: string;
+  local_count: number;
+  shared_touch_count: number;
+  core_path_count: number;
 };
 
 export type GraphDiscoveryResp = {
@@ -226,20 +273,63 @@ export type GraphDiscoveryResp = {
   facets: {
     entity_types: GraphDiscoveryEntityFacetItem[];
     relation_types: GraphDiscoveryRelationFacetItem[];
+    query_summary: GraphDiscoveryQuerySummary;
+    layers: GraphDiscoveryLayerFacetItem[];
+    seeds: GraphDiscoverySeedFacetItem[];
   };
   stats: {
+    ranking_mode?: "v1" | "layered_multiseed";
     seed_count: number;
+    seeds_count?: number;
     candidate_count: number;
     node_count: number;
     edge_count: number;
+    final_nodes?: number;
+    final_edges?: number;
     truncated: boolean;
+    core_count?: number;
+    shared_count?: number;
+    local_count?: number;
+    supplement_count?: number;
     dropped_nodes: number;
     dropped_edges: number;
     dropped_neighbors: number;
+    dropped_by_budget?: number;
+    dropped_by_type_budget?: number;
+    dropped_generic_hubs?: number;
     recall_candidate_count: number;
     kept_candidate_count: number;
     budget_applied?: Record<string, unknown>;
   };
+};
+
+export type DiscoveryEntityCandidateQueryState = {
+  q: string;
+  searchInName: boolean;
+  searchInDescription: boolean;
+  searchInType: boolean;
+  searchInRawId: boolean;
+  entityType: string;
+  source: string;
+  entityRawId: string;
+  entityRawIdMode: "contains" | "prefix" | "exact";
+};
+
+export type DiscoveryEntityCandidateItem = NodeBrief & {
+  vid: number;
+  raw_id: string;
+  snippet: string;
+  description: string;
+};
+
+export type DiscoveryEntityCandidatesResp = {
+  items: DiscoveryEntityCandidateItem[];
+  page: number;
+  page_size: number;
+  returned: number;
+  has_more: boolean;
+  next_page: number | null;
+  meta?: Record<string, unknown>;
 };
 
 export type EditableFieldSpec = {

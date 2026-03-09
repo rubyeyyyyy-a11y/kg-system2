@@ -50,7 +50,7 @@ class GraphQueryBudget:
 graph_budget = GraphQueryBudget(
     relation_filter_max=max(1, min(_env_int("GRAPH_REL_FILTER_MAX", 120), 500)),
     discovery_seed_cap=max(1, min(_env_int("GRAPH_DISCOVERY_SEED_CAP", 8), 16)),
-    discovery_hop_max=max(1, min(_env_int("GRAPH_DISCOVERY_HOP_MAX", 1), 2)),
+    discovery_hop_max=max(1, min(_env_int("GRAPH_DISCOVERY_HOP_MAX", 3), 3)),
     discovery_top_k_per_type_cap=max(1, min(_env_int("GRAPH_DISCOVERY_TOP_K_PER_TYPE_CAP", 50), 200)),
     discovery_max_nodes_cap=max(20, min(_env_int("GRAPH_DISCOVERY_MAX_NODES_CAP", 300), 3000)),
     discovery_max_edges_cap=max(20, min(_env_int("GRAPH_DISCOVERY_MAX_EDGES_CAP", 1200), 10000)),

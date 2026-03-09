@@ -16,6 +16,10 @@ import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { LeftSearchPanel } from "./components/LeftSearchPanel";
 import { Resizer } from "./components/Resizer";
 import { TopBar } from "./components/TopBar";
+import { useDiscoveryCandidateResults } from "./hooks/useDiscoveryCandidateResults";
+import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch";
+import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
+import { useDiscoverySeeds } from "./hooks/useDiscoverySeeds";
 import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
 import { useGraphData } from "./hooks/useGraphData";
@@ -30,6 +34,7 @@ import type {
   EdgePatchResp,
   EdgeSearchItem,
   EdgeSearchResp,
+  DiscoveryEntityCandidateItem,
   GraphDiscoveryResp,
   MultiEntityGraphResp,
   NodeBrief,
@@ -92,6 +97,7 @@ type DiscoveryRequest = {
   include_candidate_candidate_edges: boolean;
   include_seed_seed_edges: boolean;
   hop: number;
+  ranking_mode: "v1" | "layered_multiseed";
 };
 
 type DiscoveryQueryState = {
@@ -124,6 +130,8 @@ const EDGE_TYPE_DEFAULT = "REL2";
 const RELATION_TYPES_PAGE_SIZE = 100;
 const EMPTY_GRAPH_NODES: NodeBrief[] = [];
 const EMPTY_GRAPH_EDGES: EdgeBrief[] = [];
+const DISCOVERY_NONE_ENTITY_TYPE = "__none_entity_type_selected__";
+const DISCOVERY_NONE_RELATION_TYPE = "__none_relation_type_selected__";
 const GraphCanvas = lazy(() => import("./components/GraphCanvas").then((mod) => ({ default: mod.GraphCanvas })));
 const RightDetailPanel = lazy(() =>
   import("./components/RightDetailPanel").then((mod) => ({ default: mod.RightDetailPanel }))
@@ -231,17 +239,22 @@ export default function App() {
   const [lastMultiGraphParams, setLastMultiGraphParams] = useState<MultiGraphParams | null>(null);
   const [lastMultiGraphRequest, setLastMultiGraphRequest] = useState<MultiGraphRequest | null>(null);
   const [lastDiscoveryRequest, setLastDiscoveryRequest] = useState<DiscoveryRequest | null>(null);
-  const [discoverySeeds, setDiscoverySeeds] = useState<SuggestItem[]>([]);
+  const discoverySeedsState = useDiscoverySeeds();
   const [discoveryResult, setDiscoveryResult] = useState<GraphDiscoveryResp | null>(null);
+  const discoveryCandidateSearch = useDiscoveryCandidateSearch();
+  const discoveryCandidateResults = useDiscoveryCandidateResults({
+    query: discoveryCandidateSearch.query,
+    onError: (message) => setUiNotice({ level: "error", message: `候选搜索失败：${message}` }),
+  });
   const [discoveryQuery, setDiscoveryQuery] = useState<DiscoveryQueryState>({
     allowedEntityTypes: [],
     allowedRelationTypes: [],
-    maxNodes: 180,
-    maxEdges: 500,
+    maxNodes: 90,
+    maxEdges: 140,
     topKPerType: 12,
     includeCandidateCandidateEdges: true,
     includeSeedSeedEdges: false,
-    hop: 1,
+    hop: 3,
   });
   const [discoveryRuntimeFilters, setDiscoveryRuntimeFilters] = useState<DiscoveryRuntimeState>({
     entityTypes: [],
@@ -307,6 +320,16 @@ export default function App() {
     }
   }, []);
 
+  const discoverySeeds = discoverySeedsState.items;
+
+  const discoveryDetail = useDiscoveryEntityDetail({
+    loadNodeDetail,
+    setSel,
+    setNodeDetail,
+    setEdgeDetail,
+    setSelectedEdgeGraphId,
+  });
+
   async function saveNodeEdit(
     vid: number,
     setFields: Record<string, string>,
@@ -349,7 +372,7 @@ export default function App() {
         updated_by: resp.updated_by,
       };
     });
-    setDiscoverySeeds((prev) =>
+    discoverySeedsState.setItems((prev) =>
       prev.map((item) =>
         item.vid === vid
           ? {
@@ -377,6 +400,13 @@ export default function App() {
             : node
         ),
       };
+    });
+    discoveryCandidateResults.patchCandidate(vid, {
+      label: resp.updated.entity_name ?? undefined,
+      entity_type: resp.updated.entity_type ?? undefined,
+      source: resp.updated.source ?? undefined,
+      snippet: resp.updated.description ?? undefined,
+      description: resp.updated.description ?? undefined,
     });
     setLastMultiGraphParams((prev) => {
       if (!prev) return prev;
@@ -696,9 +726,25 @@ export default function App() {
     setDiscoveryResult(nextPayload);
     setLastDiscoveryRequest(request);
     if (resetRuntimeFilters) {
+      const nextEntityFacetValues = (nextPayload.facets?.entity_types || []).map((item) => item.entity_type);
+      const nextRelationFacetValues = (nextPayload.facets?.relation_types || []).map((item) => item.relation_type);
+      const restoreSelectedFilters = (requestValues: string[], allValues: string[], emptySentinel: string) => {
+        if (requestValues.includes(emptySentinel)) return [];
+        if (requestValues.length === 0) return allValues;
+        const allowed = new Set(requestValues);
+        return allValues.filter((item) => allowed.has(item));
+      };
       setDiscoveryRuntimeFilters({
-        entityTypes: (nextPayload.facets?.entity_types || []).map((item) => item.entity_type),
-        relationTypes: (nextPayload.facets?.relation_types || []).map((item) => item.relation_type),
+        entityTypes: restoreSelectedFilters(
+          request.allowed_entity_types,
+          nextEntityFacetValues,
+          DISCOVERY_NONE_ENTITY_TYPE
+        ),
+        relationTypes: restoreSelectedFilters(
+          request.allowed_relation_types,
+          nextRelationFacetValues,
+          DISCOVERY_NONE_RELATION_TYPE
+        ),
       });
     }
     setGraphSourceMode("discovery");
@@ -762,18 +808,92 @@ export default function App() {
   }
 
   function buildDiscoveryRequest(queryState = discoveryQuery): DiscoveryRequest {
+    const currentEntityFacetItems = discoveryResult?.facets?.entity_types || [];
+    const currentRelationFacetItems = discoveryResult?.facets?.relation_types || [];
+    const entityFacetValues = currentEntityFacetItems.map((item) => item.entity_type);
+    const relationFacetValues = currentRelationFacetItems.map((item) => item.relation_type);
+    const buildAllowedValues = (selected: string[], available: string[], emptySentinel: string, fallback: string[]) => {
+      if (available.length <= 0) return fallback;
+      if (selected.length === available.length) return [];
+      if (selected.length === 0) return [emptySentinel];
+      return selected;
+    };
     return {
       seed_vids: discoverySeeds.map((item) => item.vid),
-      allowed_entity_types: queryState.allowedEntityTypes,
-      allowed_relation_types: queryState.allowedRelationTypes,
+      allowed_entity_types: buildAllowedValues(
+        discoveryRuntimeFilters.entityTypes,
+        entityFacetValues,
+        DISCOVERY_NONE_ENTITY_TYPE,
+        queryState.allowedEntityTypes
+      ),
+      allowed_relation_types: buildAllowedValues(
+        discoveryRuntimeFilters.relationTypes,
+        relationFacetValues,
+        DISCOVERY_NONE_RELATION_TYPE,
+        queryState.allowedRelationTypes
+      ),
       max_nodes: queryState.maxNodes,
       max_edges: queryState.maxEdges,
       top_k_per_type: queryState.topKPerType,
       include_candidate_candidate_edges: queryState.includeCandidateCandidateEdges,
       include_seed_seed_edges: queryState.includeSeedSeedEdges,
       hop: queryState.hop,
+      ranking_mode: "layered_multiseed",
     };
   }
+
+  function discoveryRequestSignature(request: DiscoveryRequest | null) {
+    if (!request) return "";
+    return JSON.stringify({
+      seed_vids: request.seed_vids,
+      allowed_entity_types: request.allowed_entity_types,
+      allowed_relation_types: request.allowed_relation_types,
+      max_nodes: request.max_nodes,
+      max_edges: request.max_edges,
+      top_k_per_type: request.top_k_per_type,
+      include_candidate_candidate_edges: request.include_candidate_candidate_edges,
+      include_seed_seed_edges: request.include_seed_seed_edges,
+      hop: request.hop,
+      ranking_mode: request.ranking_mode,
+    });
+  }
+
+  function addDiscoverySeedItems(items: SuggestItem[]) {
+    discoverySeedsState.addItems(items);
+  }
+
+  function candidateItemToSeed(item: DiscoveryEntityCandidateItem): SuggestItem {
+    return {
+      vid: Number(item.vid || item.id),
+      label: item.label,
+      entity_type: item.entity_type || "",
+      source: item.source,
+      score: item.score,
+    };
+  }
+
+  function addSelectedDiscoveryCandidatesToSeeds() {
+    const selectedIdSet = discoveryCandidateResults.selectedIdSet;
+    const selectedItems = discoveryCandidateResults.result.items.filter((item) => selectedIdSet.has(item.vid));
+    if (selectedItems.length <= 0) {
+      setUiNotice({ level: "info", message: "请先勾选 1 个或多个候选实体。" });
+      return;
+    }
+    addDiscoverySeedItems(selectedItems.map(candidateItemToSeed));
+    discoveryCandidateResults.removeSelected(selectedItems.map((item) => item.vid));
+  }
+
+  const currentDiscoveryRequest = useMemo(
+    () => buildDiscoveryRequest(discoveryQuery),
+    [discoveryQuery, discoverySeeds, discoveryRuntimeFilters, discoveryResult]
+  );
+
+  const discoveryHasPendingChanges = useMemo(() => {
+    if (!lastDiscoveryRequest) {
+      return discoverySeeds.length > 0;
+    }
+    return discoveryRequestSignature(currentDiscoveryRequest) !== discoveryRequestSignature(lastDiscoveryRequest);
+  }, [currentDiscoveryRequest, discoverySeeds.length, lastDiscoveryRequest]);
 
   async function runDiscovery(requestOverride?: DiscoveryRequest) {
     const request = requestOverride ?? buildDiscoveryRequest();
@@ -789,9 +909,14 @@ export default function App() {
       const json = await graphDiscoveryApi(request);
       applyDiscoveryPayload(json, request);
       if (json.stats?.truncated) {
+        const droppedByBudget = Number(json.stats.dropped_by_budget || 0);
+        const droppedByTypeBudget = Number(json.stats.dropped_by_type_budget || 0);
+        const droppedGenericHubs = Number(json.stats.dropped_generic_hubs || 0);
         setUiNotice({
           level: "warn",
-          message: `统一关系发现结果已裁剪：dropped_nodes=${Number(json.stats.dropped_nodes || 0)} dropped_edges=${Number(json.stats.dropped_edges || 0)} dropped_neighbors=${Number(json.stats.dropped_neighbors || 0)}`,
+          message:
+            `统一关系发现结果已裁剪：dropped_nodes=${Number(json.stats.dropped_nodes || 0)} dropped_edges=${Number(json.stats.dropped_edges || 0)} dropped_neighbors=${Number(json.stats.dropped_neighbors || 0)}` +
+            ` dropped_by_budget=${droppedByBudget} dropped_by_type_budget=${droppedByTypeBudget} dropped_generic_hubs=${droppedGenericHubs}`,
         });
       }
     } catch (e: unknown) {
@@ -1144,6 +1269,13 @@ export default function App() {
     await loadSingleSubgraph(targetVid);
   }
 
+  async function loadDiscoveryCandidateSubgraph(item: DiscoveryEntityCandidateItem) {
+    const vid = Number(item.vid || item.id);
+    if (!Number.isFinite(vid)) return;
+    if (workspaceMode === "discovery") setWorkspaceMode("legacy");
+    await loadSingleSubgraph(vid);
+  }
+
   async function reloadGraphByCurrentMode(nextRoot: number) {
     if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
       await runDiscovery(lastDiscoveryRequest);
@@ -1322,19 +1454,7 @@ export default function App() {
         } as Record<string, unknown>)
       : graphStats;
 
-  const {
-    visibleGraphNodes,
-    visibleNodeIdSet,
-    visibleGraphEdges,
-    hiddenSelfLoopCount,
-    visibleSelfLoopCount,
-    autoVisibleTopIds,
-    visibleNodeHopLevelMap,
-    panelNodes,
-    panelGroups,
-    hiddenCount,
-    visibleCount,
-  } = useVisibilityRanking({
+  const visibilityRanking = useVisibilityRanking({
     graphNodes: effectiveGraphNodes,
     graphEdges: effectiveGraphEdges,
     rootVid,
@@ -1345,7 +1465,58 @@ export default function App() {
     searchNodes: searchData.nodes,
   });
 
+  const discoveryVisibleNodeHopLevelMap = useMemo(() => {
+    const next = new Map<number, number>();
+    if (workspaceMode !== "discovery") return next;
+    for (const node of effectiveGraphNodes) {
+      const role = String(node.role || "");
+      const layer = String(node.layer || "");
+      if (role === "seed") next.set(node.id, 0);
+      else if (layer === "core") next.set(node.id, 1);
+      else if (layer === "shared") next.set(node.id, 2);
+      else if (layer === "local") next.set(node.id, 3);
+      else next.set(node.id, 4);
+    }
+    return next;
+  }, [workspaceMode, effectiveGraphNodes]);
+
+  const discoveryVisibleNodeIdSet = useMemo(() => {
+    const next = new Set<number>();
+    if (workspaceMode !== "discovery") return next;
+    for (const node of effectiveGraphNodes) next.add(node.id);
+    return next;
+  }, [workspaceMode, effectiveGraphNodes]);
+
+  const visibleGraphNodes =
+    workspaceMode === "discovery" ? effectiveGraphNodes : visibilityRanking.visibleGraphNodes;
+  const visibleNodeIdSet =
+    workspaceMode === "discovery" ? discoveryVisibleNodeIdSet : visibilityRanking.visibleNodeIdSet;
+  const visibleGraphEdges =
+    workspaceMode === "discovery" ? effectiveGraphEdges : visibilityRanking.visibleGraphEdges;
+  const hiddenSelfLoopCount =
+    workspaceMode === "discovery"
+      ? showSelfLoops
+        ? 0
+        : effectiveGraphEdges.filter((edge) => edge.source === edge.target).length
+      : visibilityRanking.hiddenSelfLoopCount;
+  const visibleSelfLoopCount =
+    workspaceMode === "discovery"
+      ? showSelfLoops
+        ? effectiveGraphEdges.filter((edge) => edge.source === edge.target).length
+        : 0
+      : visibilityRanking.visibleSelfLoopCount;
+  const autoVisibleTopIds =
+    workspaceMode === "discovery" ? discoveryVisibleNodeIdSet : visibilityRanking.autoVisibleTopIds;
+  const visibleNodeHopLevelMap =
+    workspaceMode === "discovery" ? discoveryVisibleNodeHopLevelMap : visibilityRanking.visibleNodeHopLevelMap;
+  const panelNodes = workspaceMode === "discovery" ? EMPTY_GRAPH_NODES : visibilityRanking.panelNodes;
+  const panelGroups = workspaceMode === "discovery" ? [] : visibilityRanking.panelGroups;
+  const hiddenCount = workspaceMode === "discovery" ? 0 : visibilityRanking.hiddenCount;
+  const visibleCount =
+    workspaceMode === "discovery" ? effectiveGraphNodes.length : visibilityRanking.visibleCount;
+
   useEffect(() => {
+    if (workspaceMode === "discovery") return;
     if (panelGroups.length === 0) return;
     setPanelGroupCollapsed((prev) => {
       const next = { ...prev };
@@ -1359,7 +1530,7 @@ export default function App() {
       }
       return changed ? next : prev;
     });
-  }, [panelGroups, setPanelGroupCollapsed]);
+  }, [workspaceMode, panelGroups, setPanelGroupCollapsed]);
 
   useEffect(() => {
     if (!relationFilter.open) return;
@@ -1485,17 +1656,25 @@ export default function App() {
     return seed;
   }, [graphSourceMode, lastMultiGraphParams]);
 
-  const discoverySeedVidSet = useMemo(() => {
-    if (graphSourceMode !== "discovery") return new Set<number>();
+  const discoverySelectedSeedVidSet = useMemo(() => {
     const seed = new Set<number>();
     for (const item of discoverySeeds) seed.add(item.vid);
-    for (const node of discoveryResult?.nodes || []) {
-      if (node.role === "seed") seed.add(node.id);
+    return seed;
+  }, [discoverySeeds]);
+
+  const discoveryRunSeedVidSet = useMemo(() => {
+    if (graphSourceMode !== "discovery") return new Set<number>();
+    const seed = new Set<number>();
+    for (const vid of lastDiscoveryRequest?.seed_vids || []) seed.add(Number(vid));
+    if (seed.size === 0) {
+      for (const node of discoveryResult?.nodes || []) {
+        if (node.role === "seed") seed.add(node.id);
+      }
     }
     return seed;
-  }, [graphSourceMode, discoveryResult, discoverySeeds]);
+  }, [graphSourceMode, discoveryResult, lastDiscoveryRequest]);
 
-  const activeSeedVidSet = graphSourceMode === "multi" ? multiSeedVidSet : discoverySeedVidSet;
+  const activeSeedVidSet = graphSourceMode === "multi" ? multiSeedVidSet : discoveryRunSeedVidSet;
 
   const multiEntityLabelMap = useMemo(() => {
     const m = new Map<number, string>();
@@ -1640,8 +1819,24 @@ export default function App() {
 
   const selectedNodeBrief = useMemo(() => {
     if (sel.kind !== "node") return null;
-    return effectiveGraphNodes.find((n) => n.id === sel.vid) || null;
-  }, [sel, effectiveGraphNodes]);
+    const graphNode = effectiveGraphNodes.find((n) => n.id === sel.vid);
+    if (graphNode) return graphNode;
+    if (workspaceMode === "discovery") {
+      const candidateNode = discoveryCandidateResults.result.items.find((item) => item.vid === sel.vid);
+      if (candidateNode) return candidateNode;
+      const seedNode = discoverySeeds.find((item) => item.vid === sel.vid);
+      if (seedNode) {
+        return {
+          id: seedNode.vid,
+          label: seedNode.label,
+          entity_type: seedNode.entity_type || "",
+          source: seedNode.source,
+          score: seedNode.score,
+        };
+      }
+    }
+    return searchData.nodes.find((n) => n.id === sel.vid) || null;
+  }, [sel, effectiveGraphNodes, workspaceMode, discoveryCandidateResults.result.items, discoverySeeds, searchData.nodes]);
 
   const selectedNodeIsRoot = sel.kind === "node" && rootVid != null && sel.vid === rootVid;
   const selectedNodeIsVisible = sel.kind === "node" ? visibleNodeIdSet.has(sel.vid) : false;
@@ -1878,6 +2073,12 @@ export default function App() {
         ) : (
           <DiscoveryPanel
             seeds={discoverySeeds}
+            searchQuery={discoveryCandidateSearch.query}
+            searchAdvancedOpen={discoveryCandidateSearch.advancedOpen}
+            preview={discoveryCandidateResults.preview}
+            candidateResult={discoveryCandidateResults.result}
+            selectedCandidateIds={discoveryCandidateResults.selectedIdSet}
+            seedIdSet={discoverySelectedSeedVidSet}
             query={discoveryQuery}
             runtime={discoveryRuntimeFilters}
             entityTypeOptions={entityTypeOptions}
@@ -1886,26 +2087,53 @@ export default function App() {
                 ? {
                     entityTypes: discoveryResult.facets.entity_types,
                     relationTypes: discoveryResult.facets.relation_types,
+                    querySummary: discoveryResult.facets.query_summary,
+                    layers: discoveryResult.facets.layers,
+                    seeds: discoveryResult.facets.seeds,
                   }
                 : null
             }
+            resultStats={discoveryResult?.stats || null}
             loading={loadingDiscovery}
-            onAddSeed={(item) => {
-              setDiscoverySeeds((prev) => {
-                if (prev.some((seed) => seed.vid === item.vid)) return prev;
-                return [...prev, item];
+            hasPendingChanges={discoveryHasPendingChanges}
+            onUpdateSearchQuery={discoveryCandidateSearch.updateQuery}
+            onToggleSearchAdvanced={discoveryCandidateSearch.toggleAdvancedOpen}
+            onSubmitSearch={() => {
+              void discoveryCandidateResults.runSearch({
+                append: false,
+                page: 1,
+                queryOverride: discoveryCandidateSearch.query,
               });
             }}
-            onRemoveSeed={(vid) => {
-              setDiscoverySeeds((prev) => prev.filter((item) => item.vid !== vid));
+            onClosePreview={discoveryCandidateResults.closePreview}
+            onSetPreviewHighlightIndex={discoveryCandidateResults.setPreviewHighlightIndex}
+            onSelectPreviewItem={(item) => {
+              discoveryCandidateResults.closePreview();
+              discoveryDetail.viewCandidateDetail(item);
             }}
-            onClearSeeds={() => setDiscoverySeeds([])}
+            onAddCandidateSeed={(item) => {
+              addDiscoverySeedItems([candidateItemToSeed(item)]);
+              discoveryCandidateResults.removeSelected([item.vid]);
+            }}
+            onRemoveSeed={discoverySeedsState.removeItem}
+            onClearSeeds={discoverySeedsState.clear}
+            onLoadMoreCandidates={() => {
+              void discoveryCandidateResults.loadMore();
+            }}
+            onToggleCandidateSelect={discoveryCandidateResults.toggleSelected}
+            onClearCandidateSelection={discoveryCandidateResults.clearSelected}
+            onAddSelectedCandidates={addSelectedDiscoveryCandidatesToSeeds}
+            onViewCandidateDetail={(item) => {
+              discoveryDetail.viewCandidateDetail(item);
+            }}
+            onLoadCandidateSubgraph={(item) => {
+              void loadDiscoveryCandidateSubgraph(item);
+            }}
             onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
             onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
             onRun={() => {
               void runDiscovery();
             }}
-            onNotice={(level, message) => setUiNotice({ level, message })}
           />
         )}
       </div>
@@ -1946,7 +2174,9 @@ export default function App() {
               <div style={{ fontSize: 13, fontWeight: 600 }}>统一关系发现</div>
               {discoveryWorkspaceReady ? (
                 <div style={{ fontSize: 12, color: "#666" }}>
-                  seeds={discoveryResult?.stats.seed_count ?? discoverySeeds.length} candidates=
+                  last_run_seeds={discoveryResult?.stats.seed_count ?? lastDiscoveryRequest?.seed_vids.length ?? 0} current_seeds=
+                  {discoverySeeds.length}
+                  {" | "}candidates=
                   {discoveryResult?.stats.candidate_count ?? 0}
                   {" | "}nodes={effectiveGraphNodes.length} edges={effectiveGraphEdges.length}
                   {graphBusy ? " | 加载中…" : ""}
@@ -1956,9 +2186,14 @@ export default function App() {
                   添加 1 个或多个 seed 节点后运行 discovery，结果会以主题关系图形式渲染在这里。
                 </div>
               )}
+              {discoveryHasPendingChanges ? (
+                <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
+                  当前 seeds 或 discovery 参数与上次运行结果不一致，请重新生成以同步图谱结果。
+                </div>
+              ) : null}
               {effectiveGraphStats?.truncated ? (
                 <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
-                  图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)}
+                  图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)} dropped_by_budget={Number(effectiveGraphStats?.dropped_by_budget || 0)} dropped_by_type_budget={Number(effectiveGraphStats?.dropped_by_type_budget || 0)} dropped_generic_hubs={Number(effectiveGraphStats?.dropped_generic_hubs || 0)}
                 </div>
               ) : null}
             </div>

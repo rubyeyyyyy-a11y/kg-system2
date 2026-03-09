@@ -15,6 +15,7 @@ FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
 BACKEND_LOG_FILE="$LOG_DIR/backend.log"
 FRONTEND_LOG_FILE="$LOG_DIR/frontend.log"
 FRONTEND_VITE_ENTRY="$ROOT/frontend/node_modules/vite/bin/vite.js"
+FRONTEND_VITE_SHIM="$ROOT/frontend/node_modules/.bin/vite"
 
 mkdir -p "$RUN_DIR" "$LOG_DIR"
 
@@ -65,9 +66,9 @@ find_backend_pids() {
 }
 
 find_frontend_pids() {
-  ps -eo pid=,comm=,args= | awk -v vite_entry="$FRONTEND_VITE_ENTRY" -v host="$FRONTEND_HOST" -v port="$FRONTEND_PORT" '
+  ps -eo pid=,comm=,args= | awk -v vite_entry="$FRONTEND_VITE_ENTRY" -v vite_shim="$FRONTEND_VITE_SHIM" -v host="$FRONTEND_HOST" -v port="$FRONTEND_PORT" '
     ($2 == "node" || $2 == "nodejs") &&
-    index($0, vite_entry) &&
+    (index($0, vite_entry) || index($0, vite_shim)) &&
     index($0, "--host " host) &&
     index($0, "--port " port) {
       print $1

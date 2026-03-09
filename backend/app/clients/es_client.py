@@ -79,6 +79,7 @@ class ElasticsearchClient:
         q: str,
         *,
         limit: int,
+        offset: int = 0,
         search_in_name: bool,
         search_in_description: bool,
         search_in_type: bool,
@@ -106,6 +107,7 @@ class ElasticsearchClient:
 
         body: Dict[str, Any] = {
             "size": max(1, min(int(limit), 500)),
+            "from": max(0, int(offset)),
             "query": {
                 "bool": {
                     "should": should,
@@ -136,6 +138,7 @@ class ElasticsearchClient:
         raw_id_original: str,
         mode: str,
         limit: int,
+        offset: int = 0,
         entity_type: Optional[str],
         source: Optional[str],
     ) -> Tuple[List[Tuple[int, float]], float]:
@@ -168,6 +171,7 @@ class ElasticsearchClient:
 
         body: Dict[str, Any] = {
             "size": max(1, min(int(limit), 500)),
+            "from": max(0, int(offset)),
             "query": {
                 "bool": {
                     "should": should,

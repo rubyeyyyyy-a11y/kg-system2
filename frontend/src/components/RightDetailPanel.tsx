@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { EXPAND_AUTO_REVEAL_TOPK, TOP_N_VISIBLE } from "../constants/kg";
 import { EditWritebackPanel } from "./EditWritebackPanel";
@@ -91,6 +91,14 @@ type RightDetailPanelProps = {
   ) => Promise<EdgePatchResp>;
 };
 
+const DESCRIPTION_SUMMARY_LIMIT = 200;
+
+function buildDescriptionSummary(snippet?: string, description?: string) {
+  const base = String(snippet || description || "").trim();
+  if (!base) return "";
+  return base.length > DESCRIPTION_SUMMARY_LIMIT ? `${base.slice(0, DESCRIPTION_SUMMARY_LIMIT)}...` : base;
+}
+
 export function RightDetailPanel({
   allowGraphMutationActions = true,
   renderNodeLabels,
@@ -151,6 +159,20 @@ export function RightDetailPanel({
   onSaveEdgeEdit,
 }: RightDetailPanelProps) {
   const [editorTab, setEditorTab] = useState<"detail" | "edit" | "direct">("detail");
+  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
+  const [nodePropertiesOpen, setNodePropertiesOpen] = useState(false);
+  const [edgePropertiesOpen, setEdgePropertiesOpen] = useState(false);
+
+  useEffect(() => {
+    setDescriptionExpanded(false);
+    setNodePropertiesOpen(false);
+    setEdgePropertiesOpen(false);
+  }, [editorTab, sel]);
+
+  const nodeFullDescription = String(nodeDetail?.description || selectedNodeBrief?.description || "").trim();
+  const nodeSummaryDescription = buildDescriptionSummary(selectedNodeBrief?.snippet, nodeFullDescription);
+  const nodeDescriptionText = descriptionExpanded && nodeFullDescription ? nodeFullDescription : nodeSummaryDescription || nodeFullDescription;
+  const canToggleDescription = Boolean(nodeFullDescription) && Boolean(nodeSummaryDescription) && nodeSummaryDescription !== nodeFullDescription;
 
   return (
     <div
@@ -431,7 +453,7 @@ export function RightDetailPanel({
       </div>
 
       <hr style={{ margin: "12px 0" }} />
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
         <button onClick={() => setEditorTab("detail")} style={{ padding: "6px 10px", fontSize: 12 }}>
           详情
         </button>
@@ -449,9 +471,38 @@ export function RightDetailPanel({
       ) : sel.kind === "node" ? (
         <div style={{ display: "grid", gap: 10 }}>
           <div style={{ fontWeight: 700 }}>{selectedNodeBrief?.label || `Node ${sel.vid}`}</div>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            id={sel.vid} | type={selectedNodeBrief?.entity_type} | raw_id={selectedNodeBrief?.raw_id} | source=
-            {selectedNodeBrief?.source} | hop_level={visibleNodeHopLevelMap.get(sel.vid) ?? "-"}
+
+          <div
+            style={{
+              border: "1px solid #f0f0f0",
+              borderRadius: 8,
+              background: "#fafafa",
+              padding: 10,
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+              gap: 8,
+            }}
+          >
+            <div style={{ display: "grid", gap: 2 }}>
+              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>id</div>
+              <div style={{ fontSize: 12 }}>{sel.vid}</div>
+            </div>
+            <div style={{ display: "grid", gap: 2 }}>
+              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>entity_type</div>
+              <div style={{ fontSize: 12 }}>{selectedNodeBrief?.entity_type || "-"}</div>
+            </div>
+            <div style={{ display: "grid", gap: 2 }}>
+              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>raw_id</div>
+              <div style={{ fontSize: 12, wordBreak: "break-all" }}>{nodeDetail?.entity_raw_id || selectedNodeBrief?.raw_id || "-"}</div>
+            </div>
+            <div style={{ display: "grid", gap: 2 }}>
+              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>source</div>
+              <div style={{ fontSize: 12 }}>{selectedNodeBrief?.source || nodeDetail?.source || "-"}</div>
+            </div>
+            <div style={{ display: "grid", gap: 2 }}>
+              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>hop_level</div>
+              <div style={{ fontSize: 12 }}>{visibleNodeHopLevelMap.get(sel.vid) ?? "-"}</div>
+            </div>
           </div>
 
           {allowGraphMutationActions ? (
@@ -520,12 +571,42 @@ export function RightDetailPanel({
 
           <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>
 
-          {selectedNodeBrief?.snippet ? <div style={{ fontSize: 13, lineHeight: 1.4 }}>{selectedNodeBrief.snippet}</div> : null}
+          <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, padding: 10, background: "#fff" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+              <div style={{ fontWeight: 600 }}>Description</div>
+              {canToggleDescription ? (
+                <button onClick={() => setDescriptionExpanded((v) => !v)} style={{ padding: "5px 8px", fontSize: 12 }}>
+                  {descriptionExpanded ? "收起描述" : "展开完整描述"}
+                </button>
+              ) : null}
+            </div>
+            <div style={{ fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.5, color: nodeDescriptionText ? "#222" : "#999" }}>
+              {nodeDescriptionText || "暂无描述"}
+            </div>
+          </div>
 
           {nodeDetail?.props ? (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Properties</div>
-              <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{JSON.stringify(nodeDetail.props, null, 2)}</pre>
+            <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+              <button
+                onClick={() => setNodePropertiesOpen((v) => !v)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  border: "none",
+                  background: "#fafafa",
+                  padding: "10px 12px",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                {nodePropertiesOpen ? "▼" : "▶"} Properties
+              </button>
+              {nodePropertiesOpen ? (
+                <div style={{ borderTop: "1px solid #f0f0f0", padding: 10 }}>
+                  <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(nodeDetail.props, null, 2)}</pre>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -542,9 +623,27 @@ export function RightDetailPanel({
           <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>
 
           {edgeDetail?.props ? (
-            <div style={{ marginTop: 8 }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>Properties</div>
-              <pre style={{ fontSize: 12, whiteSpace: "pre-wrap" }}>{JSON.stringify(edgeDetail.props, null, 2)}</pre>
+            <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
+              <button
+                onClick={() => setEdgePropertiesOpen((v) => !v)}
+                style={{
+                  width: "100%",
+                  textAlign: "left",
+                  border: "none",
+                  background: "#fafafa",
+                  padding: "10px 12px",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                }}
+              >
+                {edgePropertiesOpen ? "▼" : "▶"} Properties
+              </button>
+              {edgePropertiesOpen ? (
+                <div style={{ borderTop: "1px solid #f0f0f0", padding: 10 }}>
+                  <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(edgeDetail.props, null, 2)}</pre>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
