@@ -211,6 +211,13 @@ export function useDiscoveryGraphState({
     }
   }
 
+  function requestRelayout(nodeIds?: string[]) {
+    commitRenderMutation("user_relayout", {
+      affectedNodeIds:
+        nodeIds && nodeIds.length > 0 ? nodeIds : Array.from(renderedNodeIds).map((nodeId) => String(nodeId)),
+    });
+  }
+
   const graphEntityMap = useMemo(() => {
     const next = new Map<number, NodeBrief>();
     for (const node of graphNodes) next.set(node.id, node);
@@ -883,6 +890,7 @@ export function useDiscoveryGraphState({
     setSelectedEntityTypes,
     setSelectedRelationTypes,
     syncNodePositions,
+    requestRelayout,
     visibleNodeIdSet,
     visibleEdgeKeySet,
     visibleGraphNodes,

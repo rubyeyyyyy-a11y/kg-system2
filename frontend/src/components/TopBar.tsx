@@ -13,6 +13,8 @@ type TopBarProps = {
   onOpenRelationFilter: () => void;
   onClearRelationsAndReload: () => void;
   onReloadSubgraph: () => void;
+  onRelayout: () => void;
+  onFitView: () => void;
   graphStats: Record<string, unknown> | null;
   relationPreviewActive: boolean;
   onExitRelationPreview: () => void;
@@ -30,6 +32,8 @@ export function TopBar({
   onOpenRelationFilter,
   onClearRelationsAndReload,
   onReloadSubgraph,
+  onRelayout,
+  onFitView,
   graphStats,
   relationPreviewActive,
   onExitRelationPreview,
@@ -106,6 +110,24 @@ export function TopBar({
         style={{ marginLeft: "auto", padding: "8px 12px" }}
       >
         重新加载子图
+      </button>
+
+      <button
+        onClick={onRelayout}
+        disabled={!rootVid || loadingGraph}
+        style={{ padding: "8px 12px" }}
+        title="显式重新整理当前图布局"
+      >
+        整理布局
+      </button>
+
+      <button
+        onClick={onFitView}
+        disabled={!rootVid}
+        style={{ padding: "8px 12px" }}
+        title="适配当前视图"
+      >
+        适配视图
       </button>
 
       <button

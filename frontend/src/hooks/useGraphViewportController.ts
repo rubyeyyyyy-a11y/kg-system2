@@ -17,8 +17,17 @@ export function useGraphViewportController() {
     }));
   }, []);
 
+  const requestFitView = useCallback(() => {
+    setViewportRequest((prev) => ({
+      sequence: prev.sequence + 1,
+      mode: "fit-view",
+      nodeId: null,
+    }));
+  }, []);
+
   return {
     viewportRequest,
     requestFocusNode,
+    requestFitView,
   };
 }

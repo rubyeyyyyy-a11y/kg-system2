@@ -504,7 +504,7 @@ export function GraphCanvas({
   useEffect(() => {
     if (!graphRef.current) return;
     graphRef.current.stopLayout();
-    if (layoutPlan.mode === "initial-full") {
+    if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full") {
       graphRef.current.setLayout({
         type: "force",
         animation: false,
@@ -567,6 +567,10 @@ export function GraphCanvas({
         await graph.draw();
       }
 
+      if (layoutPlan.mode === "manual-full") {
+        await graph.layout(graph.getLayout?.());
+      }
+
       visibilitySnapshotRef.current = createVisibilitySnapshot(toG6Data(viewModel).edges);
       hiddenEdgeIdSetRef.current = new Set();
       applyVisibility(
@@ -586,7 +590,7 @@ export function GraphCanvas({
       });
 
       clearScheduledFit();
-      if (layoutPlan.mode === "initial-full") {
+      if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full") {
         fitAfterRenderRafRef.current = requestAnimationFrame(() => {
           safeFitView();
           fitAfterRenderRafRef.current = null;
@@ -617,6 +621,12 @@ export function GraphCanvas({
     if (!graphRef.current) return;
     if (viewportRequest.mode !== "focus-node" || !viewportRequest.nodeId) return;
     focusNode(viewportRequest.nodeId);
+  }, [viewportRequest]);
+
+  useEffect(() => {
+    if (!graphRef.current) return;
+    if (viewportRequest.mode !== "fit-view") return;
+    safeFitView();
   }, [viewportRequest]);
 
   useEffect(() => {

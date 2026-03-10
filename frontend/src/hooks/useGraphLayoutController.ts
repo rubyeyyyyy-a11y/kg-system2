@@ -34,6 +34,7 @@ export function useGraphLayoutController({
     const cache = nodePositionCache || {};
 
     for (const nodeId of visibleNodeIds) {
+      if (layoutPlan.mode === "manual-full") continue;
       const cached = cache[nodeId];
       if (!hasFinitePosition(cached)) continue;
       next.set(nodeId, { x: cached.x, y: cached.y });

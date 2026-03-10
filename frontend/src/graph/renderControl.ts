@@ -9,15 +9,16 @@ export type GraphRenderReason =
   | "force_render_dropped"
   | "entity_coverage_toggle"
   | "relation_coverage_toggle"
+  | "user_relayout"
   | "legacy_replace"
   | "legacy_expand"
   | "legacy_reroot"
   | "legacy_reveal"
   | "legacy_collapse";
 
-export type GraphLayoutMode = "initial-full" | "incremental-insert" | "preserve";
+export type GraphLayoutMode = "initial-full" | "incremental-insert" | "manual-full" | "preserve";
 
-export type GraphViewportMode = "none" | "focus-node";
+export type GraphViewportMode = "none" | "focus-node" | "fit-view";
 
 export type CachedNodePosition = {
   x?: number;
@@ -100,6 +101,15 @@ export function createGraphRenderMutation(
 }
 
 export function deriveGraphLayoutPlan(mutation: GraphRenderMutation): GraphLayoutPlan {
+  if (mutation.reason === "user_relayout") {
+    return {
+      mode: "manual-full",
+      reason: mutation.reason,
+      graphMode: mutation.graphMode,
+      anchorNodeId: mutation.anchorNodeId,
+      affectedNodeIds: mutation.affectedNodeIds,
+    };
+  }
   if (mutation.graphMode === "legacy") {
     return {
       mode: "initial-full",

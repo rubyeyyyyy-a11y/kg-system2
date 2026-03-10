@@ -301,7 +301,7 @@ export default function App() {
 
   const applyHighlightRef =
     useRef<((nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void) | null>(null);
-  const { viewportRequest, requestFocusNode } = useGraphViewportController();
+  const { viewportRequest, requestFocusNode, requestFitView } = useGraphViewportController();
 
   const loadNodeDetail = useCallback(async (vid: number) => {
     setDetailLoading(true);
@@ -595,6 +595,7 @@ export default function App() {
     canLoadMoreEdges,
     loadMoreEdges,
     renderMutation: legacyRenderMutation,
+    requestRelayout: requestLegacyRelayout,
   } = useGraphData({
     selectedNodeVid,
     onSelectNode: handleSelectNode,
@@ -1979,6 +1980,15 @@ export default function App() {
     requestFocusNode(String(vid));
   }
 
+  function handleRelayoutCurrentGraph() {
+    if (visibleGraphNodes.length <= 0) return;
+    if (workspaceMode === "discovery") {
+      discoveryGraphState.requestRelayout();
+    } else {
+      requestLegacyRelayout();
+    }
+  }
+
   async function handleDiscoveryExpandNode(vid: number) {
     try {
       const result = await discoveryGraphState.toggleNodeExpand({
@@ -2361,6 +2371,8 @@ export default function App() {
               onReloadSubgraph={() => {
                 if (rootVid != null) void reloadGraphByCurrentMode(rootVid);
               }}
+              onRelayout={handleRelayoutCurrentGraph}
+              onFitView={requestFitView}
               graphStats={effectiveGraphStats}
               relationPreviewActive={relationFilter.previewActive}
               onExitRelationPreview={relationFilter.exitPreview}
@@ -2392,6 +2404,22 @@ export default function App() {
                   图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)} dropped_by_budget={Number(effectiveGraphStats?.dropped_by_budget || 0)} dropped_by_type_budget={Number(effectiveGraphStats?.dropped_by_type_budget || 0)} dropped_generic_hubs={Number(effectiveGraphStats?.dropped_generic_hubs || 0)}
                 </div>
               ) : null}
+              <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  onClick={handleRelayoutCurrentGraph}
+                  disabled={graphBusy || !discoveryWorkspaceReady || effectiveGraphNodes.length <= 0}
+                  style={{ padding: "7px 10px", fontSize: 12 }}
+                >
+                  整理布局
+                </button>
+                <button
+                  onClick={requestFitView}
+                  disabled={!discoveryWorkspaceReady || effectiveGraphNodes.length <= 0}
+                  style={{ padding: "7px 10px", fontSize: 12 }}
+                >
+                  适配视图
+                </button>
+              </div>
             </div>
           )}
         </div>

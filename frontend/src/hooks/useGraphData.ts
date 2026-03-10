@@ -69,6 +69,7 @@ type UseGraphDataResult = {
   canLoadMoreEdges: boolean;
   loadMoreEdges: () => Promise<void>;
   renderMutation: GraphRenderMutation;
+  requestRelayout: (nodeIds?: string[]) => void;
 };
 
 export function useGraphData({
@@ -543,6 +544,13 @@ export function useGraphData({
     });
   }
 
+  function requestRelayout(nodeIds?: string[]) {
+    commitRenderMutation("user_relayout", {
+      affectedNodeIds:
+        nodeIds && nodeIds.length > 0 ? nodeIds : graphNodesRef.current.map((node) => String(node.id)),
+    });
+  }
+
   async function probeExpand1hop(fromVid: number) {
     const curRoot = rootVidRef.current;
     const curGraphNodes = graphNodesRef.current;
@@ -643,5 +651,6 @@ export function useGraphData({
     canLoadMoreEdges: budgetTier < SUBGRAPH_BUDGET_PRESETS.length - 1,
     loadMoreEdges,
     renderMutation,
+    requestRelayout,
   };
 }
