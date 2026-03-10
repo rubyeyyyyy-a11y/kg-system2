@@ -211,6 +211,12 @@ export function useDiscoveryGraphState({
     }
   }
 
+  function clearNodePositionCache() {
+    for (const nodeId of Object.keys(nodePositionCache)) {
+      delete nodePositionCache[nodeId];
+    }
+  }
+
   function requestRelayout(nodeIds?: string[]) {
     commitRenderMutation("user_relayout", {
       affectedNodeIds:
@@ -315,6 +321,7 @@ export function useDiscoveryGraphState({
   }
 
   function initializeFromDiscovery(result: GraphDiscoveryResp) {
+    clearNodePositionCache();
     const nextNodeSourceTags: TagMap = {};
     const nextEdgeSourceTags: TagMap = {};
     const nextDroppedMap: Record<string, DroppedNodeRecord> = {};
@@ -359,6 +366,7 @@ export function useDiscoveryGraphState({
   }
 
   function resetState() {
+    clearNodePositionCache();
     setNodeSourceTagMap({});
     setEdgeSourceTagMap({});
     setHiddenNodeIds(new Set());

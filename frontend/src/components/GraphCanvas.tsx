@@ -184,6 +184,16 @@ export function GraphCanvas({
     resizeGraphTo(el.clientWidth, el.clientHeight);
   }
 
+  function safeStopLayout() {
+    const g: any = graphRef.current;
+    if (!g || g.destroyed || !g.context?.layout) return;
+    try {
+      g.stopLayout();
+    } catch {
+      // ignore
+    }
+  }
+
   function clearScheduledFit() {
     if (fitAfterRenderRafRef.current == null) return;
     cancelAnimationFrame(fitAfterRenderRafRef.current);
@@ -503,8 +513,9 @@ export function GraphCanvas({
 
   useEffect(() => {
     if (!graphRef.current) return;
-    graphRef.current.stopLayout();
-    if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full") {
+    if (!renderPatch.isInitial) safeStopLayout();
+    const shouldRunFullLayout = layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full";
+    if (shouldRunFullLayout) {
       graphRef.current.setLayout({
         type: "force",
         animation: false,
@@ -567,7 +578,8 @@ export function GraphCanvas({
         await graph.draw();
       }
 
-      if (layoutPlan.mode === "manual-full") {
+      // For initial-full/manual-full, patch draw alone is not enough. Force an explicit layout pass.
+      if (shouldRunFullLayout && !renderPatch.isInitial) {
         await graph.layout(graph.getLayout?.());
       }
 
@@ -584,10 +596,12 @@ export function GraphCanvas({
       applyHighlight(selectedNodeIdRef.current, selectedEdgeIdRef.current, true);
 
       clearScheduledPositionPersist();
-      persistPositionsRafRef.current = requestAnimationFrame(() => {
-        persistVisibleNodePositions(layoutPlan.mode === "incremental-insert" ? "seed" : "layout");
-        persistPositionsRafRef.current = null;
-      });
+      if (layoutPlan.mode !== "initial-full") {
+        persistPositionsRafRef.current = requestAnimationFrame(() => {
+          persistVisibleNodePositions(layoutPlan.mode === "incremental-insert" ? "seed" : "layout");
+          persistPositionsRafRef.current = null;
+        });
+      }
 
       clearScheduledFit();
       if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full") {
