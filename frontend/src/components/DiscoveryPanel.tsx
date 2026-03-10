@@ -36,6 +36,21 @@ type DiscoveryRuntimeState = {
   relationTypes: string[];
 };
 
+type DiscoveryRenderCoverageState = {
+  workingNodeCount: number;
+  workingEdgeCount: number;
+  entityTypes: Array<{
+    key: string;
+    count: number;
+  }>;
+  relationTypes: Array<{
+    key: string;
+    count: number;
+  }>;
+  selectedEntityTypes: string[];
+  selectedRelationTypes: string[];
+};
+
 type DiscoveryPanelProps = {
   seeds: SuggestItem[];
   searchQuery: DiscoveryEntityCandidateQueryState;
@@ -46,6 +61,7 @@ type DiscoveryPanelProps = {
   seedIdSet: Set<number>;
   query: DiscoveryQueryState;
   runtime: DiscoveryRuntimeState;
+  renderCoverage: DiscoveryRenderCoverageState;
   entityTypeOptions: EntityTypeItem[];
   resultFacets: {
     entityTypes: GraphDiscoveryEntityFacetItem[];
@@ -115,6 +131,7 @@ type DiscoveryPanelProps = {
   onLoadCandidateSubgraph: (item: DiscoveryEntityCandidateItem) => void;
   onUpdateQuery: (patch: Partial<DiscoveryQueryState>) => void;
   onUpdateRuntime: (patch: Partial<DiscoveryRuntimeState>) => void;
+  onUpdateRenderCoverage: (patch: Partial<Pick<DiscoveryRenderCoverageState, "selectedEntityTypes" | "selectedRelationTypes">>) => void;
   onSetRenderedPanelCollapsed: (next: boolean) => void;
   onSetDroppedPanelCollapsed: (next: boolean) => void;
   onLocateNode: (vid: number) => void;
@@ -265,6 +282,7 @@ export function DiscoveryPanel({
   seedIdSet,
   query,
   runtime,
+  renderCoverage,
   entityTypeOptions,
   resultFacets,
   resultStats,
@@ -292,6 +310,7 @@ export function DiscoveryPanel({
   onLoadCandidateSubgraph,
   onUpdateQuery,
   onUpdateRuntime,
+  onUpdateRenderCoverage,
   onSetRenderedPanelCollapsed,
   onSetDroppedPanelCollapsed,
   onLocateNode,
@@ -305,6 +324,8 @@ export function DiscoveryPanel({
 
   const runtimeEntityTypeSet = useMemo(() => new Set(runtime.entityTypes), [runtime.entityTypes]);
   const runtimeRelationTypeSet = useMemo(() => new Set(runtime.relationTypes), [runtime.relationTypes]);
+  const coverageEntityTypeSet = useMemo(() => new Set(renderCoverage.selectedEntityTypes), [renderCoverage.selectedEntityTypes]);
+  const coverageRelationTypeSet = useMemo(() => new Set(renderCoverage.selectedRelationTypes), [renderCoverage.selectedRelationTypes]);
 
   useEffect(() => {
     if (!preview.open) return;
@@ -378,6 +399,8 @@ export function DiscoveryPanel({
       }));
   const availableEntityFacetKeys = (resultFacets?.entityTypes || []).map((item) => item.entity_type);
   const availableRelationFacetKeys = (resultFacets?.relationTypes || []).map((item) => item.relation_type);
+  const coverageEntityTypeKeys = renderCoverage.entityTypes.map((item) => item.key);
+  const coverageRelationTypeKeys = renderCoverage.relationTypes.map((item) => item.key);
 
   function applyEntityFacetSelection(nextEntityTypes: string[]) {
     onUpdateRuntime({ entityTypes: nextEntityTypes });
@@ -387,6 +410,18 @@ export function DiscoveryPanel({
   function applyRelationFacetSelection(nextRelationTypes: string[]) {
     onUpdateRuntime({ relationTypes: nextRelationTypes });
     onUpdateQuery({ allowedRelationTypes: nextRelationTypes });
+  }
+
+  function applyRenderCoverageEntitySelection(nextEntityTypes: string[]) {
+    onUpdateRenderCoverage({ selectedEntityTypes: nextEntityTypes });
+  }
+
+  function applyRenderCoverageRelationSelection(nextRelationTypes: string[]) {
+    onUpdateRenderCoverage({ selectedRelationTypes: nextRelationTypes });
+  }
+
+  function renderTypeLabel(key: string) {
+    return key || "(empty)";
   }
 
   const statsItems = resultStats
@@ -647,7 +682,59 @@ export function DiscoveryPanel({
       </div>
 
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
-        <div style={{ fontSize: 13, fontWeight: 700 }}>Filters & Info</div>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Render Coverage Controls</div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Working Set Nodes</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>{renderCoverage.workingNodeCount}</div>
+          </div>
+          <div style={{ border: "1px solid #eee", borderRadius: 8, background: "#fff", padding: 8 }}>
+            <div style={{ fontSize: 11, color: "#666" }}>Working Set Edges</div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 600 }}>{renderCoverage.workingEdgeCount}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Entity Types</div>
+          <CheckboxList
+            items={coverageEntityTypeKeys}
+            checked={coverageEntityTypeSet}
+            renderLabel={(key) => {
+              const found = renderCoverage.entityTypes.find((item) => item.key === key);
+              return `${renderTypeLabel(key)} (${found?.count ?? 0})`;
+            }}
+            onToggle={(key) => applyRenderCoverageEntitySelection(toggleArrayValue(renderCoverage.selectedEntityTypes, key))}
+            onSelectAll={() => applyRenderCoverageEntitySelection([...coverageEntityTypeKeys])}
+            onClear={() => applyRenderCoverageEntitySelection([])}
+            emptyText="当前 working set 中暂无实体类型"
+          />
+        </div>
+
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ fontSize: 12, fontWeight: 600 }}>Relationship Types</div>
+          <CheckboxList
+            items={coverageRelationTypeKeys}
+            checked={coverageRelationTypeSet}
+            renderLabel={(key) => {
+              const found = renderCoverage.relationTypes.find((item) => item.key === key);
+              const display = relationDisplay(key) || renderTypeLabel(key);
+              return `${display} (${found?.count ?? 0})`;
+            }}
+            onToggle={(key) => applyRenderCoverageRelationSelection(toggleArrayValue(renderCoverage.selectedRelationTypes, key))}
+            onSelectAll={() => applyRenderCoverageRelationSelection([...coverageRelationTypeKeys])}
+            onClear={() => applyRenderCoverageRelationSelection([])}
+            emptyText="当前 working set 中暂无关系类型"
+          />
+        </div>
+
+        <div style={{ fontSize: 12, color: "#666" }}>
+          这里控制的是当前 working set 到 visibleGraph 的即时渲染覆盖，不请求后端，也不会改写 hidden_by_user / dropped_*。
+        </div>
+      </div>
+
+      <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>Next Discovery Input Filters</div>
 
         <div style={{ display: "grid", gap: 8 }}>
           <div style={{ fontSize: 12, fontWeight: 600 }}>Entity Types</div>
@@ -656,8 +743,7 @@ export function DiscoveryPanel({
             checked={runtimeEntityTypeSet}
             renderLabel={(key) => {
               const found = resultFacets?.entityTypes.find((item) => item.entity_type === key);
-              if (!found) return key;
-              return `${key} (${found.count})`;
+              return found ? `${renderTypeLabel(key)} (${found.count})` : renderTypeLabel(key);
             }}
             onToggle={(key) => applyEntityFacetSelection(toggleArrayValue(runtime.entityTypes, key))}
             onSelectAll={() => applyEntityFacetSelection([...availableEntityFacetKeys])}
@@ -673,7 +759,7 @@ export function DiscoveryPanel({
             checked={runtimeRelationTypeSet}
             renderLabel={(key) => {
               const found = resultFacets?.relationTypes.find((item) => item.relation_type === key);
-              const display = relationDisplay(key) || key;
+              const display = relationDisplay(key) || renderTypeLabel(key);
               return found ? `${display} (${found.count})` : display;
             }}
             onToggle={(key) => applyRelationFacetSelection(toggleArrayValue(runtime.relationTypes, key))}
@@ -684,7 +770,7 @@ export function DiscoveryPanel({
         </div>
 
         <div style={{ fontSize: 12, color: "#666" }}>
-          这些是全局 discovery 过滤条件，仅用于下一次“重新生成关系图”。节点级 expand 使用独立的本次 expand 过滤器。
+          这一组仍然只作用于下一次“重新生成关系图”。当前图的即时显示优先由上面的 Render Coverage Controls 生效。
         </div>
       </div>
 

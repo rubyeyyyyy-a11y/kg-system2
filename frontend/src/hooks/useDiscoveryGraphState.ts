@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { graphDiscoveryExpand } from "../api/kg";
 import type {
@@ -23,6 +23,11 @@ export type DroppedNodeRecord = {
   reason: DroppedNodeReason;
   supportEdges: EdgeBrief[];
   sourceNodeId: number | null;
+};
+
+export type DiscoveryRenderCoverageItem = {
+  key: string;
+  count: number;
 };
 
 type CapabilityState = {
@@ -140,6 +145,14 @@ function mergeUniqueEdges(edges: EdgeBrief[]) {
   return Array.from(next.values());
 }
 
+function areSetsEqual<T>(a: Set<T>, b: Set<T>) {
+  if (a.size !== b.size) return false;
+  for (const item of a) {
+    if (!b.has(item)) return false;
+  }
+  return true;
+}
+
 export function useDiscoveryGraphState({
   graphNodes,
   graphEdges,
@@ -158,6 +171,10 @@ export function useDiscoveryGraphState({
   const [expandSessionMap, setExpandSessionMap] = useState<Record<string, NodeExpandSession>>({});
   const [expandingNodeIds, setExpandingNodeIds] = useState<Set<number>>(new Set());
   const [nodePositionCache] = useState<Record<string, { x?: number; y?: number }>>({});
+  const [selectedEntityTypeSet, setSelectedEntityTypeSet] = useState<Set<string>>(new Set());
+  const [selectedRelationTypeSet, setSelectedRelationTypeSet] = useState<Set<string>>(new Set());
+  const previousAvailableEntityTypeSetRef = useRef<Set<string>>(new Set());
+  const previousAvailableRelationTypeSetRef = useRef<Set<string>>(new Set());
 
   const graphEntityMap = useMemo(() => {
     const next = new Map<number, NodeBrief>();
@@ -185,28 +202,47 @@ export function useDiscoveryGraphState({
     };
   }
 
-  const renderedNodeIds = useMemo(() => {
+  const workingNodeIds = useMemo(() => {
     const next = new Set<number>();
     for (const [nodeId, tags] of Object.entries(nodeSourceTagMap)) {
       if ((tags || []).length <= 0) continue;
       const numericId = Number(nodeId);
-      if (hiddenNodeIds.has(numericId)) continue;
       next.add(numericId);
     }
     return next;
-  }, [hiddenNodeIds, nodeSourceTagMap]);
+  }, [nodeSourceTagMap]);
 
-  const renderedEdgeIds = useMemo(() => {
+  const renderedNodeIds = useMemo(() => {
+    const next = new Set<number>();
+    for (const nodeId of workingNodeIds) {
+      if (hiddenNodeIds.has(nodeId)) continue;
+      next.add(nodeId);
+    }
+    return next;
+  }, [hiddenNodeIds, workingNodeIds]);
+
+  const workingEdgeKeys = useMemo(() => {
     const next = new Set<string>();
     for (const [key, tags] of Object.entries(edgeSourceTagMap)) {
       if ((tags || []).length <= 0) continue;
+      const edge = edgeMap.get(key);
+      if (!edge) continue;
+      if (!workingNodeIds.has(edge.source) || !workingNodeIds.has(edge.target)) continue;
+      next.add(key);
+    }
+    return next;
+  }, [edgeMap, edgeSourceTagMap, workingNodeIds]);
+
+  const renderedEdgeIds = useMemo(() => {
+    const next = new Set<string>();
+    for (const key of workingEdgeKeys) {
       const edge = edgeMap.get(key);
       if (!edge) continue;
       if (!renderedNodeIds.has(edge.source) || !renderedNodeIds.has(edge.target)) continue;
       next.add(key);
     }
     return next;
-  }, [edgeMap, edgeSourceTagMap, renderedNodeIds]);
+  }, [edgeMap, renderedNodeIds, workingEdgeKeys]);
 
   function upsertDroppedCandidates(candidates: GraphDiscoveryDroppedCandidate[], sourceTag: DiscoveryGraphSourceTag) {
     if (candidates.length <= 0) return;
@@ -286,6 +322,10 @@ export function useDiscoveryGraphState({
     setNodeCapabilityMap({});
     setExpandSessionMap({});
     setExpandingNodeIds(new Set());
+    setSelectedEntityTypeSet(new Set());
+    setSelectedRelationTypeSet(new Set());
+    previousAvailableEntityTypeSetRef.current = new Set();
+    previousAvailableRelationTypeSetRef.current = new Set();
   }
 
   function hideRenderedNode(nodeId: number) {
@@ -638,20 +678,117 @@ export function useDiscoveryGraphState({
     [droppedEntries]
   );
 
+  const availableEntityTypes = useMemo(() => {
+    const countMap = new Map<string, number>();
+    for (const nodeId of workingNodeIds) {
+      const node = graphEntityMap.get(nodeId);
+      if (!node) continue;
+      const typeKey = String(node.entity_type || "");
+      countMap.set(typeKey, (countMap.get(typeKey) || 0) + 1);
+    }
+    return Array.from(countMap.entries())
+      .map(([key, count]) => ({ key, count }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }, [graphEntityMap, workingNodeIds]);
+
+  const availableRelationTypes = useMemo(() => {
+    const countMap = new Map<string, number>();
+    for (const key of workingEdgeKeys) {
+      const edge = edgeMap.get(key);
+      if (!edge) continue;
+      const relationKey = String(edge.relation || "");
+      countMap.set(relationKey, (countMap.get(relationKey) || 0) + 1);
+    }
+    return Array.from(countMap.entries())
+      .map(([key, count]) => ({ key, count }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }, [edgeMap, workingEdgeKeys]);
+
+  useEffect(() => {
+    const previousAvailable = previousAvailableEntityTypeSetRef.current;
+    const nextAvailable = new Set(availableEntityTypes.map((item) => item.key));
+    setSelectedEntityTypeSet((prev) => {
+      const next = new Set<string>();
+      for (const item of availableEntityTypes) {
+        if (!previousAvailable.has(item.key) || prev.has(item.key)) {
+          next.add(item.key);
+        }
+      }
+      return areSetsEqual(prev, next) ? prev : next;
+    });
+    previousAvailableEntityTypeSetRef.current = nextAvailable;
+  }, [availableEntityTypes]);
+
+  useEffect(() => {
+    const previousAvailable = previousAvailableRelationTypeSetRef.current;
+    const nextAvailable = new Set(availableRelationTypes.map((item) => item.key));
+    setSelectedRelationTypeSet((prev) => {
+      const next = new Set<string>();
+      for (const item of availableRelationTypes) {
+        if (!previousAvailable.has(item.key) || prev.has(item.key)) {
+          next.add(item.key);
+        }
+      }
+      return areSetsEqual(prev, next) ? prev : next;
+    });
+    previousAvailableRelationTypeSetRef.current = nextAvailable;
+  }, [availableRelationTypes]);
+
+  const visibleNodeIdSet = useMemo(() => {
+    const next = new Set<number>();
+    for (const nodeId of renderedNodeIds) {
+      const node = graphEntityMap.get(nodeId);
+      if (!node) continue;
+      const typeKey = String(node.entity_type || "");
+      if (!selectedEntityTypeSet.has(typeKey)) continue;
+      next.add(nodeId);
+    }
+    return next;
+  }, [graphEntityMap, renderedNodeIds, selectedEntityTypeSet]);
+
+  const visibleEdgeKeySet = useMemo(() => {
+    const next = new Set<string>();
+    for (const key of workingEdgeKeys) {
+      const edge = edgeMap.get(key);
+      if (!edge) continue;
+      const relationKey = String(edge.relation || "");
+      if (!selectedRelationTypeSet.has(relationKey)) continue;
+      if (!visibleNodeIdSet.has(edge.source) || !visibleNodeIdSet.has(edge.target)) continue;
+      next.add(key);
+    }
+    return next;
+  }, [edgeMap, selectedRelationTypeSet, visibleNodeIdSet, workingEdgeKeys]);
+
+  function setSelectedEntityTypes(nextKeys: string[]) {
+    const allowed = new Set(availableEntityTypes.map((item) => item.key));
+    setSelectedEntityTypeSet(
+      new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)))
+    );
+  }
+
+  function setSelectedRelationTypes(nextKeys: string[]) {
+    const allowed = new Set(availableRelationTypes.map((item) => item.key));
+    setSelectedRelationTypeSet(
+      new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)))
+    );
+  }
+
   const visibleGraphNodes = useMemo(
-    () => graphNodes.filter((node) => renderedNodeIds.has(node.id)).map((node) => nodeWithSourceTags(node)),
-    [graphNodes, renderedNodeIds, nodeSourceTagMap]
+    () => graphNodes.filter((node) => visibleNodeIdSet.has(node.id)).map((node) => nodeWithSourceTags(node)),
+    [graphNodes, nodeSourceTagMap, visibleNodeIdSet]
   );
   const visibleGraphEdges = useMemo(
     () =>
       graphEdges.filter((edge) => {
         const key = edgeKey(edge);
-        return renderedEdgeIds.has(key) && renderedNodeIds.has(edge.source) && renderedNodeIds.has(edge.target);
+        return visibleEdgeKeySet.has(key);
       }).map((edge) => edgeWithSourceTags(edge)),
-    [edgeSourceTagMap, graphEdges, renderedEdgeIds, renderedNodeIds]
+    [edgeSourceTagMap, graphEdges, visibleEdgeKeySet]
   );
 
   return {
+    workingNodeIds,
+    workingEdgeKeys,
     renderedNodeIds,
     renderedEdgeIds,
     hiddenNodeIds,
@@ -672,6 +809,18 @@ export function useDiscoveryGraphState({
     forceRenderDroppedNode,
     probeNodeExpand,
     toggleNodeExpand,
+    workingNodeCount: workingNodeIds.size,
+    workingEdgeCount: workingEdgeKeys.size,
+    availableEntityTypes,
+    availableRelationTypes,
+    selectedEntityTypes: Array.from(selectedEntityTypeSet).sort((a, b) => a.localeCompare(b)),
+    selectedRelationTypes: Array.from(selectedRelationTypeSet).sort((a, b) => a.localeCompare(b)),
+    selectedEntityTypeSet,
+    selectedRelationTypeSet,
+    setSelectedEntityTypes,
+    setSelectedRelationTypes,
+    visibleNodeIdSet,
+    visibleEdgeKeySet,
     visibleGraphNodes,
     visibleGraphEdges,
     renderedNodes,

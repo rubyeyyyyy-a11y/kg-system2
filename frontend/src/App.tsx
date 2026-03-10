@@ -1964,6 +1964,35 @@ export default function App() {
   const selectedNodeId = sel.kind === "node" ? String(sel.vid) : null;
   const selectedEdgeId = sel.kind === "edge" ? selectedEdgeGraphId : null;
 
+  useEffect(() => {
+    if (workspaceMode !== "discovery" || graphSourceMode !== "discovery") return;
+    if (sel.kind === "node" && !discoveryGraphState.visibleNodeIdSet.has(sel.vid)) {
+      handleClearSelection();
+      return;
+    }
+    if (sel.kind === "edge") {
+      const currentEdgeId =
+        selectedEdgeGraphId ||
+        edgeKey({
+          source: sel.src,
+          target: sel.dst,
+          rank: sel.rank,
+          relation: sel.relation,
+          edge_type: sel.edge_type,
+        } as EdgeBrief);
+      if (!discoveryGraphState.visibleEdgeKeySet.has(currentEdgeId)) {
+        handleClearSelection();
+      }
+    }
+  }, [
+    workspaceMode,
+    graphSourceMode,
+    sel,
+    selectedEdgeGraphId,
+    discoveryGraphState.visibleNodeIdSet,
+    discoveryGraphState.visibleEdgeKeySet,
+  ]);
+
   function handleSearchClick() {
     closeSuggestPanel();
     closeRawIdSuggestPanel();
@@ -2239,6 +2268,14 @@ export default function App() {
             seedIdSet={discoverySelectedSeedVidSet}
             query={discoveryQuery}
             runtime={discoveryRuntimeFilters}
+            renderCoverage={{
+              workingNodeCount: discoveryGraphState.workingNodeCount,
+              workingEdgeCount: discoveryGraphState.workingEdgeCount,
+              entityTypes: discoveryGraphState.availableEntityTypes,
+              relationTypes: discoveryGraphState.availableRelationTypes,
+              selectedEntityTypes: discoveryGraphState.selectedEntityTypes,
+              selectedRelationTypes: discoveryGraphState.selectedRelationTypes,
+            }}
             entityTypeOptions={entityTypeOptions}
             resultFacets={
               discoveryResult
@@ -2312,6 +2349,14 @@ export default function App() {
             }}
             onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
             onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
+            onUpdateRenderCoverage={(patch) => {
+              if (patch.selectedEntityTypes) {
+                discoveryGraphState.setSelectedEntityTypes(patch.selectedEntityTypes);
+              }
+              if (patch.selectedRelationTypes) {
+                discoveryGraphState.setSelectedRelationTypes(patch.selectedRelationTypes);
+              }
+            }}
             onSetRenderedPanelCollapsed={setDiscoveryRenderedPanelCollapsed}
             onSetDroppedPanelCollapsed={setDiscoveryDroppedPanelCollapsed}
             onLocateNode={locateNodeInGraph}
