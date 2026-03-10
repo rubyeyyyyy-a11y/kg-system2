@@ -21,10 +21,12 @@ import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch
 import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
 import { useDiscoveryGraphState } from "./hooks/useDiscoveryGraphState";
 import { useGraphLayoutController } from "./hooks/useGraphLayoutController";
+import { useGraphPatchBuilder } from "./hooks/useGraphPatchBuilder";
 import { useDiscoverySeeds } from "./hooks/useDiscoverySeeds";
 import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
 import { useGraphData } from "./hooks/useGraphData";
+import { useGraphViewModel } from "./hooks/useGraphViewModel";
 import { useGraphViewportController } from "./hooks/useGraphViewportController";
 import { useRawIdSuggest } from "./hooks/useRawIdSuggest";
 import { useRelationFilter } from "./hooks/useRelationFilter";
@@ -1644,40 +1646,6 @@ export default function App() {
     relationFilter.openPanel();
   }
 
-  const currentVisibleEdgeLabelDisplays = useMemo(() => {
-    const set = new Set<string>();
-    for (const e of visibleGraphEdges) {
-      const d = relationDisplay(e.relation);
-      if (d) set.add(d);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [visibleGraphEdges]);
-
-  useEffect(() => {
-    setEdgeLabelSelectedDisplays((prev) => {
-      if (!edgeLabelSelectionTouched) {
-        return [...currentVisibleEdgeLabelDisplays];
-      }
-      const allow = new Set(currentVisibleEdgeLabelDisplays);
-      return prev.filter((x) => allow.has(x));
-    });
-  }, [currentVisibleEdgeLabelDisplays, edgeLabelSelectionTouched]);
-
-  const edgeLabelSelectedSet = useMemo(
-    () => new Set(edgeLabelSelectedDisplays),
-    [edgeLabelSelectedDisplays]
-  );
-
-  const edgeLabelFilteredDisplays = useMemo(() => {
-    const kw = edgeLabelKeyword.trim().toLowerCase();
-    if (!kw) return currentVisibleEdgeLabelDisplays;
-    return currentVisibleEdgeLabelDisplays.filter((x) => x.toLowerCase().includes(kw));
-  }, [currentVisibleEdgeLabelDisplays, edgeLabelKeyword]);
-
-  const edgeLabelAllVisibleChecked =
-    edgeLabelFilteredDisplays.length > 0 &&
-    edgeLabelFilteredDisplays.every((x) => edgeLabelSelectedSet.has(x));
-
   function toggleEdgeLabelDisplay(disp: string) {
     setEdgeLabelSelectionTouched(true);
     setEdgeLabelSelectedDisplays((prev) => {
@@ -1723,49 +1691,14 @@ export default function App() {
     nodePositionCache: workspaceMode === "discovery" ? discoveryGraphState.nodePositionCache : undefined,
     renderMutation: activeRenderMutation,
   });
-
-  const { g6Data, edgeById } = useMemo(() => {
-    const nodes = visibleGraphNodes.map((n) => ({
-      id: String(n.id),
-      label: n.label,
-      style: (() => {
-        const position = nodePositionById.get(String(n.id));
-        if (!position) return undefined;
-        return {
-          x: position.x,
-          y: position.y,
-        };
-      })(),
-      data: (() => {
-        const typeColor = graphSourceMode === "discovery" && !activeSeedVidSet.has(n.id) ? discoveryTypeColor(n.entity_type) : null;
-        return {
-          ...n,
-          isSeed: activeSeedVidSet.has(n.id),
-          seedGroup: activeSeedVidSet.has(n.id) ? graphSourceMode : undefined,
-          isRoot: rootVid != null && n.id === rootVid,
-          hopLevel: visibleNodeHopLevelMap.get(n.id) ?? 99,
-          fillColor: typeColor?.fill,
-          strokeColor: typeColor?.stroke,
-        };
-      })(),
-    }));
-
-    const edgeMap = new Map<string, (typeof visibleGraphEdges)[number]>();
-    const edges = visibleGraphEdges.map((e) => {
-      // Identity for multi-edge: src**dst**rank
-      const id = edgeKey(e);
-      edgeMap.set(id, e);
-      return {
-        id,
-        source: String(e.source),
-        target: String(e.target),
-        label: e.relation || "",
-        data: e,
-      };
-    });
-
-    return { g6Data: { nodes, edges }, edgeById: edgeMap };
-  }, [
+  const {
+    viewModel,
+    currentVisibleEdgeLabelDisplays,
+    effectiveEdgeLabelSelectedDisplays,
+    edgeLabelSelectedSet,
+    edgeLabelFilteredDisplays,
+    edgeLabelAllVisibleChecked,
+  } = useGraphViewModel({
     visibleGraphNodes,
     visibleGraphEdges,
     rootVid,
@@ -1773,7 +1706,12 @@ export default function App() {
     activeSeedVidSet,
     graphSourceMode,
     nodePositionById,
-  ]);
+    discoveryTypeColor,
+    edgeLabelSelectedDisplays,
+    edgeLabelSelectionTouched,
+    edgeLabelKeyword,
+  });
+  const renderPatch = useGraphPatchBuilder(viewModel);
 
   const selectEdgeWithDetail = useCallback(
     (target: EdgeSearchItem, edgeId: string | null) => {
@@ -1801,7 +1739,7 @@ export default function App() {
   );
 
   function trySelectEdgeFromCurrentRenderedGraph(target: EdgeSearchItem): boolean {
-    const edgeId = findEdgeIdByIdentity(edgeById, {
+    const edgeId = findEdgeIdByIdentity(viewModel.edgeById, {
       src: Number(target.src),
       dst: Number(target.dst),
       rank: String(target.rank || "0"),
@@ -1874,7 +1812,7 @@ export default function App() {
     if (!pendingEdgeLocate) return;
     if (loadingGraph || loadingMultiGraph) return;
 
-    const edgeId = findEdgeIdByIdentity(edgeById, {
+    const edgeId = findEdgeIdByIdentity(viewModel.edgeById, {
       src: Number(pendingEdgeLocate.src),
       dst: Number(pendingEdgeLocate.dst),
       rank: String(pendingEdgeLocate.rank || "0"),
@@ -1909,7 +1847,7 @@ export default function App() {
     }
 
     setPendingEdgeLocate(null);
-  }, [pendingEdgeLocate, loadingGraph, loadingMultiGraph, edgeById, rootVid, graphEdges, selectEdgeWithDetail]);
+  }, [pendingEdgeLocate, loadingGraph, loadingMultiGraph, viewModel.edgeById, rootVid, graphEdges, selectEdgeWithDetail]);
 
   const selectedNodeBrief = useMemo(() => {
     if (sel.kind !== "node") return null;
@@ -2464,13 +2402,13 @@ export default function App() {
               <LoadingPanel message="统一关系发现结果尚未生成。请在左侧添加 seed 节点并运行 discovery。" style={{ minHeight: "100%" }} />
             ) : (
               <GraphCanvas
-                g6Data={g6Data}
-                edgeById={edgeById}
+                viewModel={viewModel}
+                renderPatch={renderPatch}
                 layoutPlan={layoutPlan}
                 viewportRequest={viewportRequest}
                 renderNodeLabels={renderNodeLabels}
                 renderEdgeLabels={renderEdgeLabels}
-                edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
+                edgeLabelSelectedDisplays={effectiveEdgeLabelSelectedDisplays}
                 showSelfLoops={showSelfLoops}
                 selectedNodeId={selectedNodeId}
                 selectedEdgeId={selectedEdgeId}
@@ -2505,7 +2443,7 @@ export default function App() {
             setEdgeLabelPickerOpen={setEdgeLabelPickerOpen}
             edgeLabelKeyword={edgeLabelKeyword}
             setEdgeLabelKeyword={setEdgeLabelKeyword}
-            edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
+            edgeLabelSelectedDisplays={effectiveEdgeLabelSelectedDisplays}
             setEdgeLabelSelectedDisplays={setEdgeLabelSelectedDisplays}
             setEdgeLabelSelectionTouched={setEdgeLabelSelectionTouched}
             currentVisibleEdgeLabelDisplays={currentVisibleEdgeLabelDisplays}

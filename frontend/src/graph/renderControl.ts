@@ -48,6 +48,42 @@ export type GraphViewportRequest = {
   nodeId: string | null;
 };
 
+export type GraphViewNode = {
+  id: string;
+  label: string;
+  data: Record<string, unknown>;
+  style?: {
+    x?: number;
+    y?: number;
+  };
+  signature: string;
+};
+
+export type GraphViewEdge = {
+  id: string;
+  source: string;
+  target: string;
+  label: string;
+  data: Record<string, unknown>;
+  signature: string;
+};
+
+export type GraphViewModel = {
+  nodes: GraphViewNode[];
+  edges: GraphViewEdge[];
+  edgeById: Map<string, any>;
+};
+
+export type GraphRenderPatch = {
+  isInitial: boolean;
+  addedNodes: GraphViewNode[];
+  updatedNodes: GraphViewNode[];
+  removedNodeIds: string[];
+  addedEdges: GraphViewEdge[];
+  updatedEdges: GraphViewEdge[];
+  removedEdgeIds: string[];
+};
+
 export function createGraphRenderMutation(
   graphMode: GraphMode,
   reason: GraphRenderReason,
@@ -129,5 +165,70 @@ export function buildIncrementalNodePosition(
   return {
     x: anchor.x + Math.cos(angle) * radius,
     y: anchor.y + Math.sin(angle) * radius,
+  };
+}
+
+export function buildGraphRenderPatch(previous: GraphViewModel | null, current: GraphViewModel): GraphRenderPatch {
+  if (!previous) {
+    return {
+      isInitial: true,
+      addedNodes: current.nodes,
+      updatedNodes: [],
+      removedNodeIds: [],
+      addedEdges: current.edges,
+      updatedEdges: [],
+      removedEdgeIds: [],
+    };
+  }
+
+  const previousNodesById = new Map(previous.nodes.map((node) => [node.id, node]));
+  const currentNodesById = new Map(current.nodes.map((node) => [node.id, node]));
+  const previousEdgesById = new Map(previous.edges.map((edge) => [edge.id, edge]));
+  const currentEdgesById = new Map(current.edges.map((edge) => [edge.id, edge]));
+
+  const addedNodes: GraphViewNode[] = [];
+  const updatedNodes: GraphViewNode[] = [];
+  const removedNodeIds: string[] = [];
+
+  for (const node of current.nodes) {
+    const previousNode = previousNodesById.get(node.id);
+    if (!previousNode) {
+      addedNodes.push(node);
+      continue;
+    }
+    if (previousNode.signature !== node.signature) {
+      updatedNodes.push(node);
+    }
+  }
+  for (const node of previous.nodes) {
+    if (!currentNodesById.has(node.id)) removedNodeIds.push(node.id);
+  }
+
+  const addedEdges: GraphViewEdge[] = [];
+  const updatedEdges: GraphViewEdge[] = [];
+  const removedEdgeIds: string[] = [];
+
+  for (const edge of current.edges) {
+    const previousEdge = previousEdgesById.get(edge.id);
+    if (!previousEdge) {
+      addedEdges.push(edge);
+      continue;
+    }
+    if (previousEdge.signature !== edge.signature) {
+      updatedEdges.push(edge);
+    }
+  }
+  for (const edge of previous.edges) {
+    if (!currentEdgesById.has(edge.id)) removedEdgeIds.push(edge.id);
+  }
+
+  return {
+    isInitial: false,
+    addedNodes,
+    updatedNodes,
+    removedNodeIds,
+    addedEdges,
+    updatedEdges,
+    removedEdgeIds,
   };
 }

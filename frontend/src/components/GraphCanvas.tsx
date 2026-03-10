@@ -5,6 +5,8 @@ import { Circle as G6Circle, Graph, register } from "@antv/g6";
 import type {
   CachedNodePosition,
   GraphLayoutPlan,
+  GraphRenderPatch,
+  GraphViewModel,
   GraphViewportRequest,
 } from "../graph/renderControl";
 import type { EdgeBrief } from "../types/kg";
@@ -96,8 +98,8 @@ if (!(globalThis as Record<string, unknown>)[TWO_LINE_NODE_REGISTER_FLAG]) {
 }
 
 type GraphCanvasProps = {
-  g6Data: G6Data;
-  edgeById: Map<string, EdgeBrief>;
+  viewModel: GraphViewModel;
+  renderPatch: GraphRenderPatch;
   layoutPlan: GraphLayoutPlan;
   viewportRequest: GraphViewportRequest;
   renderNodeLabels: boolean;
@@ -119,8 +121,8 @@ type GraphCanvasProps = {
 };
 
 export function GraphCanvas({
-  g6Data,
-  edgeById,
+  viewModel,
+  renderPatch,
   layoutPlan,
   viewportRequest,
   renderNodeLabels,
@@ -137,8 +139,8 @@ export function GraphCanvas({
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
-  const g6DataRef = useRef<G6Data>(g6Data);
-  const edgeByIdRef = useRef<Map<string, EdgeBrief>>(new Map());
+  const viewModelRef = useRef<GraphViewModel>(viewModel);
+  const edgeByIdRef = useRef<Map<string, EdgeBrief>>(viewModel.edgeById);
   const onNodePositionChangeRef = useRef<typeof onNodePositionChange>(onNodePositionChange);
   const selectedNodeIdRef = useRef<string | null>(null);
   const selectedEdgeIdRef = useRef<string | null>(null);
@@ -214,18 +216,33 @@ export function GraphCanvas({
 
   function persistVisibleNodePositions(source: CachedNodePosition["source"] = "layout") {
     if (!onNodePositionChangeRef.current) return;
-    const positions = collectNodePositions(g6DataRef.current.nodes.map((node) => node.id));
+    const positions = collectNodePositions(viewModelRef.current.nodes.map((node) => node.id));
     if (Object.keys(positions).length <= 0) return;
     onNodePositionChangeRef.current(positions, source);
   }
 
-  useEffect(() => {
-    g6DataRef.current = g6Data;
-  }, [g6Data]);
+  function toG6Data(model: GraphViewModel): G6Data {
+    return {
+      nodes: model.nodes.map((node) => ({
+        id: node.id,
+        label: node.label,
+        data: node.data,
+        style: node.style,
+      })),
+      edges: model.edges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.label,
+        data: edge.data as EdgeBrief,
+      })),
+    };
+  }
 
   useEffect(() => {
-    edgeByIdRef.current = edgeById;
-  }, [edgeById]);
+    viewModelRef.current = viewModel;
+    edgeByIdRef.current = viewModel.edgeById;
+  }, [viewModel]);
 
   useEffect(() => {
     onNodePositionChangeRef.current = onNodePositionChange;
@@ -497,35 +514,88 @@ export function GraphCanvas({
     }
     // Keep render aligned with latest container size; avoids stale canvas after layout changes.
     resizeGraphToContainer();
-    graphRef.current.setData(g6Data);
-    graphRef.current.render();
+    const graph = graphRef.current as any;
+    const applyPatch = async () => {
+      if (renderPatch.isInitial) {
+        graph.setData(toG6Data(viewModel));
+        await graph.render();
+      } else {
+        if (renderPatch.removedEdgeIds.length > 0) graph.removeEdgeData(renderPatch.removedEdgeIds);
+        if (renderPatch.removedNodeIds.length > 0) graph.removeNodeData(renderPatch.removedNodeIds);
+        if (renderPatch.addedNodes.length > 0) {
+          graph.addNodeData(
+            renderPatch.addedNodes.map((node) => ({
+              id: node.id,
+              label: node.label,
+              data: node.data,
+              style: node.style,
+            }))
+          );
+        }
+        if (renderPatch.addedEdges.length > 0) {
+          graph.addEdgeData(
+            renderPatch.addedEdges.map((edge) => ({
+              id: edge.id,
+              source: edge.source,
+              target: edge.target,
+              label: edge.label,
+              data: edge.data,
+            }))
+          );
+        }
+        if (renderPatch.updatedNodes.length > 0) {
+          graph.updateNodeData(
+            renderPatch.updatedNodes.map((node) => ({
+              id: node.id,
+              label: node.label,
+              data: node.data,
+              style: node.style,
+            }))
+          );
+        }
+        if (renderPatch.updatedEdges.length > 0) {
+          graph.updateEdgeData(
+            renderPatch.updatedEdges.map((edge) => ({
+              id: edge.id,
+              source: edge.source,
+              target: edge.target,
+              label: edge.label,
+              data: edge.data,
+            }))
+          );
+        }
+        await graph.draw();
+      }
 
-    visibilitySnapshotRef.current = createVisibilitySnapshot(g6Data.edges);
-    hiddenEdgeIdSetRef.current = new Set();
-    applyVisibility(
-      graphRef.current as any,
-      visibilitySnapshotRef.current,
-      hiddenEdgeIdSetRef,
-      { showSelfLoops: showSelfLoopsRef.current },
-      "set-data"
-    );
+      visibilitySnapshotRef.current = createVisibilitySnapshot(toG6Data(viewModel).edges);
+      hiddenEdgeIdSetRef.current = new Set();
+      applyVisibility(
+        graphRef.current as any,
+        visibilitySnapshotRef.current,
+        hiddenEdgeIdSetRef,
+        { showSelfLoops: showSelfLoopsRef.current },
+        renderPatch.isInitial ? "set-data" : "patch-data"
+      );
 
-    applyHighlight(selectedNodeIdRef.current, selectedEdgeIdRef.current, true);
+      applyHighlight(selectedNodeIdRef.current, selectedEdgeIdRef.current, true);
 
-    clearScheduledPositionPersist();
-    persistPositionsRafRef.current = requestAnimationFrame(() => {
-      persistVisibleNodePositions(layoutPlan.mode === "incremental-insert" ? "seed" : "layout");
-      persistPositionsRafRef.current = null;
-    });
-
-    clearScheduledFit();
-    if (layoutPlan.mode === "initial-full") {
-      fitAfterRenderRafRef.current = requestAnimationFrame(() => {
-        safeFitView();
-        fitAfterRenderRafRef.current = null;
+      clearScheduledPositionPersist();
+      persistPositionsRafRef.current = requestAnimationFrame(() => {
+        persistVisibleNodePositions(layoutPlan.mode === "incremental-insert" ? "seed" : "layout");
+        persistPositionsRafRef.current = null;
       });
-    }
-  }, [g6Data, layoutPlan]);
+
+      clearScheduledFit();
+      if (layoutPlan.mode === "initial-full") {
+        fitAfterRenderRafRef.current = requestAnimationFrame(() => {
+          safeFitView();
+          fitAfterRenderRafRef.current = null;
+        });
+      }
+    };
+
+    void applyPatch();
+  }, [layoutPlan, renderPatch, viewModel]);
 
   useEffect(() => {
     if (!graphRef.current) return;
@@ -552,7 +622,29 @@ export function GraphCanvas({
   useEffect(() => {
     if (!graphRef.current) return;
     try {
-      graphRef.current.render();
+      const graph = graphRef.current as any;
+      if (viewModelRef.current.nodes.length > 0) {
+        graph.updateNodeData(
+          viewModelRef.current.nodes.map((node) => ({
+            id: node.id,
+            label: node.label,
+            data: node.data,
+            style: node.style,
+          }))
+        );
+      }
+      if (viewModelRef.current.edges.length > 0) {
+        graph.updateEdgeData(
+          viewModelRef.current.edges.map((edge) => ({
+            id: edge.id,
+            source: edge.source,
+            target: edge.target,
+            label: edge.label,
+            data: edge.data,
+          }))
+        );
+      }
+      void graph.draw();
       applyVisibility(
         graphRef.current as any,
         visibilitySnapshotRef.current,
@@ -564,7 +656,7 @@ export function GraphCanvas({
     } catch {
       // ignore
     }
-  }, [renderNodeLabels, renderEdgeLabels, edgeLabelSelectedDisplays]);
+  }, [renderNodeLabels, renderEdgeLabels, edgeLabelSelectedDisplays, viewModel]);
 
   useEffect(() => {
     return () => {
