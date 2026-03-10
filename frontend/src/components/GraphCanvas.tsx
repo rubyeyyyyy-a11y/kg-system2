@@ -2,6 +2,11 @@ import { useEffect, useRef } from "react";
 import type { CSSProperties } from "react";
 import { Text } from "@antv/g";
 import { Circle as G6Circle, Graph, register } from "@antv/g6";
+import type {
+  CachedNodePosition,
+  GraphLayoutPlan,
+  GraphViewportRequest,
+} from "../graph/renderControl";
 import type { EdgeBrief } from "../types/kg";
 import { relationDisplay } from "../utils/kg";
 import { applyVisibility, createVisibilitySnapshot } from "../utils/visibilityManager";
@@ -10,6 +15,10 @@ type G6Node = {
   id: string;
   label: string;
   data: Record<string, unknown>;
+  style?: {
+    x?: number;
+    y?: number;
+  };
 };
 
 type G6Edge = {
@@ -89,6 +98,8 @@ if (!(globalThis as Record<string, unknown>)[TWO_LINE_NODE_REGISTER_FLAG]) {
 type GraphCanvasProps = {
   g6Data: G6Data;
   edgeById: Map<string, EdgeBrief>;
+  layoutPlan: GraphLayoutPlan;
+  viewportRequest: GraphViewportRequest;
   renderNodeLabels: boolean;
   renderEdgeLabels: boolean;
   edgeLabelSelectedDisplays: string[];
@@ -97,16 +108,21 @@ type GraphCanvasProps = {
   selectedEdgeId: string | null;
   onNodeClick: (vid: number) => void;
   onEdgeClick: (edgeId: string, edge: EdgeBrief) => void;
+  onNodePositionChange?: (
+    positions: Record<string, { x: number; y: number }>,
+    source?: CachedNodePosition["source"]
+  ) => void;
   containerStyle?: CSSProperties;
   registerApplyHighlight?: (
     fn: (nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void
   ) => void;
-  registerFocusNode?: (fn: (nodeId: string) => void) => void;
 };
 
 export function GraphCanvas({
   g6Data,
   edgeById,
+  layoutPlan,
+  viewportRequest,
   renderNodeLabels,
   renderEdgeLabels,
   edgeLabelSelectedDisplays,
@@ -115,13 +131,15 @@ export function GraphCanvas({
   selectedEdgeId,
   onNodeClick,
   onEdgeClick,
+  onNodePositionChange,
   containerStyle,
   registerApplyHighlight,
-  registerFocusNode,
 }: GraphCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<Graph | null>(null);
+  const g6DataRef = useRef<G6Data>(g6Data);
   const edgeByIdRef = useRef<Map<string, EdgeBrief>>(new Map());
+  const onNodePositionChangeRef = useRef<typeof onNodePositionChange>(onNodePositionChange);
   const selectedNodeIdRef = useRef<string | null>(null);
   const selectedEdgeIdRef = useRef<string | null>(null);
 
@@ -129,17 +147,10 @@ export function GraphCanvas({
   const renderEdgeLabelsRef = useRef(false);
   const edgeLabelSelectedDisplaysRef = useRef<Set<string>>(new Set());
   const showSelfLoopsRef = useRef<boolean>(false);
-  const resizeFitTimerRef = useRef<number | null>(null);
-  const initialFitDoneRef = useRef(false);
-  const initialFitRafRef = useRef<number | null>(null);
+  const fitAfterRenderRafRef = useRef<number | null>(null);
+  const persistPositionsRafRef = useRef<number | null>(null);
   const visibilitySnapshotRef = useRef(createVisibilitySnapshot([]));
   const hiddenEdgeIdSetRef = useRef<Set<string>>(new Set());
-
-  function clearResizeFitTimer() {
-    if (resizeFitTimerRef.current == null) return;
-    window.clearTimeout(resizeFitTimerRef.current);
-    resizeFitTimerRef.current = null;
-  }
 
   function safeFitView() {
     const g: any = graphRef.current;
@@ -171,18 +182,54 @@ export function GraphCanvas({
     resizeGraphTo(el.clientWidth, el.clientHeight);
   }
 
-  function scheduleResizeFit() {
-    clearResizeFitTimer();
-    // Resize fires frequently while dragging/splitting; debounce fitView to avoid jitter.
-    resizeFitTimerRef.current = window.setTimeout(() => {
-      resizeFitTimerRef.current = null;
-      safeFitView();
-    }, 200);
+  function clearScheduledFit() {
+    if (fitAfterRenderRafRef.current == null) return;
+    cancelAnimationFrame(fitAfterRenderRafRef.current);
+    fitAfterRenderRafRef.current = null;
   }
+
+  function clearScheduledPositionPersist() {
+    if (persistPositionsRafRef.current == null) return;
+    cancelAnimationFrame(persistPositionsRafRef.current);
+    persistPositionsRafRef.current = null;
+  }
+
+  function collectNodePositions(nodeIds: string[]) {
+    const g: any = graphRef.current;
+    const positions: Record<string, { x: number; y: number }> = {};
+    if (!g) return positions;
+    for (const nodeId of nodeIds) {
+      try {
+        const position = g.getElementPosition(nodeId);
+        const x = Number(position?.[0]);
+        const y = Number(position?.[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        positions[nodeId] = { x, y };
+      } catch {
+        // ignore
+      }
+    }
+    return positions;
+  }
+
+  function persistVisibleNodePositions(source: CachedNodePosition["source"] = "layout") {
+    if (!onNodePositionChangeRef.current) return;
+    const positions = collectNodePositions(g6DataRef.current.nodes.map((node) => node.id));
+    if (Object.keys(positions).length <= 0) return;
+    onNodePositionChangeRef.current(positions, source);
+  }
+
+  useEffect(() => {
+    g6DataRef.current = g6Data;
+  }, [g6Data]);
 
   useEffect(() => {
     edgeByIdRef.current = edgeById;
   }, [edgeById]);
+
+  useEffect(() => {
+    onNodePositionChangeRef.current = onNodePositionChange;
+  }, [onNodePositionChange]);
 
   useEffect(() => {
     renderNodeLabelsRef.current = renderNodeLabels;
@@ -263,16 +310,11 @@ export function GraphCanvas({
     } catch {
       // ignore
     }
-    safeFitView();
   }
 
   useEffect(() => {
     if (registerApplyHighlight) registerApplyHighlight(applyHighlight);
   }, [registerApplyHighlight]);
-
-  useEffect(() => {
-    if (registerFocusNode) registerFocusNode(focusNode);
-  }, [registerFocusNode]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -284,9 +326,7 @@ export function GraphCanvas({
         container: containerRef.current,
         width: Math.max(1, containerRef.current.clientWidth),
         height: Math.max(1, containerRef.current.clientHeight),
-        autoFit: "view",
         data: { nodes: [], edges: [] },
-        layout: { type: "force" },
         node: {
           type: TWO_LINE_NODE_TYPE,
           style: {
@@ -406,6 +446,21 @@ export function GraphCanvas({
         if (!e) return;
         onEdgeClick(String(edgeId), e);
       });
+
+      graphRef.current.on("afterlayout", () => {
+        persistVisibleNodePositions("layout");
+      });
+
+      graphRef.current.on("node:dragend", (evt: any) => {
+        const nodeId =
+          evt?.target?.id ??
+          evt?.item?.id ??
+          (typeof evt?.item?.getID === "function" ? evt.item.getID() : undefined);
+        if (!nodeId || !onNodePositionChangeRef.current) return;
+        const positions = collectNodePositions([String(nodeId)]);
+        if (Object.keys(positions).length <= 0) return;
+        onNodePositionChangeRef.current(positions, "drag");
+      });
     }
   }, [onNodeClick, onEdgeClick]);
 
@@ -421,18 +476,25 @@ export function GraphCanvas({
       const height = Math.floor(entry.contentRect.height);
       if (width <= 0 || height <= 0) return;
       resizeGraphTo(width, height);
-      scheduleResizeFit();
     });
 
     observer.observe(el);
     return () => {
       observer.disconnect();
-      clearResizeFitTimer();
     };
   }, []);
 
   useEffect(() => {
     if (!graphRef.current) return;
+    graphRef.current.stopLayout();
+    if (layoutPlan.mode === "initial-full") {
+      graphRef.current.setLayout({
+        type: "force",
+        animation: false,
+      } as any);
+    } else {
+      graphRef.current.setLayout(undefined as any);
+    }
     // Keep render aligned with latest container size; avoids stale canvas after layout changes.
     resizeGraphToContainer();
     graphRef.current.setData(g6Data);
@@ -450,18 +512,20 @@ export function GraphCanvas({
 
     applyHighlight(selectedNodeIdRef.current, selectedEdgeIdRef.current, true);
 
-    if (!initialFitDoneRef.current) {
-      initialFitDoneRef.current = true;
-      if (initialFitRafRef.current != null) cancelAnimationFrame(initialFitRafRef.current);
-      // First render can still be mid-layout; double RAF makes fitView run after paint settles.
-      initialFitRafRef.current = requestAnimationFrame(() => {
-        initialFitRafRef.current = requestAnimationFrame(() => {
-          safeFitView();
-          initialFitRafRef.current = null;
-        });
+    clearScheduledPositionPersist();
+    persistPositionsRafRef.current = requestAnimationFrame(() => {
+      persistVisibleNodePositions(layoutPlan.mode === "incremental-insert" ? "seed" : "layout");
+      persistPositionsRafRef.current = null;
+    });
+
+    clearScheduledFit();
+    if (layoutPlan.mode === "initial-full") {
+      fitAfterRenderRafRef.current = requestAnimationFrame(() => {
+        safeFitView();
+        fitAfterRenderRafRef.current = null;
       });
     }
-  }, [g6Data]);
+  }, [g6Data, layoutPlan]);
 
   useEffect(() => {
     if (!graphRef.current) return;
@@ -478,6 +542,12 @@ export function GraphCanvas({
     if (!graphRef.current) return;
     applyHighlight(selectedNodeId, selectedEdgeId, true);
   }, [selectedNodeId, selectedEdgeId]);
+
+  useEffect(() => {
+    if (!graphRef.current) return;
+    if (viewportRequest.mode !== "focus-node" || !viewportRequest.nodeId) return;
+    focusNode(viewportRequest.nodeId);
+  }, [viewportRequest]);
 
   useEffect(() => {
     if (!graphRef.current) return;
@@ -498,9 +568,8 @@ export function GraphCanvas({
 
   useEffect(() => {
     return () => {
-      clearResizeFitTimer();
-      if (initialFitRafRef.current != null) cancelAnimationFrame(initialFitRafRef.current);
-      initialFitRafRef.current = null;
+      clearScheduledFit();
+      clearScheduledPositionPersist();
       if (!graphRef.current) return;
       graphRef.current.destroy();
       graphRef.current = null;

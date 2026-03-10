@@ -20,10 +20,12 @@ import { useDiscoveryCandidateResults } from "./hooks/useDiscoveryCandidateResul
 import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch";
 import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
 import { useDiscoveryGraphState } from "./hooks/useDiscoveryGraphState";
+import { useGraphLayoutController } from "./hooks/useGraphLayoutController";
 import { useDiscoverySeeds } from "./hooks/useDiscoverySeeds";
 import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
 import { useGraphData } from "./hooks/useGraphData";
+import { useGraphViewportController } from "./hooks/useGraphViewportController";
 import { useRawIdSuggest } from "./hooks/useRawIdSuggest";
 import { useRelationFilter } from "./hooks/useRelationFilter";
 import { useSuggest } from "./hooks/useSuggest";
@@ -297,7 +299,7 @@ export default function App() {
 
   const applyHighlightRef =
     useRef<((nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void) | null>(null);
-  const focusNodeRef = useRef<((nodeId: string) => void) | null>(null);
+  const { viewportRequest, requestFocusNode } = useGraphViewportController();
 
   const loadNodeDetail = useCallback(async (vid: number) => {
     setDetailLoading(true);
@@ -590,6 +592,7 @@ export default function App() {
     budgetPresetLabel,
     canLoadMoreEdges,
     loadMoreEdges,
+    renderMutation: legacyRenderMutation,
   } = useGraphData({
     selectedNodeVid,
     onSelectNode: handleSelectNode,
@@ -1713,10 +1716,26 @@ export default function App() {
 
   const showPathCandidates = graphSourceMode === "multi" && !!lastMultiGraphRequest?.explain_paths;
 
+  const activeRenderMutation =
+    workspaceMode === "discovery" ? discoveryGraphState.renderMutation : legacyRenderMutation;
+  const { layoutPlan, nodePositionById } = useGraphLayoutController({
+    visibleNodeIds: visibleGraphNodes.map((node) => String(node.id)),
+    nodePositionCache: workspaceMode === "discovery" ? discoveryGraphState.nodePositionCache : undefined,
+    renderMutation: activeRenderMutation,
+  });
+
   const { g6Data, edgeById } = useMemo(() => {
     const nodes = visibleGraphNodes.map((n) => ({
       id: String(n.id),
       label: n.label,
+      style: (() => {
+        const position = nodePositionById.get(String(n.id));
+        if (!position) return undefined;
+        return {
+          x: position.x,
+          y: position.y,
+        };
+      })(),
       data: (() => {
         const typeColor = graphSourceMode === "discovery" && !activeSeedVidSet.has(n.id) ? discoveryTypeColor(n.entity_type) : null;
         return {
@@ -1746,7 +1765,15 @@ export default function App() {
     });
 
     return { g6Data: { nodes, edges }, edgeById: edgeMap };
-  }, [visibleGraphNodes, visibleGraphEdges, rootVid, visibleNodeHopLevelMap, activeSeedVidSet, graphSourceMode]);
+  }, [
+    visibleGraphNodes,
+    visibleGraphEdges,
+    rootVid,
+    visibleNodeHopLevelMap,
+    activeSeedVidSet,
+    graphSourceMode,
+    nodePositionById,
+  ]);
 
   const selectEdgeWithDetail = useCallback(
     (target: EdgeSearchItem, edgeId: string | null) => {
@@ -2011,9 +2038,7 @@ export default function App() {
 
   function locateNodeInGraph(vid: number) {
     handleSelectNode(vid);
-    requestAnimationFrame(() => {
-      focusNodeRef.current?.(String(vid));
-    });
+    requestFocusNode(String(vid));
   }
 
   async function handleDiscoveryExpandNode(vid: number) {
@@ -2441,6 +2466,8 @@ export default function App() {
               <GraphCanvas
                 g6Data={g6Data}
                 edgeById={edgeById}
+                layoutPlan={layoutPlan}
+                viewportRequest={viewportRequest}
                 renderNodeLabels={renderNodeLabels}
                 renderEdgeLabels={renderEdgeLabels}
                 edgeLabelSelectedDisplays={edgeLabelSelectedDisplays}
@@ -2449,11 +2476,13 @@ export default function App() {
                 selectedEdgeId={selectedEdgeId}
                 onNodeClick={handleGraphNodeClick}
                 onEdgeClick={handleGraphEdgeClick}
+                onNodePositionChange={
+                  workspaceMode === "discovery"
+                    ? (positions, source) => discoveryGraphState.syncNodePositions(positions, source)
+                    : undefined
+                }
                 registerApplyHighlight={(fn) => {
                   applyHighlightRef.current = fn;
-                }}
-                registerFocusNode={(fn) => {
-                  focusNodeRef.current = fn;
                 }}
               />
             )}

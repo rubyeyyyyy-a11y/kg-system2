@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { expand, subgraph } from "../api/kg";
 import { EXPAND_AUTO_REVEAL_TOPK, SUBGRAPH_BUDGET_PRESETS } from "../constants/kg";
+import type { GraphRenderMutation } from "../graph/renderControl";
+import { createGraphRenderMutation } from "../graph/renderControl";
 import type { EdgeBrief, ExpandProbeState, NodeBrief } from "../types/kg";
 import { parseApiError } from "../utils/httpError";
 import { edgeKey } from "../utils/kg";
@@ -66,6 +68,7 @@ type UseGraphDataResult = {
   budgetPresetLabel: string;
   canLoadMoreEdges: boolean;
   loadMoreEdges: () => Promise<void>;
+  renderMutation: GraphRenderMutation;
 };
 
 export function useGraphData({
@@ -92,11 +95,28 @@ export function useGraphData({
   const [panelGroupCollapsed, setPanelGroupCollapsed] = useState<Record<string, boolean>>({});
   const [expandProbeByVid, setExpandProbeByVid] = useState<Record<number, ExpandProbeState>>({});
   const [budgetTier, setBudgetTier] = useState(0);
+  const renderMutationSequenceRef = useRef(0);
+  const [renderMutation, setRenderMutation] = useState<GraphRenderMutation>(() =>
+    createGraphRenderMutation("legacy", "legacy_replace")
+  );
 
   const rootVidRef = useRef<number | null>(null);
   const relationsRef = useRef<string[]>([]);
   const graphNodesRef = useRef<NodeBrief[]>([]);
   const expandProbeTokenByVidRef = useRef<Record<number, number>>({});
+
+  function commitRenderMutation(
+    reason: GraphRenderMutation["reason"],
+    patch?: Partial<Pick<GraphRenderMutation, "anchorNodeId" | "affectedNodeIds">>
+  ) {
+    renderMutationSequenceRef.current += 1;
+    setRenderMutation(
+      createGraphRenderMutation("legacy", reason, renderMutationSequenceRef.current, {
+        anchorNodeId: patch?.anchorNodeId ?? null,
+        affectedNodeIds: patch?.affectedNodeIds ?? [],
+      })
+    );
+  }
 
   function notify(level: "error" | "warn" | "info", message: string) {
     if (!message) return;
@@ -151,6 +171,10 @@ export function useGraphData({
     resetExpandProbeCache();
     resetPanelGroupingForNewRoot(params.nodes, params.rootVid);
     onClearSelection();
+    commitRenderMutation("legacy_replace", {
+      anchorNodeId: String(params.rootVid),
+      affectedNodeIds: params.nodes.map((node) => String(node.id)),
+    });
   }
 
   function clearGraphData() {
@@ -383,6 +407,10 @@ export function useGraphData({
 
         onSelectNode(autoShowIds[0]);
       }
+      commitRenderMutation("legacy_expand", {
+        anchorNodeId: String(fromVid),
+        affectedNodeIds: json.added_nodes.map((node) => String(node.id)),
+      });
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
@@ -420,6 +448,10 @@ export function useGraphData({
       resetPanelGroupingForNewRoot(json.nodes, vid);
       onClearSelection();
       onSelectNode(vid);
+      commitRenderMutation("legacy_reroot", {
+        anchorNodeId: String(vid),
+        affectedNodeIds: json.nodes.map((node) => String(node.id)),
+      });
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
@@ -445,6 +477,10 @@ export function useGraphData({
     });
 
     if (autoSelect) onSelectNode(vid);
+    commitRenderMutation("legacy_reveal", {
+      anchorNodeId: String(vid),
+      affectedNodeIds: [String(vid)],
+    });
   }
 
   function unrevealNode(vid: number) {
@@ -463,6 +499,10 @@ export function useGraphData({
     });
 
     if (selectedNodeVid === vid) onClearSelection();
+    commitRenderMutation("legacy_collapse", {
+      anchorNodeId: String(vid),
+      affectedNodeIds: [String(vid)],
+    });
   }
 
   function collapseExpandFromNode(fromVid: number) {
@@ -496,6 +536,10 @@ export function useGraphData({
       const next = new Set(prev);
       next.delete(fromVid);
       return next;
+    });
+    commitRenderMutation("legacy_collapse", {
+      anchorNodeId: String(fromVid),
+      affectedNodeIds: targetIds.map((id) => String(id)),
     });
   }
 
@@ -598,5 +642,6 @@ export function useGraphData({
     budgetPresetLabel: currentBudgetPreset().label,
     canLoadMoreEdges: budgetTier < SUBGRAPH_BUDGET_PRESETS.length - 1,
     loadMoreEdges,
+    renderMutation,
   };
 }

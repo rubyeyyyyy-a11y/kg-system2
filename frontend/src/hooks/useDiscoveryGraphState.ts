@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { graphDiscoveryExpand } from "../api/kg";
+import type { CachedNodePosition, GraphRenderMutation } from "../graph/renderControl";
+import { createGraphRenderMutation } from "../graph/renderControl";
 import type {
   DiscoveryGraphSourceTag,
   DiscoveryNodeExpandUiState,
@@ -170,11 +172,44 @@ export function useDiscoveryGraphState({
   const [nodeCapabilityMap, setNodeCapabilityMap] = useState<Record<string, CapabilityState>>({});
   const [expandSessionMap, setExpandSessionMap] = useState<Record<string, NodeExpandSession>>({});
   const [expandingNodeIds, setExpandingNodeIds] = useState<Set<number>>(new Set());
-  const [nodePositionCache] = useState<Record<string, { x?: number; y?: number }>>({});
+  const [nodePositionCache] = useState<Record<string, CachedNodePosition>>({});
   const [selectedEntityTypeSet, setSelectedEntityTypeSet] = useState<Set<string>>(new Set());
   const [selectedRelationTypeSet, setSelectedRelationTypeSet] = useState<Set<string>>(new Set());
+  const renderMutationSequenceRef = useRef(0);
+  const [renderMutation, setRenderMutation] = useState<GraphRenderMutation>(() =>
+    createGraphRenderMutation("discovery", "initial_discovery")
+  );
   const previousAvailableEntityTypeSetRef = useRef<Set<string>>(new Set());
   const previousAvailableRelationTypeSetRef = useRef<Set<string>>(new Set());
+
+  function commitRenderMutation(
+    reason: GraphRenderMutation["reason"],
+    patch?: Partial<Pick<GraphRenderMutation, "anchorNodeId" | "affectedNodeIds">>
+  ) {
+    renderMutationSequenceRef.current += 1;
+    setRenderMutation(
+      createGraphRenderMutation("discovery", reason, renderMutationSequenceRef.current, {
+        anchorNodeId: patch?.anchorNodeId ?? null,
+        affectedNodeIds: patch?.affectedNodeIds ?? [],
+      })
+    );
+  }
+
+  function syncNodePositions(
+    positions: Record<string, { x: number; y: number }>,
+    source: CachedNodePosition["source"] = "layout"
+  ) {
+    const updatedAt = Date.now();
+    for (const [nodeId, position] of Object.entries(positions)) {
+      if (!Number.isFinite(position.x) || !Number.isFinite(position.y)) continue;
+      nodePositionCache[nodeId] = {
+        x: position.x,
+        y: position.y,
+        source,
+        updatedAt,
+      };
+    }
+  }
 
   const graphEntityMap = useMemo(() => {
     const next = new Map<number, NodeBrief>();
@@ -311,6 +346,9 @@ export function useDiscoveryGraphState({
       }
       return next;
     });
+    commitRenderMutation("initial_discovery", {
+      affectedNodeIds: (result.nodes || []).map((node) => String(node.id)),
+    });
   }
 
   function resetState() {
@@ -338,6 +376,10 @@ export function useDiscoveryGraphState({
       const next = new Set(prev);
       next.add(nodeId);
       return next;
+    });
+    commitRenderMutation("hide_node", {
+      anchorNodeId: String(nodeId),
+      affectedNodeIds: [String(nodeId)],
     });
     return true;
   }
@@ -371,6 +413,10 @@ export function useDiscoveryGraphState({
       const next = new Set(prev);
       next.delete(nodeId);
       return next;
+    });
+    commitRenderMutation("restore_node", {
+      anchorNodeId: String(nodeId),
+      affectedNodeIds: [String(nodeId)],
     });
     return true;
   }
@@ -418,6 +464,10 @@ export function useDiscoveryGraphState({
       const next = new Set(prev);
       next.delete(nodeId);
       return next;
+    });
+    commitRenderMutation("force_render_dropped", {
+      anchorNodeId: dropped.sourceNodeId != null ? String(dropped.sourceNodeId) : String(nodeId),
+      affectedNodeIds: [String(nodeId)],
     });
     return true;
   }
@@ -475,8 +525,12 @@ export function useDiscoveryGraphState({
         isExpanded: false,
         addedNodeIds: [],
         addedEdgeIds: [],
-      },
+        },
     }));
+    commitRenderMutation("collapse", {
+      anchorNodeId: String(targetNodeId),
+      affectedNodeIds: session.addedNodeIds,
+    });
     return true;
   }
 
@@ -586,6 +640,10 @@ export function useDiscoveryGraphState({
           },
         },
       }));
+      commitRenderMutation("expand", {
+        anchorNodeId: String(params.targetNodeId),
+        affectedNodeIds: validResp.new_nodes.map((node) => String(node.id)),
+      });
 
       const firstNode = validResp.new_nodes.find((node) => !hiddenNodeIds.has(node.id));
       return {
@@ -761,16 +819,20 @@ export function useDiscoveryGraphState({
 
   function setSelectedEntityTypes(nextKeys: string[]) {
     const allowed = new Set(availableEntityTypes.map((item) => item.key));
-    setSelectedEntityTypeSet(
-      new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)))
-    );
+    const next = new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)));
+    if (!areSetsEqual(selectedEntityTypeSet, next)) {
+      commitRenderMutation("entity_coverage_toggle");
+    }
+    setSelectedEntityTypeSet(next);
   }
 
   function setSelectedRelationTypes(nextKeys: string[]) {
     const allowed = new Set(availableRelationTypes.map((item) => item.key));
-    setSelectedRelationTypeSet(
-      new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)))
-    );
+    const next = new Set(nextKeys.filter((key) => allowed.has(key)).sort((a, b) => a.localeCompare(b)));
+    if (!areSetsEqual(selectedRelationTypeSet, next)) {
+      commitRenderMutation("relation_coverage_toggle");
+    }
+    setSelectedRelationTypeSet(next);
   }
 
   const visibleGraphNodes = useMemo(
@@ -801,6 +863,7 @@ export function useDiscoveryGraphState({
     edgeMap,
     expandSessionMap,
     buildExpandFingerprint,
+    renderMutation,
     getNodeExpandUiState,
     initializeFromDiscovery,
     resetState,
@@ -819,6 +882,7 @@ export function useDiscoveryGraphState({
     selectedRelationTypeSet,
     setSelectedEntityTypes,
     setSelectedRelationTypes,
+    syncNodePositions,
     visibleNodeIdSet,
     visibleEdgeKeySet,
     visibleGraphNodes,
