@@ -18,7 +18,8 @@ from app.api import routes_edit
 from app.core.config import ensure_audit_log_dir
 from app.db import nebula as nebula_db
 from app.db.nebula import execute_ngql
-from app.routers import detail, graph, search, search_v2
+from app.routers import detail, graph, imports, search, search_v2
+from app.services.imports import executor_service
 
 app = FastAPI(title="KG Entity Search API")
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def startup_prepare():
         nebula_db.NEBULA_SPACE,
         os.getpid(),
     )
+    executor_service.startup_recover_and_start()
 
 
 @app.middleware("http")
@@ -73,3 +75,4 @@ app.include_router(search_v2.router)
 app.include_router(graph.router)
 app.include_router(detail.router)
 app.include_router(routes_edit.router)
+app.include_router(imports.router)

@@ -24,7 +24,7 @@ export function useDiscoveryEntityDetail({
     (item: DiscoveryEntityCandidateItem) => {
       const vid = Number(item.vid || item.id);
       setSelectedCandidateVid(vid);
-      setSel({ kind: "node", vid });
+      setSel({ kind: "node", vid, source: "discovery_candidate" });
       setEdgeDetail(null);
       setSelectedEdgeGraphId(null);
       setNodeDetail({

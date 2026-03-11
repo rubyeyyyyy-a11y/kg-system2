@@ -37,7 +37,7 @@ export function parseApiError(err: unknown): ParsedApiError {
       ? (parsed.detail as Record<string, unknown>)
       : null;
 
-  const code = String((detail?.code as string) || (parsed?.code as string) || "");
+  const code = String((detail?.error_code as string) || (detail?.code as string) || (parsed?.code as string) || "");
   const reason = String((detail?.reason as string) || "");
   const requestId = String((detail?.request_id as string) || "");
   const message = String(

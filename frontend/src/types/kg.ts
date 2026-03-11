@@ -104,10 +104,27 @@ export type EdgeDetailResp = {
   props: Record<string, unknown>;
 };
 
+export type SelectionSource =
+  | "graph_node_click"
+  | "graph_edge_click"
+  | "search_candidate"
+  | "discovery_candidate"
+  | "seed"
+  | "external_detail";
+
 export type Sel =
   | { kind: "none" }
-  | { kind: "node"; vid: number }
-  | { kind: "edge"; src: number; dst: number; rank: string; edge_type: string; relation: string; source_db?: string };
+  | { kind: "node"; vid: number; source: SelectionSource }
+  | {
+      kind: "edge";
+      src: number;
+      dst: number;
+      rank: string;
+      edge_type: string;
+      relation: string;
+      source: SelectionSource;
+      source_db?: string;
+    };
 
 export type ExpandProbeState = "loading" | "noextra" | "hasextra";
 

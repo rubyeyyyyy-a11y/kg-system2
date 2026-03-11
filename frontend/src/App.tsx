@@ -16,6 +16,7 @@ import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { LeftSearchPanel } from "./components/LeftSearchPanel";
 import { Resizer } from "./components/Resizer";
 import { TopBar } from "./components/TopBar";
+import { ImportWorkspace } from "./features/import/ImportWorkspace";
 import { useDiscoveryCandidateResults } from "./hooks/useDiscoveryCandidateResults";
 import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch";
 import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
@@ -50,6 +51,7 @@ import type {
   RawIdSuggestItem,
   SearchResp,
   Sel,
+  SelectionSource,
   SuggestItem,
 } from "./types/kg";
 import { edgeKey, findEdgeIdByIdentity, isSameEdge, pairKey, relationDisplay } from "./utils/kg";
@@ -90,7 +92,7 @@ type LegacyWorkspaceSession =
 
 type GraphSourceMode = "single" | "multi" | "discovery";
 
-type WorkspaceMode = "legacy" | "discovery";
+type WorkspaceMode = "legacy" | "discovery" | "import";
 
 type DiscoveryRequest = {
   seed_vids: number[];
@@ -204,6 +206,13 @@ function discoveryTypeColor(entityType: string) {
     fill: `hsl(${hue} 68% 78%)`,
     stroke: `hsl(${hue} 58% 42%)`,
   };
+}
+
+function selectionFollowsDiscoveryVisibility(sel: Sel) {
+  return (
+    (sel.kind === "node" && sel.source === "graph_node_click") ||
+    (sel.kind === "edge" && sel.source === "graph_edge_click")
+  );
 }
 
 export default function App() {
@@ -551,8 +560,8 @@ export default function App() {
     setSelectedEdgeGraphId(null);
   }
 
-  function handleSelectNode(vid: number) {
-    setSel({ kind: "node", vid });
+  function handleSelectNode(vid: number, source: SelectionSource = "graph_node_click") {
+    setSel({ kind: "node", vid, source });
     setEdgeDetail(null);
     setSelectedEdgeGraphId(null);
     void loadNodeDetail(vid);
@@ -773,7 +782,7 @@ export default function App() {
     setGraphSourceMode("discovery");
     setLastMultiGraphParams(null);
     clearMultiPathState();
-    setRenderEdgeLabels(true);
+    setRenderEdgeLabels(false);
   }
 
   async function restoreLegacyWorkspace() {
@@ -816,6 +825,11 @@ export default function App() {
   async function switchWorkspaceMode(nextMode: WorkspaceMode) {
     if (nextMode === workspaceMode) return;
     setUiNotice(null);
+
+    if (nextMode === "import") {
+      setWorkspaceMode("import");
+      return;
+    }
 
     if (nextMode === "discovery") {
       if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
@@ -1727,6 +1741,7 @@ export default function App() {
         rank,
         edge_type,
         relation: String(target.relation || ""),
+        source: "external_detail",
         source_db,
       });
       setNodeDetail(null);
@@ -1932,6 +1947,7 @@ export default function App() {
 
   useEffect(() => {
     if (workspaceMode !== "discovery" || graphSourceMode !== "discovery") return;
+    if (!selectionFollowsDiscoveryVisibility(sel)) return;
     if (sel.kind === "node" && !discoveryGraphState.visibleNodeIdSet.has(sel.vid)) {
       handleClearSelection();
       return;
@@ -1972,11 +1988,11 @@ export default function App() {
   }
 
   function handleGraphNodeClick(vid: number) {
-    handleSelectNode(vid);
+    handleSelectNode(vid, "graph_node_click");
   }
 
   function locateNodeInGraph(vid: number) {
-    handleSelectNode(vid);
+    handleSelectNode(vid, "graph_node_click");
     requestFocusNode(String(vid));
   }
 
@@ -2020,7 +2036,9 @@ export default function App() {
 
   function handleHideDiscoveryNode(vid: number) {
     const changed = discoveryGraphState.hideRenderedNode(vid);
-    if (changed && sel.kind === "node" && sel.vid === vid) handleClearSelection();
+    if (changed && sel.kind === "node" && sel.vid === vid && selectionFollowsDiscoveryVisibility(sel)) {
+      handleClearSelection();
+    }
   }
 
   function handleRestoreHiddenDiscoveryNode(vid: number, locate = false) {
@@ -2043,7 +2061,7 @@ export default function App() {
     if (!Number.isFinite(src) || !Number.isFinite(dst) || !relation) return;
 
     setSelectedEdgeGraphId(edgeId);
-    setSel({ kind: "edge", src, dst, rank, edge_type, relation, source_db });
+    setSel({ kind: "edge", src, dst, rank, edge_type, relation, source: "graph_edge_click", source_db });
     setNodeDetail(null);
     void loadEdgeDetail(src, dst, rank, edge_type);
   }
@@ -2105,6 +2123,59 @@ export default function App() {
           </button>
         </div>
       ) : null}
+      {workspaceMode === "import" ? (
+        <div style={{ gridColumn: "1 / -1", minWidth: 0, overflow: "auto" }}>
+          <div style={{ padding: "12px 16px 0 16px", display: "flex", gap: 8, position: "sticky", top: 0, zIndex: 30 }}>
+            <button
+              onClick={() => {
+                void switchWorkspaceMode("legacy");
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "1px solid #d9d9d9",
+                background: "#fff",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              旧模块
+            </button>
+            <button
+              onClick={() => {
+                void switchWorkspaceMode("discovery");
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "1px solid #d9d9d9",
+                background: "#fff",
+                cursor: "pointer",
+                fontWeight: 500,
+              }}
+            >
+              统一关系发现
+            </button>
+            <button
+              onClick={() => {
+                void switchWorkspaceMode("import");
+              }}
+              style={{
+                padding: "8px 12px",
+                borderRadius: 8,
+                border: "1px solid #d9d9d9",
+                background: "#f8ead2",
+                cursor: "pointer",
+                fontWeight: 700,
+              }}
+            >
+              Import
+            </button>
+          </div>
+          <ImportWorkspace onNotice={setUiNotice} />
+        </div>
+      ) : (
+        <>
       <div className="kg-pane kg-pane-left">
         <div style={{ padding: "12px 16px 0 16px", display: "flex", gap: 8 }}>
           <button
@@ -2136,6 +2207,21 @@ export default function App() {
             }}
           >
             统一关系发现
+          </button>
+          <button
+            onClick={() => {
+              void switchWorkspaceMode("import");
+            }}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #d9d9d9",
+              background: "#fff",
+              cursor: "pointer",
+              fontWeight: 500,
+            }}
+          >
+            Import
           </button>
         </div>
 
@@ -2336,7 +2422,9 @@ export default function App() {
             onHideRenderedNode={handleHideDiscoveryNode}
             onRestoreHiddenNode={handleRestoreHiddenDiscoveryNode}
             onForceRenderDroppedNode={handleForceRenderDiscoveryNode}
-            onViewNodeDetailById={handleSelectNode}
+            onViewNodeDetailById={(vid) => {
+              handleSelectNode(vid, discoverySelectedSeedVidSet.has(vid) ? "seed" : "external_detail");
+            }}
             onRun={() => {
               void runDiscovery();
             }}
@@ -2600,6 +2688,8 @@ export default function App() {
           />
         </Suspense>
       ) : null}
+        </>
+      )}
     </div>
   );
 }
