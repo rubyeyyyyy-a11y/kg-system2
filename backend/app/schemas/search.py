@@ -1,6 +1,8 @@
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from .spaces import SpaceMetaResp
 
 from .common import GraphEdge, GraphNode
 
@@ -22,6 +24,9 @@ class SearchResp(BaseModel):
     nodes: List[GraphNode]
     edges: List[GraphEdge]
     total_candidates: int
+    truncated: bool = False
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    space_meta: SpaceMetaResp
 
 
 class SuggestItem(BaseModel):
@@ -36,6 +41,7 @@ class SuggestResp(BaseModel):
     q: str
     items: List[SuggestItem]
     truncated: bool
+    space_meta: SpaceMetaResp
 
 
 class EntityTypeItem(BaseModel):
@@ -55,3 +61,4 @@ class RawIdSuggestResp(BaseModel):
     q: str
     items: List[RawIdSuggestItem]
     truncated: bool
+    space_meta: SpaceMetaResp

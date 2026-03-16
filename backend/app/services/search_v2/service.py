@@ -8,11 +8,13 @@ from fastapi import HTTPException
 from app import config as app_config
 from app.clients import ElasticsearchClient
 from app.clients.nebula_client import NebulaClient, NebulaConnectionError, NebulaQueryError, NebulaTimeoutError
+from app.core.space_context import get_current_space
 from app.models.search_models import CandidateNode
 from app.schemas.search import SearchRequest
 from app.services.common import normalize_raw_id
 from app.services.search_v2.budget import search_budget
 from app.services.search_v2.errors import SearchErrorCode, SearchServiceError, mk_search_error, to_http_exception
+from app.services.spaces.readiness_service import current_space_meta_payload
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,7 @@ def _search_payload(
         "edges": edges if include_edges_applied else [],
         "total_candidates": int(max(total_candidates, len(nodes))),
         "truncated": False,
+        "space_meta": current_space_meta_payload(),
         "meta": {
             "request_id": request_id,
             "strategy": "ES_V2",
@@ -276,6 +279,7 @@ def search_candidates_page(req: SearchRequest, *, offset: int, limit: int) -> Di
         return {
             "nodes": [],
             "has_more": False,
+            "space_meta": current_space_meta_payload(),
             "meta": {
                 "request_id": request_id,
                 "strategy": "ES_V2",
@@ -306,6 +310,7 @@ def search_candidates_page(req: SearchRequest, *, offset: int, limit: int) -> Di
         return {
             "nodes": nodes,
             "has_more": bool(has_more),
+            "space_meta": current_space_meta_payload(),
             "meta": {
                 "request_id": request_id,
                 "strategy": "ES_V2",
@@ -361,6 +366,14 @@ def search(req: SearchRequest) -> Dict[str, Any]:
         )
 
     try:
+        logger.warning(
+            "search_v2_request request_id=%s space=%s include_edges=%s q_len=%d raw_id=%s",
+            request_id,
+            get_current_space(),
+            include_edges_requested,
+            len(q),
+            "yes" if bool(raw_id_q) else "no",
+        )
         es_ms += _ensure_es_available()
 
         vids_scores, query_ms, query_reason = _search_candidates(req)
@@ -427,10 +440,11 @@ def suggest(
     request_id = _request_id()
     q_clean = (q or "").strip()
     if len(q_clean) < search_budget.suggest_min_query_len:
-        return {"q": q_clean, "items": [], "truncated": False}
+        return {"q": q_clean, "items": [], "truncated": False, "space_meta": current_space_meta_payload()}
 
     safe_limit = max(1, min(int(limit), search_budget.suggest_limit_max))
     try:
+        logger.warning("suggest_v2_request request_id=%s space=%s q_len=%d", request_id, get_current_space(), len(q_clean))
         _ensure_es_available()
         items, _ = es_client.suggest_entities_by_name_prefix(
             q_clean,
@@ -439,7 +453,12 @@ def suggest(
             source=source,
         )
         truncated = len(items) > safe_limit
-        return {"q": q_clean, "items": items[:safe_limit], "truncated": truncated}
+        return {
+            "q": q_clean,
+            "items": items[:safe_limit],
+            "truncated": truncated,
+            "space_meta": current_space_meta_payload(),
+        }
     except SearchServiceError as err:
         logger.warning("suggest_v2 error request_id=%s code=%s reason=%s", request_id, err.code.value, err.reason)
         raise to_http_exception(err, request_id)
@@ -461,14 +480,15 @@ def suggest_raw_id(
     request_id = _request_id()
     q_clean = (q or "").strip()
     if len(q_clean) < search_budget.suggest_min_query_len:
-        return {"q": q_clean, "items": [], "truncated": False}
+        return {"q": q_clean, "items": [], "truncated": False, "space_meta": current_space_meta_payload()}
 
     q_norm = normalize_raw_id(q_clean)
     if not q_norm:
-        return {"q": q_clean, "items": [], "truncated": False}
+        return {"q": q_clean, "items": [], "truncated": False, "space_meta": current_space_meta_payload()}
 
     safe_limit = max(1, min(int(limit), search_budget.suggest_raw_id_limit_max))
     try:
+        logger.warning("suggest_raw_id_v2_request request_id=%s space=%s q_len=%d", request_id, get_current_space(), len(q_clean))
         _ensure_es_available()
         items, _ = es_client.suggest_entities_by_raw_id_prefix(
             q_norm,
@@ -478,7 +498,12 @@ def suggest_raw_id(
             source=source,
         )
         truncated = len(items) > safe_limit
-        return {"q": q_clean, "items": items[:safe_limit], "truncated": truncated}
+        return {
+            "q": q_clean,
+            "items": items[:safe_limit],
+            "truncated": truncated,
+            "space_meta": current_space_meta_payload(),
+        }
     except SearchServiceError as err:
         logger.warning(
             "suggest_raw_id_v2 error request_id=%s code=%s reason=%s", request_id, err.code.value, err.reason

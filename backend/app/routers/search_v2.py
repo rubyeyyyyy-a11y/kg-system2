@@ -2,13 +2,13 @@ from typing import Optional
 
 from fastapi import APIRouter
 
-from app.schemas.search import RawIdSuggestResp, SearchRequest, SuggestResp
+from app.schemas.search import RawIdSuggestResp, SearchRequest, SearchResp, SuggestResp
 from app.services.search_v2 import service as search_v2_service
 
 router = APIRouter(prefix="/api/v2")
 
 
-@router.post("/search")
+@router.post("/search", response_model=SearchResp)
 def search(req: SearchRequest):
     return search_v2_service.search(req)
 
@@ -31,4 +31,3 @@ def suggest_raw_id(
     source: Optional[str] = None,
 ):
     return search_v2_service.suggest_raw_id(q=q, limit=limit, entity_type=entity_type, source=source)
-

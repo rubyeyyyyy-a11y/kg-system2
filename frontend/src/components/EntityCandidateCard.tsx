@@ -23,6 +23,10 @@ export function EntityCandidateCard({
 
   return (
     <div
+      data-testid="discovery-candidate-item"
+      data-candidate-id={String(candidateId)}
+      data-label={item.label}
+      data-raw-id={item.raw_id || ""}
       style={{
         padding: 10,
         border: seeded ? "1px solid #b7eb8f" : "1px solid #f0f0f0",

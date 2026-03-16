@@ -2,6 +2,9 @@
 
 > 本文档以当前仓库实际状态为准，用于最终交接与后续 agent 接手。
 > 阶段中间文档仍保留，但若与本文冲突，以本文为准。
+>
+> 多空间 import + discovery/search availability 的最终收口，请同时参考：
+> [docs/MULTI_SPACE_DELIVERY_20260312.md](/home/ray/kg-system/docs/MULTI_SPACE_DELIVERY_20260312.md)
 
 ## 1. 当前结论
 

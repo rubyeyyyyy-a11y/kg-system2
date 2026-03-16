@@ -64,5 +64,6 @@ def entity_candidates(req: DiscoveryEntityCandidatesRequest) -> Dict[str, Any]:
         "returned": len(nodes),
         "has_more": has_more,
         "next_page": page + 1 if has_more else None,
+        "space_meta": result.get("space_meta"),
         "meta": meta,
     }

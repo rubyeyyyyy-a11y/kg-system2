@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Sequence
 from nebula3.Exception import IOErrorException, NotValidConnectionException
 
 from app.config import settings
+from app.core.space_context import get_current_space
 from app.db.nebula import EDGE_TAG, execute_ngql
 from app.services.common import vw
 
@@ -40,10 +41,16 @@ def _is_connection_text(text: str) -> bool:
 
 
 class NebulaClient:
-    def execute(self, ngql: str):
+    def __init__(self, space_name: str | None = None) -> None:
+        self.space_name = space_name
+
+    def _resolved_space(self, space_name: str | None = None) -> str:
+        return str(space_name or self.space_name or get_current_space())
+
+    def execute(self, ngql: str, *, space_name: str | None = None):
         start = time.perf_counter()
         try:
-            res = execute_ngql(ngql)
+            res = execute_ngql(ngql, space_name=self._resolved_space(space_name))
         except (IOErrorException, TimeoutError) as exc:
             msg = str(exc)
             if _is_timeout_text(msg):
@@ -70,7 +77,7 @@ class NebulaClient:
 
         return res, took_ms
 
-    def fetch_entity_props(self, vids: Sequence[int]) -> tuple[List[Dict[str, Any]], float]:
+    def fetch_entity_props(self, vids: Sequence[int], *, space_name: str | None = None) -> tuple[List[Dict[str, Any]], float]:
         ids = sorted({int(v) for v in vids})
         if not ids:
             return [], 0.0
@@ -86,7 +93,7 @@ RETURN id(v) AS vid,
        v.`Entity`.`source` AS source,
        v.`Entity`.`description` AS description;
 """
-        res, took_ms = self.execute(ngql)
+        res, took_ms = self.execute(ngql, space_name=space_name)
         vids_col = res.column_values("vid")
         names = res.column_values("name")
         types = res.column_values("type")
@@ -108,7 +115,13 @@ RETURN id(v) AS vid,
             )
         return rows, took_ms
 
-    def fetch_edges_between(self, vids: Sequence[int], limit: int = 5000) -> tuple[List[Dict[str, Any]], float]:
+    def fetch_edges_between(
+        self,
+        vids: Sequence[int],
+        limit: int = 5000,
+        *,
+        space_name: str | None = None,
+    ) -> tuple[List[Dict[str, Any]], float]:
         ids = sorted({int(v) for v in vids})
         if not ids:
             return [], 0.0
@@ -121,7 +134,7 @@ YIELD src(edge) AS src, dst(edge) AS dst,
       properties(edge).source AS source_db
 | LIMIT {int(limit)};
 """
-        res, took_ms = self.execute(ngql)
+        res, took_ms = self.execute(ngql, space_name=space_name)
         srcs = res.column_values("src")
         dsts = res.column_values("dst")
         ranks = res.column_values("rank")

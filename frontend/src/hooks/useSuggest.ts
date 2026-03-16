@@ -8,6 +8,8 @@ type UseSuggestParams = {
   q: string;
   entityType: string;
   source: string;
+  spaceName?: string;
+  scopeKey?: string;
   onSelect: (item: SuggestItem) => void;
   onQueryChange: (value: string) => void;
   onSearch: () => void;
@@ -32,6 +34,8 @@ export function useSuggest({
   q,
   entityType,
   source,
+  spaceName,
+  scopeKey,
   onSelect,
   onQueryChange,
   onSearch,
@@ -97,6 +101,7 @@ export function useSuggest({
         entity_type: entityType,
         source,
         signal: controller.signal,
+        spaceName,
       });
 
       if (reqId !== suggestReqIdRef.current) return;
@@ -185,7 +190,7 @@ export function useSuggest({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [q, entityType, source, suggestOpen]);
+  }, [q, entityType, source, spaceName, suggestOpen]);
 
   useEffect(() => {
     if (!suggestOpen) return;
@@ -204,6 +209,10 @@ export function useSuggest({
       invalidateSuggestRequest();
     };
   }, []);
+
+  useEffect(() => {
+    closeSuggestPanel();
+  }, [scopeKey]);
 
   return {
     suggestOpen,

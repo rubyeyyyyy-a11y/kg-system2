@@ -10,11 +10,14 @@ from nebula3.Config import Config
 from nebula3.Exception import IOErrorException, NotValidConnectionException
 from nebula3.gclient.net import ConnectionPool
 
-NEBULA_HOST = os.getenv("NEBULA_HOST", "127.0.0.1")
-NEBULA_PORT = int(os.getenv("NEBULA_PORT", "9669"))
-NEBULA_USER = os.getenv("NEBULA_USER", "root")
-NEBULA_PASSWORD = os.getenv("NEBULA_PASSWORD", "nebula")
-NEBULA_SPACE = os.getenv("NEBULA_SPACE", "demo_kg")
+from app.config import settings
+from app.core.space_context import get_current_space
+
+NEBULA_HOST = settings.nebula_host
+NEBULA_PORT = settings.nebula_port
+NEBULA_USER = settings.nebula_user
+NEBULA_PASSWORD = settings.nebula_password
+NEBULA_SPACE = settings.nebula_space
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,13 @@ def _safe_identifier(raw: str, fallback: str) -> str:
     if value and _IDENTIFIER_RE.match(value):
         return value
     return fallback
+
+
+def _require_identifier(raw: str, field_name: str) -> str:
+    value = (raw or "").strip()
+    if value and _IDENTIFIER_RE.match(value):
+        return value
+    raise RuntimeError(f"invalid {field_name}: {raw!r}")
 
 
 EDGE_TYPE = _safe_identifier(os.getenv("EDGE_TYPE", "REL2"), "REL2")
@@ -166,22 +176,32 @@ def _invalidate_pool() -> None:
             logger.warning("failed to close old nebula pool", exc_info=True)
 
 
-def get_session():
+def get_session(*, user: str | None = None, password: str | None = None):
     pool = _ensure_pool()
-    session = pool.get_session(NEBULA_USER, NEBULA_PASSWORD)
+    session = pool.get_session(user or NEBULA_USER, password or NEBULA_PASSWORD)
     if not session:
         raise RuntimeError(f"Failed to get Nebula session at {NEBULA_HOST}:{NEBULA_PORT} (check user/password)")
     return session
 
 
 @contextmanager
-def nebula_session() -> Generator:
+def nebula_session(
+    space_name: str | None = None,
+    *,
+    user: str | None = None,
+    password: str | None = None,
+    use_space: bool = True,
+) -> Generator:
     session = None
     try:
-        session = get_session()
-        use_res = session.execute(f"USE {NEBULA_SPACE};")
-        if not use_res.is_succeeded():
-            raise RuntimeError(f"USE failed: {use_res.error_msg()}")
+        session = get_session(user=user, password=password)
+        if use_space:
+            resolved_space = (
+                _require_identifier(space_name, "space_name") if space_name is not None else _require_identifier(get_current_space(), "space_name")
+            )
+            use_res = session.execute(f"USE `{resolved_space}`;")
+            if not use_res.is_succeeded():
+                raise RuntimeError(f"USE failed: {use_res.error_msg()}")
         yield session
     finally:
         if session is not None:
@@ -191,13 +211,20 @@ def nebula_session() -> Generator:
                 logger.warning("failed to release nebula session", exc_info=True)
 
 
-def execute_ngql(ngql: str):
+def execute_ngql(
+    ngql: str,
+    space_name: str | None = None,
+    *,
+    user: str | None = None,
+    password: str | None = None,
+    use_space: bool = True,
+):
     request_id = _request_id()
     summary = _ngql_summary(ngql)
     total_attempts = _EXECUTE_RETRY_MAX + 1
     for attempt in range(1, total_attempts + 1):
         try:
-            with nebula_session() as session:
+            with nebula_session(space_name=space_name, user=user, password=password, use_space=use_space) as session:
                 return session.execute(ngql)
         except _RETRYABLE_EXCEPTIONS as exc:
             should_retry = attempt <= _EXECUTE_RETRY_MAX
@@ -230,5 +257,12 @@ def execute_ngql(ngql: str):
             raise
 
 
-def execute_ngql_retry(ngql: str):
-    return execute_ngql(ngql)
+def execute_ngql_retry(
+    ngql: str,
+    space_name: str | None = None,
+    *,
+    user: str | None = None,
+    password: str | None = None,
+    use_space: bool = True,
+):
+    return execute_ngql(ngql, space_name=space_name, user=user, password=password, use_space=use_space)

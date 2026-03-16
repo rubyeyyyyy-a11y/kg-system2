@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { Text } from "@antv/g";
 import { Circle as G6Circle, Graph, register } from "@antv/g6";
@@ -40,6 +40,7 @@ const NODE_TITLE_COLOR = "#262626";
 const NODE_SUBTITLE_COLOR = "#8c8c8c";
 const TWO_LINE_NODE_TYPE = "kg-two-line-circle";
 const TWO_LINE_NODE_REGISTER_FLAG = "__kg_two_line_circle_registered__";
+const MIN_GRAPH_RENDER_HEIGHT = 32;
 
 class TwoLineCircleNode extends G6Circle {
   protected drawLabelShape(attributes: any, container: any): void {
@@ -153,6 +154,30 @@ export function GraphCanvas({
   const persistPositionsRafRef = useRef<number | null>(null);
   const visibilitySnapshotRef = useRef(createVisibilitySnapshot([]));
   const hiddenEdgeIdSetRef = useRef<Set<string>>(new Set());
+  const containerSizeRef = useRef({ width: 0, height: 0 });
+  const deferredInitRef = useRef(false);
+  const pendingFullRenderAfterResizeRef = useRef(false);
+  const pendingFitAfterResizeRef = useRef(false);
+  const graphHasRenderedRef = useRef(false);
+  const [graphReadySequence, setGraphReadySequence] = useState(0);
+  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+
+  function debugLog(event: string, payload: Record<string, unknown>) {
+    if (!import.meta.env.DEV) return;
+    console.info(`[GraphCanvas] ${event}`, payload);
+  }
+
+  function hasRenderableSize(width: number, height: number) {
+    return width > 0 && height > MIN_GRAPH_RENDER_HEIGHT;
+  }
+
+  function readContainerSize() {
+    const el = containerRef.current;
+    return {
+      width: Math.floor(el?.clientWidth || 0),
+      height: Math.floor(el?.clientHeight || 0),
+    };
+  }
 
   function safeFitView() {
     const g: any = graphRef.current;
@@ -204,6 +229,20 @@ export function GraphCanvas({
     if (persistPositionsRafRef.current == null) return;
     cancelAnimationFrame(persistPositionsRafRef.current);
     persistPositionsRafRef.current = null;
+  }
+
+  function scheduleFitView(reason: string) {
+    clearScheduledFit();
+    fitAfterRenderRafRef.current = requestAnimationFrame(() => {
+      safeFitView();
+      debugLog("fit-view", {
+        reason,
+        graphSize: (graphRef.current as any)?.getSize?.(),
+        zoom: (graphRef.current as any)?.getZoom?.(),
+        position: (graphRef.current as any)?.getPosition?.(),
+      });
+      fitAfterRenderRafRef.current = null;
+    });
   }
 
   function collectNodePositions(nodeIds: string[]) {
@@ -346,13 +385,30 @@ export function GraphCanvas({
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const size = readContainerSize();
+    containerSizeRef.current = size;
+    setContainerSize((prev) => (prev.width === size.width && prev.height === size.height ? prev : size));
+  }, []);
+
+  useEffect(() => {
+    const { width, height } = containerSize;
+    if (!containerRef.current || graphRef.current || !hasRenderableSize(width, height)) {
+      if (!hasRenderableSize(width, height)) {
+        deferredInitRef.current = true;
+        pendingFullRenderAfterResizeRef.current = true;
+      }
+      return;
+    }
+
+    debugLog("init-graph", { width, height, deferred: deferredInitRef.current });
+
     if (!graphRef.current) {
       const isSeedNode = (d: any) => d?.data?.isSeed === true;
 
       graphRef.current = new Graph({
         container: containerRef.current,
-        width: Math.max(1, containerRef.current.clientWidth),
-        height: Math.max(1, containerRef.current.clientHeight),
+        width,
+        height,
         data: { nodes: [], edges: [] },
         node: {
           type: TWO_LINE_NODE_TYPE,
@@ -489,11 +545,25 @@ export function GraphCanvas({
         onNodePositionChangeRef.current(positions, "drag");
       });
     }
-  }, [onNodeClick, onEdgeClick]);
+    graphHasRenderedRef.current = false;
+    deferredInitRef.current = false;
+    setGraphReadySequence((prev) => prev + 1);
+  }, [containerSize, onNodeClick, onEdgeClick]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+
+    const initialSize = readContainerSize();
+    containerSizeRef.current = initialSize;
+    setContainerSize((prev) =>
+      prev.width === initialSize.width && prev.height === initialSize.height ? prev : initialSize
+    );
+    if (!hasRenderableSize(initialSize.width, initialSize.height)) {
+      deferredInitRef.current = true;
+      pendingFullRenderAfterResizeRef.current = true;
+      debugLog("defer-init", { reason: "mount", ...initialSize });
+    }
 
     // Track container size instead of window size so panel drag and grid resize are both covered.
     const observer = new ResizeObserver((entries) => {
@@ -501,8 +571,41 @@ export function GraphCanvas({
       if (!entry) return;
       const width = Math.floor(entry.contentRect.width);
       const height = Math.floor(entry.contentRect.height);
-      if (width <= 0 || height <= 0) return;
+      const previous = containerSizeRef.current;
+      const wasRenderable = hasRenderableSize(previous.width, previous.height);
+      const next = { width, height };
+      const isRenderable = hasRenderableSize(width, height);
+
+      containerSizeRef.current = next;
+      setContainerSize((prev) => (prev.width === width && prev.height === height ? prev : next));
+
+      if (!isRenderable) {
+        deferredInitRef.current = true;
+        pendingFullRenderAfterResizeRef.current = true;
+        debugLog("defer-init", { reason: "resize", width, height });
+        return;
+      }
+
+      if (!graphRef.current) {
+        if (!wasRenderable) {
+          pendingFitAfterResizeRef.current = true;
+          pendingFullRenderAfterResizeRef.current = true;
+          debugLog("resume-init", { width, height });
+        }
+        return;
+      }
+
       resizeGraphTo(width, height);
+      debugLog("resize-graph", {
+        width,
+        height,
+        graphSize: (graphRef.current as any)?.getSize?.(),
+      });
+      if (!wasRenderable || deferredInitRef.current) {
+        deferredInitRef.current = false;
+        pendingFitAfterResizeRef.current = false;
+        scheduleFitView("valid-resize");
+      }
     });
 
     observer.observe(el);
@@ -513,6 +616,17 @@ export function GraphCanvas({
 
   useEffect(() => {
     if (!graphRef.current) return;
+    const { width, height } = containerSizeRef.current;
+    if (!hasRenderableSize(width, height)) {
+      pendingFullRenderAfterResizeRef.current = true;
+      debugLog("skip-render-invalid-size", {
+        width,
+        height,
+        nodes: viewModel.nodes.length,
+        edges: viewModel.edges.length,
+      });
+      return;
+    }
     if (!renderPatch.isInitial) safeStopLayout();
     const shouldRunFullLayout = layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full";
     if (shouldRunFullLayout) {
@@ -527,7 +641,10 @@ export function GraphCanvas({
     resizeGraphToContainer();
     const graph = graphRef.current as any;
     const applyPatch = async () => {
-      if (renderPatch.isInitial) {
+      const needsFullRender =
+        renderPatch.isInitial || !graphHasRenderedRef.current || pendingFullRenderAfterResizeRef.current;
+
+      if (needsFullRender) {
         graph.setData(toG6Data(viewModel));
         await graph.render();
       } else {
@@ -578,8 +695,11 @@ export function GraphCanvas({
         await graph.draw();
       }
 
+      graphHasRenderedRef.current = true;
+      pendingFullRenderAfterResizeRef.current = false;
+
       // For initial-full/manual-full, patch draw alone is not enough. Force an explicit layout pass.
-      if (shouldRunFullLayout && !renderPatch.isInitial) {
+      if (shouldRunFullLayout && !needsFullRender) {
         await graph.layout(graph.getLayout?.());
       }
 
@@ -604,16 +724,15 @@ export function GraphCanvas({
       }
 
       clearScheduledFit();
-      if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full") {
-        fitAfterRenderRafRef.current = requestAnimationFrame(() => {
-          safeFitView();
-          fitAfterRenderRafRef.current = null;
-        });
+      if (layoutPlan.mode === "initial-full" || layoutPlan.mode === "manual-full" || pendingFitAfterResizeRef.current) {
+        const reason = pendingFitAfterResizeRef.current ? "deferred-valid-size" : layoutPlan.mode;
+        pendingFitAfterResizeRef.current = false;
+        scheduleFitView(reason);
       }
     };
 
     void applyPatch();
-  }, [layoutPlan, renderPatch, viewModel]);
+  }, [containerSize.height, containerSize.width, graphReadySequence, layoutPlan, renderPatch, viewModel]);
 
   useEffect(() => {
     if (!graphRef.current) return;
@@ -686,6 +805,10 @@ export function GraphCanvas({
     return () => {
       clearScheduledFit();
       clearScheduledPositionPersist();
+      graphHasRenderedRef.current = false;
+      deferredInitRef.current = false;
+      pendingFullRenderAfterResizeRef.current = false;
+      pendingFitAfterResizeRef.current = false;
       if (!graphRef.current) return;
       graphRef.current.destroy();
       graphRef.current = null;
@@ -698,7 +821,9 @@ export function GraphCanvas({
       style={{
         width: "100%",
         height: "100%",
+        flex: 1,
         minWidth: 0,
+        minHeight: 0,
         overflow: "hidden",
         position: "relative",
         ...containerStyle,

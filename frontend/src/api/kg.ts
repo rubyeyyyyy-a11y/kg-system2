@@ -1,4 +1,4 @@
-import { apiGet, apiPost } from "./http";
+import { apiFetchJson, apiGet, apiPost } from "./http";
 import type {
   EdgeDetailResp,
   EdgePatchResp,
@@ -30,6 +30,7 @@ type SearchParams = {
   entity_raw_id_mode: "contains" | "prefix" | "exact";
   include_edges?: boolean;
   signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type SubgraphParams = {
@@ -38,6 +39,8 @@ type SubgraphParams = {
   relations: string[];
   max_nodes: number;
   max_edges: number;
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type ExpandParams = {
@@ -46,6 +49,8 @@ type ExpandParams = {
   existing_node_ids: number[];
   max_nodes: number;
   max_edges: number;
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type SuggestParams = {
@@ -54,6 +59,7 @@ type SuggestParams = {
   entity_type?: string;
   source?: string;
   signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type RawIdSuggestParams = {
@@ -62,6 +68,7 @@ type RawIdSuggestParams = {
   entity_type?: string;
   source?: string;
   signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type EdgeSuggestParams = {
@@ -70,6 +77,7 @@ type EdgeSuggestParams = {
   relation?: string;
   source_db?: string;
   signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type EdgeSearchParams = {
@@ -79,6 +87,8 @@ type EdgeSearchParams = {
   source_db: string | null;
   relation: string | null;
   limit: number;
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type MultiEntityGraphParams = {
@@ -91,6 +101,8 @@ type MultiEntityGraphParams = {
   max_edges: number;
   per_pair_path_limit: number;
   ignore_direction: boolean;
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type MultiEntityGraphApplyPathsParams = {
@@ -100,6 +112,8 @@ type MultiEntityGraphApplyPathsParams = {
     v: number;
     chosen_index: number;
   }>;
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type GraphDiscoveryParams = {
@@ -113,6 +127,8 @@ type GraphDiscoveryParams = {
   include_seed_seed_edges?: boolean;
   hop: number;
   ranking_mode?: "v1" | "layered_multiseed";
+  signal?: AbortSignal;
+  spaceName?: string;
 };
 
 type DiscoveryEntityCandidatesParams = {
@@ -128,23 +144,26 @@ type DiscoveryEntityCandidatesParams = {
   entity_raw_id: string | null;
   entity_raw_id_mode: "contains" | "prefix" | "exact";
   signal?: AbortSignal;
+  spaceName?: string;
 };
 
 export async function search(params: SearchParams): Promise<SearchResp> {
-  const { signal, ...body } = params;
-  return apiPost<SearchResp>("/api/search", body, { signal });
+  const { signal, spaceName, ...body } = params;
+  return apiPost<SearchResp>("/api/search", body, { signal, spaceName });
 }
 
-export async function entityTypes(): Promise<EntityTypeItem[]> {
-  return apiGet<EntityTypeItem[]>("/api/entity_types");
+export async function entityTypes(params: { signal?: AbortSignal; spaceName?: string } = {}): Promise<EntityTypeItem[]> {
+  return apiGet<EntityTypeItem[]>("/api/entity_types", { signal: params.signal, spaceName: params.spaceName });
 }
 
 export async function subgraph(body: SubgraphParams): Promise<SubgraphResp> {
-  return apiPost<SubgraphResp>("/api/subgraph", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<SubgraphResp>("/api/subgraph", payload, { signal, spaceName });
 }
 
 export async function expand(body: ExpandParams): Promise<ExpandResp> {
-  return apiPost<ExpandResp>("/api/expand", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<ExpandResp>("/api/expand", payload, { signal, spaceName });
 }
 
 export async function relationTypes(params: {
@@ -152,6 +171,7 @@ export async function relationTypes(params: {
   limit?: number;
   offset?: number;
   signal?: AbortSignal;
+  spaceName?: string;
 } = {}): Promise<RelationTypesResp> {
   const search = new URLSearchParams();
   if (params.q?.trim()) search.set("q", params.q.trim());
@@ -159,11 +179,11 @@ export async function relationTypes(params: {
   if (typeof params.offset === "number") search.set("offset", String(params.offset));
   const query = search.toString();
   const suffix = query ? `?${query}` : "";
-  return apiGet<RelationTypesResp>(`/api/relation_types${suffix}`, { signal: params.signal });
+  return apiGet<RelationTypesResp>(`/api/relation_types${suffix}`, { signal: params.signal, spaceName: params.spaceName });
 }
 
-export async function nodeDetail(vid: number): Promise<NodeDetailResp> {
-  return apiGet<NodeDetailResp>(`/api/node/${vid}`);
+export async function nodeDetail(vid: number, options: { signal?: AbortSignal; spaceName?: string } = {}): Promise<NodeDetailResp> {
+  return apiGet<NodeDetailResp>(`/api/node/${vid}`, { signal: options.signal, spaceName: options.spaceName });
 }
 
 export async function edgeDetail(body: {
@@ -171,8 +191,11 @@ export async function edgeDetail(body: {
   src: number;
   dst: number;
   rank: string;
+  signal?: AbortSignal;
+  spaceName?: string;
 }): Promise<EdgeDetailResp> {
-  return apiPost<EdgeDetailResp>("/api/edge_detail", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<EdgeDetailResp>("/api/edge_detail", payload, { signal, spaceName });
 }
 
 export async function editableFields(): Promise<EditableFieldsResp> {
@@ -185,11 +208,14 @@ export async function patchNode(
     set: Record<string, unknown>;
     expected_version: number;
     updated_by: string;
-  }
+  },
+  options: { signal?: AbortSignal; spaceName?: string } = {}
 ): Promise<NodePatchResp> {
   return apiFetchJson<NodePatchResp>(`/api/node/${vid}`, {
     method: "PATCH",
     body: JSON.stringify(body),
+    signal: options.signal,
+    spaceName: options.spaceName,
   });
 }
 
@@ -201,10 +227,15 @@ export async function patchEdge(body: {
   set: Record<string, unknown>;
   expected_version: number;
   updated_by: string;
+  signal?: AbortSignal;
+  spaceName?: string;
 }): Promise<EdgePatchResp> {
+  const { signal, spaceName, ...payload } = body;
   return apiFetchJson<EdgePatchResp>(`/api/edge`, {
     method: "PATCH",
-    body: JSON.stringify(body),
+    body: JSON.stringify(payload),
+    signal,
+    spaceName,
   });
 }
 
@@ -214,6 +245,7 @@ export async function suggest({
   entity_type,
   source,
   signal,
+  spaceName,
 }: SuggestParams): Promise<SuggestResp> {
   const params = new URLSearchParams();
   params.set("q", q);
@@ -221,12 +253,7 @@ export async function suggest({
   if (entity_type?.trim()) params.set("entity_type", entity_type.trim());
   if (source?.trim()) params.set("source", source.trim());
 
-  const resp = await fetch(`/api/suggest?${params.toString()}`, { signal });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${t}`);
-  }
-  return (await resp.json()) as SuggestResp;
+  return apiGet<SuggestResp>(`/api/suggest?${params.toString()}`, { signal, spaceName });
 }
 
 export async function suggestRawId({
@@ -235,6 +262,7 @@ export async function suggestRawId({
   entity_type,
   source,
   signal,
+  spaceName,
 }: RawIdSuggestParams): Promise<RawIdSuggestResp> {
   const params = new URLSearchParams();
   params.set("q", q);
@@ -242,12 +270,7 @@ export async function suggestRawId({
   if (entity_type?.trim()) params.set("entity_type", entity_type.trim());
   if (source?.trim()) params.set("source", source.trim());
 
-  const resp = await fetch(`/api/suggest_raw_id?${params.toString()}`, { signal });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${t}`);
-  }
-  return (await resp.json()) as RawIdSuggestResp;
+  return apiGet<RawIdSuggestResp>(`/api/suggest_raw_id?${params.toString()}`, { signal, spaceName });
 }
 
 export async function edgeSuggest({
@@ -256,6 +279,7 @@ export async function edgeSuggest({
   relation,
   source_db,
   signal,
+  spaceName,
 }: EdgeSuggestParams): Promise<EdgeSuggestResp> {
   const params = new URLSearchParams();
   params.set("q", q);
@@ -263,28 +287,27 @@ export async function edgeSuggest({
   if (relation?.trim()) params.set("relation", relation.trim());
   if (source_db?.trim()) params.set("source_db", source_db.trim());
 
-  const resp = await fetch(`/api/edge_suggest?${params.toString()}`, { signal });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${t}`);
-  }
-  return (await resp.json()) as EdgeSuggestResp;
+  return apiGet<EdgeSuggestResp>(`/api/edge_suggest?${params.toString()}`, { signal, spaceName });
 }
 
 export async function edgeSearch(body: EdgeSearchParams): Promise<EdgeSearchResp> {
-  return apiPost<EdgeSearchResp>("/api/edge_search", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<EdgeSearchResp>("/api/edge_search", payload, { signal, spaceName });
 }
 
 export async function multiEntityGraph(body: MultiEntityGraphParams): Promise<MultiEntityGraphResp> {
-  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph", payload, { signal, spaceName });
 }
 
 export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPathsParams): Promise<MultiEntityGraphResp> {
-  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph_apply_paths", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph_apply_paths", payload, { signal, spaceName });
 }
 
 export async function graphDiscovery(body: GraphDiscoveryParams): Promise<GraphDiscoveryResp> {
-  return apiPost<GraphDiscoveryResp>("/api/graph/discovery", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<GraphDiscoveryResp>("/api/graph/discovery", payload, { signal, spaceName });
 }
 
 export async function graphDiscoveryExpand(body: {
@@ -297,25 +320,16 @@ export async function graphDiscoveryExpand(body: {
   expand_max_new_edges: number;
   expand_top_k_per_type: number;
   expand_max_hop: number;
+  signal?: AbortSignal;
+  spaceName?: string;
 }): Promise<GraphDiscoveryExpandResp> {
-  return apiPost<GraphDiscoveryExpandResp>("/api/graph/discovery/expand", body);
+  const { signal, spaceName, ...payload } = body;
+  return apiPost<GraphDiscoveryExpandResp>("/api/graph/discovery/expand", payload, { signal, spaceName });
 }
 
 export async function discoveryEntityCandidates(
   params: DiscoveryEntityCandidatesParams
 ): Promise<DiscoveryEntityCandidatesResp> {
-  const { signal, ...body } = params;
-  return apiPost<DiscoveryEntityCandidatesResp>("/api/discovery/entity_candidates", body, { signal });
-}
-
-async function apiFetchJson<T>(path: string, init: RequestInit): Promise<T> {
-  const resp = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${text}`);
-  }
-  return (await resp.json()) as T;
+  const { signal, spaceName, ...body } = params;
+  return apiPost<DiscoveryEntityCandidatesResp>("/api/discovery/entity_candidates", body, { signal, spaceName });
 }

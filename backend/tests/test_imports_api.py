@@ -9,6 +9,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services.imports import executor_service, file_store
 from app.services.imports.models import ImportJobState
+from app.services.spaces import registry_service
+from app.services.spaces.models import SpaceSummary
 
 
 SCHEMA_FIXTURE = {
@@ -38,7 +40,9 @@ class ImportApiTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="import-api-tests-")
         self._patch_run_root(self.tmpdir)
+        self._patch_registry_root(self.tmpdir)
         file_store.ensure_import_dirs()
+        registry_service.register_default_space()
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -49,6 +53,30 @@ class ImportApiTest(unittest.TestCase):
         file_store.STAGING_FILES_DIR = root_path / "import-staging" / "files"
         file_store.DRAFTS_DIR = root_path / "import-drafts"
         file_store.JOBS_DIR = root_path / "import-jobs"
+
+    def _patch_registry_root(self, root: str):
+        root_path = Path(root) / "space-registry"
+        registry_service.REGISTRY_ROOT = root_path
+        registry_service.REGISTRY_PATH = root_path / "spaces.json"
+        registry_service.LOCK_PATH = root_path / "spaces.lock"
+
+    def _write_space(self, *, space_name: str, status: str, internal_status: str, last_error: str | None = None):
+        registry_service.write_space(
+            SpaceSummary(
+                space_name=space_name,
+                display_name=space_name,
+                description="",
+                template_type="entity_rel2_default",
+                template_version="entity_rel2_default.v1",
+                integration_scope="entity_rel2_core",
+                status=status,
+                internal_status=internal_status,
+                created_by="tester",
+                created_at="2026-03-11T00:00:00Z",
+                ready_at="2026-03-11T00:00:01Z" if status == "ready" else None,
+                last_error=last_error,
+            )
+        )
 
     def _client(self):
         return TestClient(app)
@@ -229,6 +257,60 @@ class ImportApiTest(unittest.TestCase):
         self.assertEqual(payload["detail"]["error_code"], "IMPORT_UNSUPPORTED_FILE_TYPE")
         self.assertIn("only .csv files are supported", payload["detail"]["message"])
 
+    def test_upload_rejects_file_over_max_size_with_structured_error(self):
+        with mock.patch.object(file_store, "MAX_UPLOAD_BYTES", 16):
+            with self._client() as client:
+                resp = client.post(
+                    "/api/import/files",
+                    files={"file": ("vertex.csv", b"ID,name\n1,Alpha,manual\n", "text/csv")},
+                )
+
+        self.assertEqual(resp.status_code, 413, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["detail"]["error_code"], "IMPORT_UPLOAD_TOO_LARGE")
+        self.assertEqual(payload["detail"]["extra"]["max_upload_bytes"], 16)
+
+    def test_draft_total_size_limit_uses_backend_truth(self):
+        with mock.patch.object(file_store, "MAX_DRAFT_TOTAL_BYTES", 24):
+            with self._client() as client:
+                uploaded_a = self._upload_csv(client, "part_a.csv", "ID,name\n1,Alpha\n")
+                uploaded_b = self._upload_csv(client, "part_b.csv", "ID,name\n2,Beta\n")
+                resp = client.post(
+                    "/api/import/drafts",
+                    json={
+                        "mode": "vertex",
+                        "file_ids": [uploaded_a["file_id"], uploaded_b["file_id"]],
+                        "mapping": [],
+                        "update_strategy": {"mode": "merge_partial", "create_if_missing": True, "update_existing": True},
+                        "schema_options": {"allow_create_object": True, "allow_add_properties": True},
+                        "postprocess_options": {"refresh_metadata": True, "sync_entity_es": True},
+                    },
+                )
+
+        self.assertEqual(resp.status_code, 422, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["detail"]["error_code"], "IMPORT_DRAFT_TOTAL_SIZE_EXCEEDED")
+        self.assertEqual(payload["detail"]["extra"]["max_draft_total_bytes"], 24)
+
+    def test_preview_returns_only_requested_sample_rows(self):
+        with self._client() as client:
+            uploaded = self._upload_csv(
+                client,
+                "vertex.csv",
+                "ID,entity_name,entity_type,source\n1,Alpha,Disease,manual\n2,Beta,Disease,manual\n3,Gamma,Disease,manual\n",
+            )
+            preview = client.post(
+                "/api/import/preview",
+                json={"file_ids": [uploaded["file_id"]], "sample_rows": 2, "mode_hint": "vertex"},
+            )
+
+        self.assertEqual(preview.status_code, 200, preview.text)
+        payload = preview.json()
+        self.assertEqual(len(payload["sample_rows"]), 2)
+        self.assertEqual(payload["sample_rows"][0]["ID"], "1")
+        self.assertEqual(payload["sample_rows"][1]["ID"], "2")
+        self.assertTrue(any("sample-only" in warning for warning in payload["warnings"]))
+
     def test_download_missing_failed_rows_uses_import_error_contract(self):
         with self._client() as client:
             resp = client.get("/api/import/jobs/job_missing/failed_rows")
@@ -236,6 +318,20 @@ class ImportApiTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 404, resp.text)
         payload = resp.json()
         self.assertIn("error_code", payload["detail"])
+
+    def test_import_endpoints_block_non_ready_space(self):
+        self._write_space(space_name="space_pending", status="provisioning", internal_status="waiting_ready")
+        with self._client() as client:
+            resp = client.post(
+                "/api/import/files",
+                headers={"X-KG-Space": "space_pending"},
+                files={"file": ("vertex.csv", b"ID,entity_name\n1,Alpha\n", "text/csv")},
+            )
+
+        self.assertEqual(resp.status_code, 409, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["detail"]["error_code"], "SPACE_NOT_READY")
+        self.assertEqual(payload["detail"]["reason"], "provisioning")
 
     def test_failed_rows_download_endpoint(self):
         def import_side_effect(_target, row, **_kwargs):

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Query
 
+from app.core.space_context import get_current_space
 from app.schemas.discovery import (
     DiscoveryEntityCandidatesRequest,
     DiscoveryEntityCandidatesResp,
@@ -19,8 +20,32 @@ from app.schemas.graph import (
     SubgraphRequest,
 )
 from app.services import discovery_entity_candidate_service, graph_discovery_expand_service, graph_discovery_service, graph_service
+from app.services.spaces.template_service import DISCOVERY_WARNING
+from app.services.spaces.readiness_service import current_space_meta_payload
 
 router = APIRouter(prefix="/api")
+
+
+def _apply_discovery_contract(payload: dict):
+    request_space = get_current_space()
+    space_meta = current_space_meta_payload()
+    warnings = list(payload.get("warnings") or [])
+
+    payload["request_space"] = request_space
+    payload["space_meta"] = space_meta
+
+    if str(space_meta.get("space_name") or "").strip() != str(request_space or "").strip():
+        warnings.append(DISCOVERY_WARNING)
+
+    if str(space_meta.get("graph_status") or "").strip() != "ready":
+        warnings.append(DISCOVERY_WARNING)
+
+    if warnings:
+        payload["warnings"] = list(dict.fromkeys(warnings))
+    else:
+        payload["warnings"] = []
+
+    return payload
 
 
 @router.post("/subgraph", response_model=SubgraphResp)
@@ -54,12 +79,14 @@ def multi_entity_graph_apply_paths(req: MultiEntityGraphApplyPathsRequest):
 
 @router.post("/graph/discovery", response_model=GraphDiscoveryResp)
 def graph_discovery(req: GraphDiscoveryRequest):
-    return graph_discovery_service.discovery(req)
+    payload = graph_discovery_service.discovery(req)
+    return _apply_discovery_contract(payload)
 
 
 @router.post("/graph/discovery/expand", response_model=GraphDiscoveryExpandResp)
 def graph_discovery_expand(req: GraphDiscoveryExpandRequest):
-    return graph_discovery_expand_service.expand(req)
+    payload = graph_discovery_expand_service.expand(req)
+    return _apply_discovery_contract(payload)
 
 
 @router.post("/discovery/entity_candidates", response_model=DiscoveryEntityCandidatesResp)

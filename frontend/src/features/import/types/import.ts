@@ -1,4 +1,5 @@
 export type ImportMode = "vertex" | "edge" | "mixed";
+export type SourceKind = "vertex" | "edge" | "mixed" | "unknown";
 export type ImportObjectType = "tag" | "edge_type";
 export type DraftStatus = "files_uploaded" | "preview_ready" | "mapped" | "validated";
 export type JobStatus =
@@ -6,6 +7,7 @@ export type JobStatus =
   | "running"
   | "post_metadata_refresh"
   | "post_es_sync"
+  | "post_verify_index"
   | "succeeded"
   | "failed_import"
   | "failed_postprocess"
@@ -20,10 +22,27 @@ export type ImportFileUploadResp = {
   detected_encoding: string;
 };
 
-export type ImportPreviewResp = {
+export type ImportSourceAliasHint = {
+  source_column: string;
+  logical_field: string;
+};
+
+export type ImportSource = {
+  source_id: string;
+  file_id: string;
+  filename: string;
   columns: string[];
   sample_rows: Record<string, string>[];
-  inferred_mode_candidates: ImportMode[];
+  header_hash: string;
+  inferred_kind: SourceKind;
+  warnings: string[];
+  alias_hints: ImportSourceAliasHint[];
+  recommended_object_type?: ImportObjectType | null;
+};
+
+export type ImportPreviewResp = {
+  sources: ImportSource[];
+  workspace_mode_candidates: ImportMode[];
   warnings: string[];
 };
 
@@ -45,16 +64,33 @@ export type ImportSchemaResp = {
   edge_types: ImportSchemaObject[];
 };
 
-export type ImportFieldMapping = {
+export type ImportIdentityMapping = {
+  id_column?: string | null;
+  src_column?: string | null;
+  dst_column?: string | null;
+  rank_column?: string | null;
+};
+
+export type ImportPropertyMapping = {
   source_column: string;
   target_field: string;
+  logical_field?: string | null;
+};
+
+export type ImportRowSelector = {
+  column: string;
+  equals: string;
 };
 
 export type ImportTargetMapping = {
+  target_id?: string;
   object_type: ImportObjectType;
   object_name: string;
-  discriminator_value?: string | null;
-  field_mappings: ImportFieldMapping[];
+  source_id: string;
+  identity_mapping: ImportIdentityMapping;
+  property_mappings: ImportPropertyMapping[];
+  row_selector?: ImportRowSelector | null;
+  target_options: Record<string, unknown>;
 };
 
 export type ImportSchemaOptions = {
@@ -81,6 +117,8 @@ export type ImportSchemaPropertyPlan = {
 };
 
 export type ImportSchemaObjectPlan = {
+  target_id: string;
+  source_id: string;
   object_type: ImportObjectType;
   object_name: string;
   object_exists: boolean;
@@ -91,10 +129,17 @@ export type ImportSchemaObjectPlan = {
 };
 
 export type CompiledTargetPlan = {
+  target_id: string;
   object_type: ImportObjectType;
   object_name: string;
-  discriminator_value?: string | null;
-  field_mappings: Record<string, string>;
+  source_id: string;
+  source_file_id: string;
+  source_filename: string;
+  source_columns: string[];
+  inferred_source_kind: SourceKind;
+  identity_mapping: ImportIdentityMapping;
+  property_mappings: ImportPropertyMapping[];
+  row_selector?: ImportRowSelector | null;
   property_types: Record<string, string>;
   identity_fields: string[];
   update_fields: string[];
@@ -105,9 +150,12 @@ export type CompiledTargetPlan = {
 
 export type CompiledImportPlan = {
   plan_id: string;
-  mode: ImportMode;
+  space_name: string;
+  template_type: string;
+  integration_scope: string;
+  workspace_mode: ImportMode;
   file_ids: string[];
-  discriminator_column?: string | null;
+  sources: ImportSource[];
   targets: CompiledTargetPlan[];
   schema_create_plan: ImportSchemaObjectPlan[];
   update_strategy: Record<string, unknown>;
@@ -118,21 +166,40 @@ export type CompiledImportPlan = {
   compiled_at: number;
 };
 
+export type ImportTargetValidationResp = {
+  target_id: string;
+  source_id: string;
+  object_type: ImportObjectType;
+  object_name: string;
+  source_columns: string[];
+  passed: boolean;
+  errors: string[];
+  warnings: string[];
+  hints: string[];
+  scanned_rows: number;
+  error_rows: number;
+};
+
 export type ImportDraftValidationResp = {
   passed: boolean;
   errors: string[];
   warnings: string[];
   integration_warnings: string[];
   semantic_notes: string[];
+  scanned_rows: number;
+  error_rows: number;
+  errors_truncated: boolean;
+  target_results: ImportTargetValidationResp[];
   compiled_plan?: CompiledImportPlan | null;
 };
 
 export type ImportDraftResp = {
   draft_id: string;
+  space_name: string;
   status: DraftStatus;
-  mode: ImportMode;
+  workspace_mode: ImportMode;
   file_ids: string[];
-  discriminator_column?: string | null;
+  sources: ImportSource[];
   mapping: ImportTargetMapping[];
   update_strategy: ImportUpdateStrategy;
   schema_options: ImportSchemaOptions;
@@ -142,14 +209,27 @@ export type ImportDraftResp = {
   updated_at: number;
 };
 
+export type ImportJobArtifact = {
+  target_id: string;
+  source_id: string;
+  kind: "normalized_rows" | "failed_rows" | "summary";
+  filename: string;
+  path: string;
+};
+
 export type ImportJobResp = {
   job_id: string;
   draft_id: string;
+  space_name: string;
+  template_type: string;
   status: JobStatus;
   created_by: string;
-  mode: ImportMode;
+  workspace_mode: ImportMode;
   plan_id: string;
   file_ids: string[];
+  sources: ImportSource[];
+  targets: CompiledTargetPlan[];
+  artifacts: ImportJobArtifact[];
   created_at: number;
   updated_at: number;
   started_at?: number | null;
@@ -170,6 +250,28 @@ export type ImportJobResp = {
   cancel_effective_at_batch: boolean;
   affected_entity_vids: number[];
   affected_schema_objects: string[];
+  index_status_snapshot?: {
+    status: "verified_nonempty" | "verified_empty" | "verified_partial" | "failed";
+    doc_count: number;
+    nebula_entity_count?: number | null;
+    coverage_pct?: number | null;
+    note?: string;
+    updated_at?: string | null;
+  } | null;
+  completion_summary?: {
+    nebula_write_success: boolean;
+    post_es_sync_success: boolean;
+    verify_success: boolean;
+    registry_index_status_written: boolean;
+    imported_docs_visible: boolean;
+    searchable: boolean;
+    affected_entity_count: number;
+    search_status?: string | null;
+    index_status?: string | null;
+    coverage_pct?: number | null;
+    note?: string;
+    completed_at?: string | null;
+  } | null;
 };
 
 export type ImportJobLogsResp = {

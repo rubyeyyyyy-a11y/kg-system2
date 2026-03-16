@@ -71,3 +71,22 @@ export default defineConfig([
   },
 ])
 ```
+
+## E2E
+
+Browser E2E now lives under `frontend/e2e/` and is fixture-driven from `frontend/e2e/fixtures/multi-space.json`.
+
+Minimum prerequisites:
+
+- backend is already running at `http://127.0.0.1:8000`
+- the fixture spaces in `multi-space.json` exist and remain `graph_status=ready` / `search_status=full`
+- Chromium is installed once via `npm run e2e:install`
+
+Run commands:
+
+```bash
+npm run e2e
+npm run e2e:smoke
+```
+
+The Playwright runner starts the Vite frontend automatically on `http://127.0.0.1:4173` and performs a backend readiness check in `e2e/global.setup.ts` before specs execute.

@@ -21,7 +21,19 @@ type MultiGenerateParams = {
   k: 2 | 3;
 };
 
+function searchStatusMessage(searchData: SearchResp, hasInput: boolean) {
+  const searchStatus = searchData.space_meta?.search_status || "unavailable";
+  if (searchStatus === "failed") return "当前 space 的 canonical 搜索索引校验失败，请先修复 index_status。";
+  if (searchStatus === "unavailable") return "当前 space 的 canonical 搜索索引尚未就绪，当前结果不能视为完整搜索结果。";
+  if (searchStatus === "partial") return "当前 space 只有 partial canonical index，本次 0 结果不代表图中无数据。";
+  if (searchStatus === "empty") return "当前 space 当前没有可搜索实体。";
+  if (hasInput) return "当前 space 下没有匹配结果。";
+  return "请输入关键词开始搜索。";
+}
+
 type LeftSearchPanelProps = {
+  currentSpaceName: string;
+  spaceScopeKey: string;
   q: string;
   onQChange: (value: string) => void;
   loadingSearch: boolean;
@@ -108,6 +120,8 @@ type MultiSlot = {
 };
 
 type MultiEntitySlotInputProps = {
+  currentSpaceName: string;
+  scopeKey: string;
   index: number;
   selected: SuggestItem | null;
   entityTypeOptions: EntityTypeItem[];
@@ -118,6 +132,8 @@ type MultiEntitySlotInputProps = {
 };
 
 function MultiEntitySlotInput({
+  currentSpaceName,
+  scopeKey,
   index,
   selected,
   entityTypeOptions,
@@ -156,6 +172,7 @@ function MultiEntitySlotInput({
         entity_raw_id: rawIdTrimmed || null,
         entity_raw_id_mode: "contains",
         include_edges: false,
+        spaceName: currentSpaceName,
       });
       const items: SuggestItem[] = (json.nodes || []).map((n) => ({
         vid: n.id,
@@ -190,6 +207,8 @@ function MultiEntitySlotInput({
     q: nameQ,
     entityType,
     source: "",
+    spaceName: currentSpaceName,
+    scopeKey,
     onSelect: (item) => {
       setNameQ(item.label);
       onSelectedChange(item);
@@ -216,6 +235,8 @@ function MultiEntitySlotInput({
     q: rawIdQ,
     entityType,
     source: "",
+    spaceName: currentSpaceName,
+    scopeKey,
     onSelect: (item) => {
       setRawIdQ(item.entity_raw_id);
       setNameQ(item.label || "");
@@ -251,7 +272,7 @@ function MultiEntitySlotInput({
     closeNameSuggestPanel();
     closeRawIdSuggestPanel();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [resetToken]);
+  }, [resetToken, scopeKey]);
 
   function clearSelection() {
     onSelectedChange(null);
@@ -510,6 +531,8 @@ function MultiEntitySlotInput({
 const MAX_SLOTS = 8;
 
 export function LeftSearchPanel({
+  currentSpaceName,
+  spaceScopeKey,
   q,
   onQChange,
   loadingSearch,
@@ -639,6 +662,20 @@ export function LeftSearchPanel({
     setSlotResetToken((t) => t + 1);
   }
 
+  useEffect(() => {
+    setActiveTab("node");
+    setNodeMode("single");
+    setMultiSlots([
+      { slotId: "slot-1", selected: null },
+      { slotId: "slot-2", selected: null },
+    ]);
+    setNextSlotId(3);
+    setSlotResetToken((prev) => prev + 1);
+    setMultiDirectOnly(true);
+    setMultiExplainPaths(false);
+    setMultiExplainK(2);
+  }, [spaceScopeKey]);
+
   return (
     <div style={{ padding: 16 }}>
       <div style={{ display: "flex", gap: 8 }}>
@@ -711,19 +748,21 @@ export function LeftSearchPanel({
                 <div ref={suggestWrapRef} style={{ position: "relative" }}>
                   <div style={{ display: "flex", gap: 8 }}>
                     <input
+                      data-testid="legacy-search-input"
                       style={{ flex: 1, padding: 8 }}
                       placeholder="按 entity_name 搜索（模糊）"
                       value={q}
                       onChange={(e) => onQChange(e.target.value)}
                       onKeyDown={onSearchInputKeyDown}
                     />
-                    <button onClick={onSearch} disabled={loadingSearch} style={{ padding: "8px 12px" }}>
+                    <button data-testid="legacy-search-submit" onClick={onSearch} disabled={loadingSearch} style={{ padding: "8px 12px" }}>
                       {loadingSearch ? "搜索中…" : "搜索"}
                     </button>
                   </div>
 
                   {suggestOpen && (
                     <div
+                      data-testid="legacy-suggest-list"
                       style={{
                         position: "absolute",
                         left: 0,
@@ -750,6 +789,9 @@ export function LeftSearchPanel({
                           return (
                             <div
                               key={`${item.vid}-${item.label}-${idx}`}
+                              data-testid="legacy-suggest-item"
+                              data-vid={String(item.vid)}
+                              data-label={item.label}
                               onMouseEnter={() => setSuggestHighlightIndex(idx)}
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => onSelectSuggestItem(item)}
@@ -777,6 +819,7 @@ export function LeftSearchPanel({
 
                 <div ref={rawIdSuggestWrapRef} style={{ position: "relative" }}>
                   <input
+                    data-testid="legacy-raw-id-input"
                     style={{ width: "100%", padding: 8 }}
                     placeholder="按 entity_raw_id 搜索（contains）"
                     value={entityRawId}
@@ -786,6 +829,7 @@ export function LeftSearchPanel({
 
                   {rawIdSuggestOpen ? (
                     <div
+                      data-testid="legacy-raw-id-suggest-list"
                       style={{
                         position: "absolute",
                         left: 0,
@@ -812,6 +856,10 @@ export function LeftSearchPanel({
                           return (
                             <div
                               key={`${item.vid}-${item.entity_raw_id}-${idx}`}
+                              data-testid="legacy-raw-id-suggest-item"
+                              data-vid={String(item.vid)}
+                              data-label={item.label || ""}
+                              data-raw-id={item.entity_raw_id}
                               onMouseEnter={() => setRawIdSuggestHighlightIndex(idx)}
                               onMouseDown={(e) => e.preventDefault()}
                               onClick={() => onSelectRawIdSuggestItem(item)}
@@ -884,6 +932,18 @@ export function LeftSearchPanel({
               <div style={{ marginTop: 10, color: "#666", fontSize: 12 }}>
                 候选数量：{searchData.total_candidates}（返回 Top100）
               </div>
+              <div
+                data-testid="legacy-search-space-meta"
+                data-space-name={searchData.space_meta?.space_name || ""}
+                data-graph-status={searchData.space_meta?.graph_status || "unavailable"}
+                data-search-status={searchData.space_meta?.search_status || "unavailable"}
+                style={{ marginTop: 4, color: searchData.space_meta?.search_status === "failed" ? "#a61d24" : "#666", fontSize: 12 }}
+              >
+                space={searchData.space_meta?.space_name || "-"} | graph_status={searchData.space_meta?.graph_status || "unavailable"} |
+                {" "}search_status={searchData.space_meta?.search_status || "unavailable"}
+                {typeof searchData.space_meta?.coverage_pct === "number" ? ` | coverage=${searchData.space_meta.coverage_pct}%` : ""}
+                {searchData.space_meta?.index_status?.status ? ` | index_status=${searchData.space_meta.index_status.status}` : ""}
+              </div>
               <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 8 }}>
                 <button
                   onClick={() => onLoadSelectedSubgraph()}
@@ -900,44 +960,54 @@ export function LeftSearchPanel({
               </div>
               <hr style={{ margin: "12px 0" }} />
 
-              <div style={{ display: "grid", gap: 10 }}>
-                {searchData.nodes.map((n) => (
-                  <div
-                    key={n.id}
-                    style={{
-                      padding: 10,
-                      border:
-                        searchSelectedVid === n.id
-                          ? "2px solid #1677ff"
-                          : rootVid === n.id
-                            ? "1px solid #333"
-                            : "1px solid #f0f0f0",
-                      borderRadius: 8,
-                      cursor: "pointer",
-                    }}
-                    onClick={() => onSelectSearchResultNode(n.id)}
-                    title="点击选择该节点为待加载 root"
-                  >
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div style={{ fontWeight: 600 }}>{n.label}</div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelectSearchResultNode(n.id);
-                          onLoadSelectedSubgraph(n.id);
-                        }}
-                        disabled={graphLoadBusy}
-                        style={{ padding: "5px 8px", fontSize: 12 }}
-                      >
-                        加载子图
-                      </button>
-                    </div>
-                    <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
-                      id={n.id} | {n.entity_type} | {n.source} | score={n.score}
-                    </div>
-                    {n.snippet ? <div style={{ fontSize: 12, marginTop: 6 }}>{n.snippet}</div> : null}
+              <div data-testid="legacy-search-result-list" style={{ display: "grid", gap: 10 }}>
+                {searchData.nodes.length === 0 ? (
+                  <div style={{ fontSize: 12, color: "#666" }}>
+                    {searchStatusMessage(searchData, Boolean(q.trim() || entityRawId.trim()))}
                   </div>
-                ))}
+                ) : (
+                  searchData.nodes.map((n) => (
+                    <div
+                      key={n.id}
+                      data-testid="legacy-search-result-item"
+                      data-node-id={String(n.id)}
+                      data-label={n.label}
+                      data-raw-id={n.raw_id || ""}
+                      style={{
+                        padding: 10,
+                        border:
+                          searchSelectedVid === n.id
+                            ? "2px solid #1677ff"
+                            : rootVid === n.id
+                              ? "1px solid #333"
+                              : "1px solid #f0f0f0",
+                        borderRadius: 8,
+                        cursor: "pointer",
+                      }}
+                      onClick={() => onSelectSearchResultNode(n.id)}
+                      title="点击选择该节点为待加载 root"
+                    >
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                        <div style={{ fontWeight: 600 }}>{n.label}</div>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelectSearchResultNode(n.id);
+                            onLoadSelectedSubgraph(n.id);
+                          }}
+                          disabled={graphLoadBusy}
+                          style={{ padding: "5px 8px", fontSize: 12 }}
+                        >
+                          加载子图
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 12, color: "#666", marginTop: 4 }}>
+                        id={n.id} | {n.entity_type} | {n.source} | score={n.score}
+                      </div>
+                      {n.snippet ? <div style={{ fontSize: 12, marginTop: 6 }}>{n.snippet}</div> : null}
+                    </div>
+                  ))
+                )}
               </div>
             </>
           ) : (
@@ -1015,6 +1085,8 @@ export function LeftSearchPanel({
                 {multiSlots.map((slot, idx) => (
                   <MultiEntitySlotInput
                     key={slot.slotId}
+                    currentSpaceName={currentSpaceName}
+                    scopeKey={spaceScopeKey}
                     index={idx}
                     selected={slot.selected}
                     entityTypeOptions={entityTypeOptions}

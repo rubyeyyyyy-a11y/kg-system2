@@ -18,6 +18,7 @@ import type {
   NodeBrief,
   SuggestItem,
 } from "../types/kg";
+import type { SpaceSummary } from "../features/space/types/space";
 import { relationDisplay } from "../utils/kg";
 
 type DiscoveryQueryState = {
@@ -52,6 +53,19 @@ type DiscoveryRenderCoverageState = {
 };
 
 type DiscoveryPanelProps = {
+  currentSpace: string;
+  selectedSpace: SpaceSummary | null;
+  spaces: SpaceSummary[];
+  spaceLoading: boolean;
+  spaceError: string | null;
+  currentSpaceStatus: string;
+  currentSpaceGraphStatus: SpaceSummary["graph_status"];
+  currentSpaceSearchStatus: SpaceSummary["search_status"];
+  currentSpaceCoveragePct: number | null;
+  currentSpaceIndexStatus: SpaceSummary["index_status"];
+  spaceSwitching: boolean;
+  spaceSwitchPhase: string;
+  onSelectSpace: (spaceName: string) => void;
   seeds: SuggestItem[];
   searchQuery: DiscoveryEntityCandidateQueryState;
   searchAdvancedOpen: boolean;
@@ -141,6 +155,19 @@ type DiscoveryPanelProps = {
   onViewNodeDetailById: (vid: number) => void;
   onRun: () => void;
 };
+
+function candidateStatusMessage(
+  candidateResult: DiscoveryCandidateResultState,
+  hasQuery: boolean
+) {
+  const searchStatus = candidateResult.space_meta?.search_status || "unavailable";
+  if (searchStatus === "failed") return "当前 space 的 canonical 搜索索引校验失败，请先修复 index_status。";
+  if (searchStatus === "unavailable") return "当前 space 的 canonical 搜索索引尚未就绪，当前候选列表不能视为完整结果。";
+  if (searchStatus === "partial") return "当前 space 只有 partial canonical index，本次无候选不代表图中无实体。";
+  if (searchStatus === "empty") return "当前 space 当前没有可搜索实体。";
+  if (hasQuery) return "当前 space 下没有匹配候选。";
+  return "请输入关键词并提交搜索。";
+}
 
 function CheckboxList({
   items,
@@ -273,6 +300,19 @@ function ManagedNodeList({
 }
 
 export function DiscoveryPanel({
+  currentSpace,
+  selectedSpace,
+  spaces,
+  spaceLoading,
+  spaceError,
+  currentSpaceStatus,
+  currentSpaceGraphStatus,
+  currentSpaceSearchStatus,
+  currentSpaceCoveragePct,
+  currentSpaceIndexStatus,
+  spaceSwitching,
+  spaceSwitchPhase,
+  onSelectSpace,
   seeds,
   searchQuery,
   searchAdvancedOpen,
@@ -449,6 +489,81 @@ export function DiscoveryPanel({
         <div style={{ marginTop: 6, fontSize: 12, color: "#666" }}>
           统一搜索、加入 seeds，并基于当前 seeds 生成主题关系图。
         </div>
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #eee",
+          borderRadius: 8,
+          padding: 12,
+          display: "grid",
+          gap: 8,
+          background: "#fff",
+        }}
+      >
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <label style={{ display: "grid", gap: 6 }}>
+            <span style={{ fontSize: 12, color: "#666" }}>当前 Space</span>
+            <select
+              data-testid="current-space-selector"
+              value={currentSpace}
+              onChange={(e) => onSelectSpace(e.target.value)}
+              disabled={spaceLoading || spaceSwitching || spaces.length <= 0}
+              style={{ minWidth: 220, padding: "8px 10px" }}
+            >
+              {spaces.map((space) => (
+                <option
+                  key={space.space_name}
+                  value={space.space_name}
+                  disabled={space.status !== "ready" && space.space_name !== currentSpace}
+                >
+                  {(space.display_name || space.space_name).trim()} [{space.status}]
+                </option>
+              ))}
+            </select>
+          </label>
+          <div
+            data-testid="current-space-display"
+            data-space-name={currentSpace || ""}
+            data-registry-status={currentSpaceStatus || ""}
+            data-graph-status={currentSpaceGraphStatus || "unavailable"}
+            data-search-status={currentSpaceSearchStatus || "unavailable"}
+            style={{ fontSize: 12, color: "#666" }}
+          >
+            {spaceLoading
+              ? "spaces loading..."
+              : `${currentSpace || "-"} | registry_status=${currentSpaceStatus || "-"} | graph_status=${currentSpaceGraphStatus || "unavailable"} | search_status=${currentSpaceSearchStatus || "unavailable"}`}
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: "#666" }}>
+          ES 候选层负责 search / suggest / suggest_raw_id / entity_candidates；Nebula 图层负责 discovery / detail / subgraph / expand / relation_types。
+        </div>
+        <div style={{ fontSize: 12, color: "#666" }}>
+          历史空间需要 canonical backfill 才能恢复完整候选覆盖；managed space 导入后天然按 canonical 契约写入。小空间图结果少通常是规模问题，不是功能失败。
+        </div>
+        {currentSpaceIndexStatus ? (
+          <div
+            data-testid="current-space-readiness-display"
+            data-space-name={currentSpace || ""}
+            data-index-status={currentSpaceIndexStatus.status}
+            data-doc-count={String(currentSpaceIndexStatus.doc_count)}
+            data-coverage-pct={typeof currentSpaceCoveragePct === "number" ? String(currentSpaceCoveragePct) : ""}
+            style={{ fontSize: 12, color: currentSpaceIndexStatus.status === "failed" ? "#a61d24" : "#666" }}
+          >
+            index_status={currentSpaceIndexStatus.status} | canonical_docs={currentSpaceIndexStatus.doc_count}
+            {typeof currentSpaceIndexStatus.nebula_entity_count === "number"
+              ? ` | nebula_entities=${currentSpaceIndexStatus.nebula_entity_count}`
+              : ""}
+            {typeof currentSpaceCoveragePct === "number" ? ` | coverage=${currentSpaceCoveragePct}%` : ""}
+            {currentSpaceIndexStatus.note ? ` | ${currentSpaceIndexStatus.note}` : ""}
+          </div>
+        ) : selectedSpace?.status === "ready" ? (
+          <div style={{ fontSize: 12, color: "#666" }}>index_status 尚未写回 registry，请先刷新或执行 verify/backfill。</div>
+        ) : null}
+        {spaceSwitching ? (
+          <div style={{ fontSize: 12, color: "#ad6800" }}>current space switching: {spaceSwitchPhase}</div>
+        ) : null}
+        {spaceError ? <div style={{ fontSize: 12, color: "#a61d24" }}>space 加载失败：{spaceError}</div> : null}
       </div>
 
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 12, display: "grid", gap: 10, background: "#fafafa" }}>
@@ -877,6 +992,7 @@ export function DiscoveryPanel({
 
         <div style={{ display: "grid", gap: 8 }}>
           <button
+            data-testid="discovery-run-button"
             onClick={onRun}
             disabled={loading || seeds.length === 0}
             style={{
@@ -912,6 +1028,7 @@ export function DiscoveryPanel({
 
         <div ref={searchWrapRef} style={{ position: "relative" }}>
           <input
+            data-testid="discovery-search-input"
             value={searchQuery.q}
             onChange={(e) => onUpdateSearchQuery({ q: e.target.value })}
             onKeyDown={handleSearchKeyDown}
@@ -920,6 +1037,7 @@ export function DiscoveryPanel({
           />
           {preview.open ? (
             <div
+              data-testid="discovery-preview-list"
               style={{
                 position: "absolute",
                 left: 0,
@@ -947,6 +1065,10 @@ export function DiscoveryPanel({
                     <button
                       key={`${item.vid}-${idx}`}
                       type="button"
+                      data-testid="discovery-preview-item"
+                      data-vid={String(item.vid)}
+                      data-label={item.label}
+                      data-raw-id={item.raw_id || ""}
                       onMouseEnter={() => onSetPreviewHighlightIndex(idx)}
                       onClick={() => onSelectPreviewItem(item)}
                       style={{
@@ -977,7 +1099,7 @@ export function DiscoveryPanel({
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 8 }}>
-          <button onClick={onSubmitSearch} disabled={candidateResult.loading} style={{ padding: "8px 12px", width: "100%" }}>
+          <button data-testid="discovery-search-submit" onClick={onSubmitSearch} disabled={candidateResult.loading} style={{ padding: "8px 12px", width: "100%" }}>
             {candidateResult.loading ? "搜索中…" : "搜索候选"}
           </button>
           <button onClick={onToggleSearchAdvanced} style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}>
@@ -1114,12 +1236,30 @@ export function DiscoveryPanel({
         {candidateResult.error ? (
           <div style={{ fontSize: 12, color: "#d4380d" }}>候选搜索失败：{candidateResult.error}</div>
         ) : null}
+        <div
+          data-testid="discovery-candidate-space-meta"
+          data-space-name={candidateResult.space_meta?.space_name || currentSpace || ""}
+          data-graph-status={candidateResult.space_meta?.graph_status || "unavailable"}
+          data-search-status={candidateResult.space_meta?.search_status || "unavailable"}
+          style={{ fontSize: 12, color: candidateResult.space_meta?.search_status === "failed" ? "#a61d24" : "#666" }}
+        >
+          candidate_space={candidateResult.space_meta?.space_name || currentSpace || "-"} | graph_status=
+          {candidateResult.space_meta?.graph_status || "unavailable"} | search_status=
+          {candidateResult.space_meta?.search_status || "unavailable"}
+          {typeof candidateResult.space_meta?.coverage_pct === "number" ? ` | coverage=${candidateResult.space_meta.coverage_pct}%` : ""}
+          {candidateResult.space_meta?.index_status?.status ? ` | index_status=${candidateResult.space_meta.index_status.status}` : ""}
+        </div>
 
-        <div style={{ display: "grid", gap: 10 }}>
+        <div data-testid="discovery-candidate-list" style={{ display: "grid", gap: 10 }}>
           {candidateResult.loading ? (
-            <div style={{ fontSize: 12, color: "#666" }}>候选加载中…</div>
+            <div data-testid="discovery-candidate-loading" style={{ fontSize: 12, color: "#666" }}>候选加载中…</div>
           ) : candidateResult.items.length === 0 ? (
-            <div style={{ fontSize: 12, color: "#666" }}>暂无候选实体，请先输入关键词并提交搜索。</div>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              {candidateStatusMessage(
+                candidateResult,
+                Boolean(searchQuery.q.trim() || searchQuery.entityRawId.trim())
+              )}
+            </div>
           ) : (
             candidateResult.items.map((item) => (
               <EntityCandidateCard

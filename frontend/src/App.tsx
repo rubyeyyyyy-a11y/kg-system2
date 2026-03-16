@@ -16,22 +16,19 @@ import { DiscoveryPanel } from "./components/DiscoveryPanel";
 import { LeftSearchPanel } from "./components/LeftSearchPanel";
 import { Resizer } from "./components/Resizer";
 import { TopBar } from "./components/TopBar";
+import { useDiscoverySessionController } from "./features/discovery/hooks/useDiscoverySessionController";
 import { ImportWorkspace } from "./features/import/ImportWorkspace";
-import { useDiscoveryCandidateResults } from "./hooks/useDiscoveryCandidateResults";
-import { useDiscoveryCandidateSearch } from "./hooks/useDiscoveryCandidateSearch";
+import { useLegacySearchSessionController } from "./features/legacy/hooks/useLegacySearchSessionController";
+import { useSpaceSessionController } from "./features/space/hooks/useSpaceSessionController";
 import { useDiscoveryEntityDetail } from "./hooks/useDiscoveryEntityDetail";
 import { useDiscoveryGraphState } from "./hooks/useDiscoveryGraphState";
 import { useGraphLayoutController } from "./hooks/useGraphLayoutController";
 import { useGraphPatchBuilder } from "./hooks/useGraphPatchBuilder";
-import { useDiscoverySeeds } from "./hooks/useDiscoverySeeds";
-import { useEdgeSuggest } from "./hooks/useEdgeSuggest";
 import { useEntityTypeOptions } from "./hooks/useEntityTypeOptions";
 import { useGraphData } from "./hooks/useGraphData";
 import { useGraphViewModel } from "./hooks/useGraphViewModel";
 import { useGraphViewportController } from "./hooks/useGraphViewportController";
-import { useRawIdSuggest } from "./hooks/useRawIdSuggest";
 import { useRelationFilter } from "./hooks/useRelationFilter";
-import { useSuggest } from "./hooks/useSuggest";
 import { useVisibilityRanking } from "./hooks/useVisibilityRanking";
 import { parseApiError } from "./utils/httpError";
 import type {
@@ -39,7 +36,6 @@ import type {
   EdgeDetailResp,
   EdgePatchResp,
   EdgeSearchItem,
-  EdgeSearchResp,
   DiscoveryEntityCandidateItem,
   GraphDiscoveryResp,
   MultiEntityGraphResp,
@@ -48,8 +44,6 @@ import type {
   NodePatchResp,
   PairPathCandidate,
   RelationTypeItem,
-  RawIdSuggestItem,
-  SearchResp,
   Sel,
   SelectionSource,
   SuggestItem,
@@ -76,20 +70,6 @@ type MultiGraphRequest = {
   ignore_direction: boolean;
 };
 
-type LegacyWorkspaceSession =
-  | {
-      kind: "single";
-      rootVid: number;
-      hop: number;
-      relations: string[];
-    }
-  | {
-      kind: "multi";
-      params: MultiGraphParams;
-      relations: string[];
-    }
-  | null;
-
 type GraphSourceMode = "single" | "multi" | "discovery";
 
 type WorkspaceMode = "legacy" | "discovery" | "import";
@@ -107,25 +87,18 @@ type DiscoveryRequest = {
   ranking_mode: "v1" | "layered_multiseed";
 };
 
-type DiscoveryQueryState = {
-  allowedEntityTypes: string[];
-  allowedRelationTypes: string[];
-  maxNodes: number;
-  maxEdges: number;
-  topKPerType: number;
-  includeCandidateCandidateEdges: boolean;
-  includeSeedSeedEdges: boolean;
-  hop: number;
-};
-
-type DiscoveryRuntimeState = {
-  entityTypes: string[];
-  relationTypes: string[];
-};
-
 type UiNotice = {
   level: "error" | "warn" | "info";
   message: string;
+};
+
+type DiscoveryResultExplain = {
+  message: string;
+  requestSpace: string;
+  responseSpace: string;
+  nodeCount: number;
+  edgeCount: number;
+  candidateCount: number;
 };
 
 const LEFT_WIDTH_KEY = "kg:leftW";
@@ -215,74 +188,232 @@ function selectionFollowsDiscoveryVisibility(sel: Sel) {
   );
 }
 
+function deriveDiscoveryResultExplain(
+  result: GraphDiscoveryResp | null,
+  lastRequest: DiscoveryRequest | null
+): DiscoveryResultExplain | null {
+  if (!result) return null;
+  const stats = result.stats || null;
+  const requestSpace = String(result.request_space || "").trim();
+  const responseSpace = String(result.space_meta?.space_name || requestSpace || "").trim();
+  const seedCount = Math.max(0, Number(stats?.seed_count ?? lastRequest?.seed_vids.length ?? 0));
+  const nodeCount = Math.max(0, Number(stats?.node_count ?? result.nodes.length ?? 0));
+  const edgeCount = Math.max(0, Number(stats?.edge_count ?? result.edges.length ?? 0));
+  const candidateCount = Math.max(0, Number(stats?.candidate_count ?? 0));
+  const seedOnly = edgeCount === 0 && nodeCount <= Math.max(1, seedCount);
+  const noDiscoverableRelations = candidateCount === 0 && edgeCount === 0;
+  if (!seedOnly && !noDiscoverableRelations) return null;
+
+  const seedLabel = seedCount > 1 ? "当前 seeds" : "当前 seed";
+  const scopeLabel = responseSpace || requestSpace || "当前 space";
+  const mismatchSuffix =
+    requestSpace && responseSpace && requestSpace !== responseSpace
+      ? ` 请求 space=${requestSpace}，响应 space=${responseSpace}。`
+      : "";
+
+  return {
+    message: `${seedLabel} 在当前 space (${scopeLabel}) 中没有可发现关系边。本次 discovery 请求已成功返回，但结果只包含 seed 节点，不是图谱渲染失败。${mismatchSuffix}`,
+    requestSpace,
+    responseSpace,
+    nodeCount,
+    edgeCount,
+    candidateCount,
+  };
+}
+
+function requestSpaceOrFallback(result: { request_space?: string; space_meta?: { space_name?: string } } | null) {
+  return String(result?.request_space || result?.space_meta?.space_name || "").trim();
+}
+
 export default function App() {
-  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("legacy");
-  const [q, setQ] = useState("");
-  const [searchName, setSearchName] = useState(true);
-  const [searchDesc, setSearchDesc] = useState(false);
-  const [entityType, setEntityType] = useState("");
-  const [entityRawId, setEntityRawId] = useState("");
-  const [source, setSource] = useState("");
-  const [loadingSearch, setLoadingSearch] = useState(false);
-  const searchAbortRef = useRef<AbortController | null>(null);
-  const [searchData, setSearchData] = useState<SearchResp>({ nodes: [], edges: [], total_candidates: 0 });
-  const [searchSelectedVid, setSearchSelectedVid] = useState<number | null>(null);
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("import");
   const [uiNotice, setUiNotice] = useState<UiNotice | null>(null);
+  const legacyResetRef = useRef<(nextSpace: string) => void>(() => undefined);
+  const discoveryResetRef = useRef<(nextSpace: string) => void>(() => undefined);
+  const pageResetRef = useRef<(nextSpace: string) => void>(() => undefined);
+
+  const {
+    setCurrentSpace,
+    currentSpaceStore,
+    spaces,
+    resolvedCurrent,
+    spacesLoading,
+    spacesError,
+    refreshSpaces,
+    effectiveCurrentSpace,
+    activeSpaceRef,
+    selectedSpaceSummary,
+    currentSpaceStatus,
+    currentSpaceGraphStatus,
+    currentSpaceSearchStatus,
+    currentSpaceCoveragePct,
+    currentSpaceIndexStatus,
+    spaceSwitchState,
+    spaceSwitchBlocked,
+    spaceSwitchPhaseLabel,
+    guardSpaceScopedRequest,
+  } = useSpaceSessionController({
+    legacyResetRef,
+    discoveryResetRef,
+    pageResetRef,
+    onSwitchNotice: setUiNotice,
+  });
 
   const {
     options: entityTypeOptions,
     usedFallback: entityTypeFallbackUsed,
     ensureLoaded: ensureEntityTypesLoaded,
-  } = useEntityTypeOptions({ deferMs: 1200 });
+  } = useEntityTypeOptions({
+    deferMs: 1200,
+    scopeKey: effectiveCurrentSpace,
+    enabled: !currentSpaceStore.isSwitching,
+    spaceName: effectiveCurrentSpace,
+  });
 
-  const [edgeQ, setEdgeQ] = useState("");
-  const [edgeSearchInRelation, setEdgeSearchInRelation] = useState(true);
-  const [edgeSearchInProps, setEdgeSearchInProps] = useState(true);
-  const [edgeSearchSourceDb, setEdgeSearchSourceDb] = useState("");
-  const [edgeSearchRelation, setEdgeSearchRelation] = useState("");
-  const [loadingEdgeSearch, setLoadingEdgeSearch] = useState(false);
-  const [edgeSearchData, setEdgeSearchData] = useState<EdgeSearchResp>({ edges: [], total_candidates: 0 });
-  const [edgeSearchNotice, setEdgeSearchNotice] = useState<string | null>(null);
-  const [pendingEdgeLocate, setPendingEdgeLocate] = useState<EdgeSearchItem | null>(null);
+  const legacySession = useLegacySearchSessionController({
+    currentSpaceName: effectiveCurrentSpace,
+    spaceScopeKey: effectiveCurrentSpace,
+    onSearch: () => {
+      void runSearch();
+    },
+    onEdgeSearch: () => {
+      void runEdgeSearch();
+    },
+    onSelectNameSuggest: (item) => {
+      void runSearchWithParams(item.label, entityRawId);
+    },
+    onSelectRawIdSuggest: (item) => {
+      void runSearchWithParams(item.label || q, item.entity_raw_id);
+    },
+    onSelectEdgeSuggest: (item) => {
+      setEdgeQ(relationDisplay(item.relation) || item.relation);
+      void handleSelectEdgeCandidate(item);
+    },
+  });
 
-  const [loadingMultiGraph, setLoadingMultiGraph] = useState(false);
-  const [loadingDiscovery, setLoadingDiscovery] = useState(false);
-  const [loadingApplyPathChoice, setLoadingApplyPathChoice] = useState(false);
+  const {
+    q,
+    searchName,
+    setSearchName,
+    searchDesc,
+    setSearchDesc,
+    entityType,
+    setEntityType,
+    entityRawId,
+    source,
+    setSource,
+    loadingSearch,
+    setLoadingSearch,
+    searchData,
+    setSearchData,
+    searchSelectedVid,
+    setSearchSelectedVid,
+    edgeQ,
+    setEdgeQ,
+    edgeSearchInRelation,
+    setEdgeSearchInRelation,
+    edgeSearchInProps,
+    setEdgeSearchInProps,
+    edgeSearchSourceDb,
+    setEdgeSearchSourceDb,
+    edgeSearchRelation,
+    setEdgeSearchRelation,
+    loadingEdgeSearch,
+    setLoadingEdgeSearch,
+    edgeSearchData,
+    setEdgeSearchData,
+    edgeSearchNotice,
+    setEdgeSearchNotice,
+    pendingEdgeLocate,
+    setPendingEdgeLocate,
+    loadingMultiGraph,
+    setLoadingMultiGraph,
+    loadingApplyPathChoice,
+    setLoadingApplyPathChoice,
+    legacyWorkspaceSession,
+    setLegacyWorkspaceSession,
+    lastMultiGraphParams,
+    setLastMultiGraphParams,
+    lastMultiGraphRequest,
+    setLastMultiGraphRequest,
+    pathCandidates,
+    setPathCandidates,
+    chosenPathByPair,
+    setChosenPathByPair,
+    appliedExtraPaths,
+    setAppliedExtraPaths,
+    searchAbortRef,
+    edgeSearchAbortRef,
+    multiGraphAbortRef,
+    applyPathAbortRef,
+    suggestOpen,
+    suggestItems,
+    suggestLoading,
+    suggestError,
+    suggestHighlightIndex,
+    suggestWrapRef,
+    onInputChange,
+    onKeyDown,
+    setSuggestHighlightIndex,
+    closeSuggestPanel,
+    selectSuggestCandidate,
+    rawIdSuggestOpen,
+    rawIdSuggestItems,
+    rawIdSuggestLoading,
+    rawIdSuggestError,
+    rawIdSuggestHighlightIndex,
+    rawIdSuggestWrapRef,
+    onRawIdInputChange,
+    onRawIdKeyDown,
+    setRawIdSuggestHighlightIndex,
+    closeRawIdSuggestPanel,
+    selectRawIdSuggestCandidate,
+    edgeSuggestOpen,
+    edgeSuggestItems,
+    edgeSuggestLoading,
+    edgeSuggestError,
+    edgeSuggestHighlightIndex,
+    edgeSuggestWrapRef,
+    onEdgeInputChange,
+    onEdgeKeyDown,
+    setEdgeSuggestHighlightIndex,
+    closeEdgeSuggestPanel,
+    selectEdgeSuggestCandidate,
+    abortSpaceScopedRequests,
+    resetForSpaceChange: resetLegacySearchSession,
+  } = legacySession;
+
+  const discoverySession = useDiscoverySessionController({
+    currentSpaceName: effectiveCurrentSpace,
+    spaceScopeKey: effectiveCurrentSpace,
+    onError: (message) => setUiNotice({ level: "error", message }),
+  });
+
+  const {
+    discoveryAbortRef,
+    loadingDiscovery,
+    setLoadingDiscovery,
+    lastDiscoveryRequest,
+    setLastDiscoveryRequest,
+    discoverySeedsState,
+    discoveryResult,
+    setDiscoveryResult,
+    discoveryCandidateSearch,
+    discoveryCandidateResults,
+    discoveryQuery,
+    setDiscoveryQuery,
+    discoveryRuntimeFilters,
+    setDiscoveryRuntimeFilters,
+    discoveryExpandFilters,
+    setDiscoveryExpandFilters,
+    discoveryRenderedPanelCollapsed,
+    setDiscoveryRenderedPanelCollapsed,
+    discoveryDroppedPanelCollapsed,
+    setDiscoveryDroppedPanelCollapsed,
+    resetForSpaceChange: resetDiscoverySession,
+  } = discoverySession;
+
   const [graphSourceMode, setGraphSourceMode] = useState<GraphSourceMode>("single");
-  const [legacyWorkspaceSession, setLegacyWorkspaceSession] = useState<LegacyWorkspaceSession>(null);
-  const [lastMultiGraphParams, setLastMultiGraphParams] = useState<MultiGraphParams | null>(null);
-  const [lastMultiGraphRequest, setLastMultiGraphRequest] = useState<MultiGraphRequest | null>(null);
-  const [lastDiscoveryRequest, setLastDiscoveryRequest] = useState<DiscoveryRequest | null>(null);
-  const discoverySeedsState = useDiscoverySeeds();
-  const [discoveryResult, setDiscoveryResult] = useState<GraphDiscoveryResp | null>(null);
-  const discoveryCandidateSearch = useDiscoveryCandidateSearch();
-  const discoveryCandidateResults = useDiscoveryCandidateResults({
-    query: discoveryCandidateSearch.query,
-    onError: (message) => setUiNotice({ level: "error", message: `候选搜索失败：${message}` }),
-  });
-  const [discoveryQuery, setDiscoveryQuery] = useState<DiscoveryQueryState>({
-    allowedEntityTypes: [],
-    allowedRelationTypes: [],
-    maxNodes: 90,
-    maxEdges: 140,
-    topKPerType: 12,
-    includeCandidateCandidateEdges: true,
-    includeSeedSeedEdges: false,
-    hop: 3,
-  });
-  const [discoveryRuntimeFilters, setDiscoveryRuntimeFilters] = useState<DiscoveryRuntimeState>({
-    entityTypes: [],
-    relationTypes: [],
-  });
-  const [discoveryExpandFilters, setDiscoveryExpandFilters] = useState<DiscoveryRuntimeState>({
-    entityTypes: [],
-    relationTypes: [],
-  });
-  const [discoveryRenderedPanelCollapsed, setDiscoveryRenderedPanelCollapsed] = useState(true);
-  const [discoveryDroppedPanelCollapsed, setDiscoveryDroppedPanelCollapsed] = useState(false);
-  const [pathCandidates, setPathCandidates] = useState<PairPathCandidate[]>([]);
-  const [chosenPathByPair, setChosenPathByPair] = useState<Record<string, number>>({});
-  const [appliedExtraPaths, setAppliedExtraPaths] = useState<Record<string, number[]>>({});
 
   const [sel, setSel] = useState<Sel>({ kind: "none" });
   const [nodeDetail, setNodeDetail] = useState<NodeDetailResp | null>(null);
@@ -312,34 +443,55 @@ export default function App() {
     useRef<((nextNodeId: string | null, nextEdgeId: string | null, force?: boolean) => void) | null>(null);
   const { viewportRequest, requestFocusNode, requestFitView } = useGraphViewportController();
 
+  useEffect(() => {
+    legacyResetRef.current = resetLegacySearchSession;
+  }, [resetLegacySearchSession]);
+
+  useEffect(() => {
+    discoveryResetRef.current = resetDiscoverySession;
+  }, [resetDiscoverySession]);
+
+  const abortAllSpaceScopedRequests = useCallback(() => {
+    abortSpaceScopedRequests();
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = null;
+  }, [abortSpaceScopedRequests, discoveryAbortRef]);
+
   const loadNodeDetail = useCallback(async (vid: number) => {
+    const requestSpace = activeSpaceRef.current;
     setDetailLoading(true);
     try {
-      setNodeDetail(await nodeDetailApi(vid));
+      const detail = await nodeDetailApi(vid, { spaceName: requestSpace });
+      if (activeSpaceRef.current !== requestSpace) return;
+      setNodeDetail(detail);
     } catch (e: unknown) {
+      if (activeSpaceRef.current !== requestSpace) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `节点详情加载失败：${parsed.message}` });
     } finally {
-      setDetailLoading(false);
+      if (activeSpaceRef.current === requestSpace) setDetailLoading(false);
     }
   }, []);
 
   const loadEdgeDetail = useCallback(async (src: number, dst: number, rank: string, edgeType = EDGE_TYPE_DEFAULT) => {
+    const requestSpace = activeSpaceRef.current;
     setDetailLoading(true);
     try {
-      setEdgeDetail(
-        await edgeDetailApi({
-          edge_type: edgeType,
-          src,
-          dst,
-          rank,
-        })
-      );
+      const detail = await edgeDetailApi({
+        edge_type: edgeType,
+        src,
+        dst,
+        rank,
+        spaceName: requestSpace,
+      });
+      if (activeSpaceRef.current !== requestSpace) return;
+      setEdgeDetail(detail);
     } catch (e: unknown) {
+      if (activeSpaceRef.current !== requestSpace) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `边详情加载失败：${parsed.message}` });
     } finally {
-      setDetailLoading(false);
+      if (activeSpaceRef.current === requestSpace) setDetailLoading(false);
     }
   }, []);
 
@@ -363,7 +515,7 @@ export default function App() {
       set: setFields,
       expected_version: expectedVersion,
       updated_by: updatedBy,
-    });
+    }, { spaceName: activeSpaceRef.current });
 
     updateNodeInGraph(vid, {
       label: resp.updated.entity_name ?? undefined,
@@ -483,6 +635,7 @@ export default function App() {
       set: setFields,
       expected_version: expectedVersion,
       updated_by: updatedBy,
+      spaceName: activeSpaceRef.current,
     });
 
     updateEdgeInGraph(
@@ -606,6 +759,8 @@ export default function App() {
     renderMutation: legacyRenderMutation,
     requestRelayout: requestLegacyRelayout,
   } = useGraphData({
+    spaceName: effectiveCurrentSpace,
+    scopeKey: effectiveCurrentSpace,
     selectedNodeVid,
     onSelectNode: handleSelectNode,
     onClearSelection: handleClearSelection,
@@ -671,6 +826,7 @@ export default function App() {
   );
 
   const relationFilter = useRelationFilter({
+    scopeKey: effectiveCurrentSpace,
     appliedRelations: relations,
     graphNodes,
     graphEdges,
@@ -748,6 +904,14 @@ export default function App() {
       edges: nextPayload.edges,
       stats: (nextPayload.stats || null) as Record<string, unknown> | null,
       hop: request.hop,
+    });
+    console.info("discovery payload applied", {
+      requestSpace: requestSpaceOrFallback(nextPayload),
+      responseSpace: String(nextPayload.space_meta?.space_name || ""),
+      graphStatus: nextPayload.space_meta?.graph_status || "",
+      nodeCount: Number(nextPayload.stats?.node_count ?? nextPayload.nodes.length ?? 0),
+      edgeCount: Number(nextPayload.stats?.edge_count ?? nextPayload.edges.length ?? 0),
+      candidateCount: Number(nextPayload.stats?.candidate_count ?? 0),
     });
     setDiscoveryResult(nextPayload);
     setLastDiscoveryRequest(request);
@@ -953,6 +1117,8 @@ export default function App() {
 
   async function runDiscovery(requestOverride?: DiscoveryRequest) {
     const request = requestOverride ?? buildDiscoveryRequest();
+    const requestSpace = activeSpaceRef.current;
+    if (!guardSpaceScopedRequest("统一关系发现")) return;
     if (request.seed_vids.length <= 0) {
       setUiNotice({ level: "info", message: "请先添加至少一个 seed 节点。" });
       return;
@@ -960,11 +1126,18 @@ export default function App() {
 
     if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
     relationFilter.exitPreview();
+    discoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    discoveryAbortRef.current = controller;
     setLoadingDiscovery(true);
     try {
-      const json = await graphDiscoveryApi(request);
+      const json = await graphDiscoveryApi({ ...request, signal: controller.signal, spaceName: requestSpace });
+      if (controller.signal.aborted) return;
+      if (activeSpaceRef.current !== requestSpace) return;
       applyDiscoveryPayload(json, request);
-      if (json.stats?.truncated) {
+      if (json.warnings?.length) {
+        setUiNotice({ level: "warn", message: json.warnings[0] });
+      } else if (json.stats?.truncated) {
         const droppedByBudget = Number(json.stats.dropped_by_budget || 0);
         const droppedByTypeBudget = Number(json.stats.dropped_by_type_budget || 0);
         const droppedGenericHubs = Number(json.stats.dropped_generic_hubs || 0);
@@ -976,10 +1149,14 @@ export default function App() {
         });
       }
     } catch (e: unknown) {
+      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `统一关系发现失败：${parsed.message}` });
     } finally {
-      setLoadingDiscovery(false);
+      if (discoveryAbortRef.current === controller) {
+        discoveryAbortRef.current = null;
+        setLoadingDiscovery(false);
+      }
     }
   }
 
@@ -1042,6 +1219,8 @@ export default function App() {
   async function runSearchWithParams(nextQ: string, nextEntityRawId: string) {
     const qTrimmed = nextQ.trim();
     const rawIdTrimmed = nextEntityRawId.trim();
+    const requestSpace = activeSpaceRef.current;
+    if (!guardSpaceScopedRequest("搜索")) return;
     if (!qTrimmed && !rawIdTrimmed) return;
 
     const useRawId = !!rawIdTrimmed;
@@ -1062,7 +1241,9 @@ export default function App() {
         entity_raw_id_mode: "contains",
         include_edges: false,
         signal: controller.signal,
+        spaceName: requestSpace,
       });
+      if (activeSpaceRef.current !== requestSpace) return;
       setSearchData(json);
       const firstVid = (json.nodes || [])[0]?.id;
       setSearchSelectedVid(Number.isFinite(firstVid) ? Number(firstVid) : null);
@@ -1094,11 +1275,16 @@ export default function App() {
 
   useEffect(() => {
     return () => {
-      searchAbortRef.current?.abort();
+      abortAllSpaceScopedRequests();
     };
-  }, []);
+  }, [abortAllSpaceScopedRequests]);
   async function runEdgeSearch() {
+    const requestSpace = activeSpaceRef.current;
+    if (!guardSpaceScopedRequest("边搜索")) return;
     if (!edgeQ.trim()) return;
+    edgeSearchAbortRef.current?.abort();
+    const controller = new AbortController();
+    edgeSearchAbortRef.current = controller;
     setLoadingEdgeSearch(true);
     setEdgeSearchNotice(null);
     try {
@@ -1109,17 +1295,27 @@ export default function App() {
         source_db: edgeSearchSourceDb || null,
         relation: edgeSearchRelation || null,
         limit: 100,
+        signal: controller.signal,
+        spaceName: requestSpace,
       });
+      if (controller.signal.aborted) return;
+      if (activeSpaceRef.current !== requestSpace) return;
       setEdgeSearchData(json);
     } catch (e: unknown) {
+      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `边搜索失败：${parsed.message}` });
     } finally {
-      setLoadingEdgeSearch(false);
+      if (edgeSearchAbortRef.current === controller) {
+        edgeSearchAbortRef.current = null;
+        setLoadingEdgeSearch(false);
+      }
     }
   }
 
   async function runMultiGraph(params: MultiGraphParams, overrideRelations?: string[]) {
+    const requestSpace = activeSpaceRef.current;
+    if (!guardSpaceScopedRequest("图谱生成")) return;
     relationFilter.exitPreview();
     const seen = new Set<number>();
     const selectedEntities = params.selectedEntities.filter((x) => {
@@ -1152,10 +1348,15 @@ export default function App() {
       ignore_direction: true,
     };
 
+    multiGraphAbortRef.current?.abort();
+    const controller = new AbortController();
+    multiGraphAbortRef.current = controller;
     setLoadingMultiGraph(true);
     setEdgeSearchNotice(null);
     try {
-      const json = await multiEntityGraphApi(reqBody);
+      const json = await multiEntityGraphApi({ ...reqBody, signal: controller.signal, spaceName: requestSpace });
+      if (controller.signal.aborted) return;
+      if (activeSpaceRef.current !== requestSpace) return;
       applyMultiGraphPayload(json, selectedEntities, vids[0], { ...params, k: safeK as 2 | 3 }, reqBody);
       if (json.stats?.truncated) {
         setUiNotice({
@@ -1164,10 +1365,14 @@ export default function App() {
         });
       }
     } catch (e: unknown) {
+      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `多实体图生成失败：${parsed.message}` });
     } finally {
-      setLoadingMultiGraph(false);
+      if (multiGraphAbortRef.current === controller) {
+        multiGraphAbortRef.current = null;
+        setLoadingMultiGraph(false);
+      }
     }
   }
 
@@ -1200,6 +1405,7 @@ export default function App() {
   async function applyChosenPathForPair(u: number, v: number) {
     if (graphSourceMode !== "multi") return;
     if (!lastMultiGraphRequest || !lastMultiGraphParams) return;
+    if (!guardSpaceScopedRequest("路径应用")) return;
 
     const target = pathCandidates.find((p) => pairKey(p.u, p.v) === pairKey(u, v));
     if (!target || target.candidates.length <= 0) return;
@@ -1213,12 +1419,20 @@ export default function App() {
     const choices = buildApplyPathChoices(pathCandidates, nextChosenByPair);
     if (choices.length <= 0) return;
 
+    applyPathAbortRef.current?.abort();
+    const controller = new AbortController();
+    applyPathAbortRef.current = controller;
+    const requestSpace = activeSpaceRef.current;
     setLoadingApplyPathChoice(true);
     try {
       const json = await multiEntityGraphApplyPathsApi({
         base_request: lastMultiGraphRequest,
         choices,
+        signal: controller.signal,
+        spaceName: requestSpace,
       });
+      if (controller.signal.aborted) return;
+      if (activeSpaceRef.current !== requestSpace) return;
       const selectedEntities = lastMultiGraphParams.selectedEntities;
       const nextRoot = selectedEntities[0]?.vid ?? lastMultiGraphRequest.vids[0];
       applyMultiGraphPayload(json, selectedEntities, nextRoot, lastMultiGraphParams, lastMultiGraphRequest);
@@ -1229,10 +1443,14 @@ export default function App() {
         });
       }
     } catch (e: unknown) {
+      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `路径应用失败：${parsed.message}` });
     } finally {
-      setLoadingApplyPathChoice(false);
+      if (applyPathAbortRef.current === controller) {
+        applyPathAbortRef.current = null;
+        setLoadingApplyPathChoice(false);
+      }
     }
   }
 
@@ -1306,6 +1524,7 @@ export default function App() {
   }
 
   async function loadSingleSubgraph(vid: number, autoSelectRoot = true) {
+    if (!guardSpaceScopedRequest("图谱渲染")) return;
     relationFilter.exitPreview();
     setGraphSourceMode("single");
     setLastMultiGraphParams(null);
@@ -1333,6 +1552,7 @@ export default function App() {
   }
 
   async function reloadGraphByCurrentMode(nextRoot: number) {
+    if (!guardSpaceScopedRequest("图谱重载")) return;
     if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
       await runDiscovery(lastDiscoveryRequest);
       return;
@@ -1345,6 +1565,7 @@ export default function App() {
   }
 
   async function loadGraphWithFilters(nextRoot: number, nextHop: number, nextRelations: string[]) {
+    if (!guardSpaceScopedRequest("图谱过滤重跑")) return;
     relationFilter.exitPreview();
     if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
       await runDiscovery({
@@ -1365,85 +1586,6 @@ export default function App() {
     rememberSingleLegacySession(nextRoot, nextHop, nextRelations);
   }
 
-  const {
-    suggestOpen,
-    suggestItems,
-    suggestLoading,
-    suggestError,
-    suggestHighlightIndex,
-    suggestWrapRef,
-    onInputChange,
-    onKeyDown,
-    setSuggestHighlightIndex,
-    closeSuggestPanel,
-    selectSuggestCandidate,
-  } = useSuggest({
-    q,
-    entityType,
-    source,
-    onSelect: (item) => {
-      setQ(item.label);
-      void runSearchWithParams(item.label, entityRawId);
-    },
-    onQueryChange: setQ,
-    onSearch: () => {
-      void runSearch();
-    },
-  });
-
-  const {
-    suggestOpen: rawIdSuggestOpen,
-    suggestItems: rawIdSuggestItems,
-    suggestLoading: rawIdSuggestLoading,
-    suggestError: rawIdSuggestError,
-    suggestHighlightIndex: rawIdSuggestHighlightIndex,
-    suggestWrapRef: rawIdSuggestWrapRef,
-    onInputChange: onRawIdInputChange,
-    onKeyDown: onRawIdKeyDown,
-    setSuggestHighlightIndex: setRawIdSuggestHighlightIndex,
-    closeSuggestPanel: closeRawIdSuggestPanel,
-    selectSuggestCandidate: selectRawIdSuggestCandidate,
-  } = useRawIdSuggest({
-    q: entityRawId,
-    entityType,
-    source,
-    onSelect: (item: RawIdSuggestItem) => {
-      setEntityRawId(item.entity_raw_id);
-      if (item.label) setQ(item.label);
-      void runSearchWithParams(item.label || q, item.entity_raw_id);
-    },
-    onQueryChange: setEntityRawId,
-    onSearch: () => {
-      void runSearch();
-    },
-  });
-
-  const {
-    suggestOpen: edgeSuggestOpen,
-    suggestItems: edgeSuggestItems,
-    suggestLoading: edgeSuggestLoading,
-    suggestError: edgeSuggestError,
-    suggestHighlightIndex: edgeSuggestHighlightIndex,
-    suggestWrapRef: edgeSuggestWrapRef,
-    onInputChange: onEdgeInputChange,
-    onKeyDown: onEdgeKeyDown,
-    setSuggestHighlightIndex: setEdgeSuggestHighlightIndex,
-    closeSuggestPanel: closeEdgeSuggestPanel,
-    selectSuggestCandidate: selectEdgeSuggestCandidate,
-  } = useEdgeSuggest({
-    q: edgeQ,
-    relation: edgeSearchRelation,
-    sourceDb: edgeSearchSourceDb,
-    onSelect: (item) => {
-      setEdgeQ(relationDisplay(item.relation) || item.relation);
-      void handleSelectEdgeCandidate(item);
-    },
-    onQueryChange: setEdgeQ,
-    onSearch: () => {
-      void runEdgeSearch();
-    },
-  });
-
   const discoverySelectedSeedVidSet = useMemo(() => {
     const seed = new Set<number>();
     for (const item of discoverySeeds) seed.add(item.vid);
@@ -1463,6 +1605,8 @@ export default function App() {
   }, [graphSourceMode, discoveryResult, lastDiscoveryRequest]);
 
   const discoveryGraphState = useDiscoveryGraphState({
+    spaceName: effectiveCurrentSpace,
+    scopeKey: effectiveCurrentSpace,
     graphNodes,
     graphEdges,
     maxNodes: lastDiscoveryRequest?.max_nodes ?? discoveryQuery.maxNodes,
@@ -1480,6 +1624,38 @@ export default function App() {
     [discoveryExpandFilters.entityTypes, discoveryExpandFilters.relationTypes]
   );
 
+  const resetPageOrchestrationState = useCallback(() => {
+    relationFilter.exitPreview();
+    relationFilter.closePanel();
+    setGraphSourceMode("single");
+    discoveryGraphState.resetState();
+    clearGraphData();
+    setHop(1);
+    setRelations([]);
+    handleClearSelection();
+    setRelationTypeCatalogItems([]);
+    setRelationTypeCatalogQuery("");
+    setRelationTypeCatalogMatchedTotal(0);
+    setRelationTypeCatalogNextOffset(0);
+    setRelationTypeCatalogHasMore(false);
+    setRelationTypeCatalogLoading(false);
+    setRenderEdgeLabels(false);
+    setSelectedEdgeGraphId(null);
+    setDiscoveryExpandProbeNodeId(null);
+  }, [clearGraphData, discoveryGraphState, handleClearSelection, relationFilter]);
+
+  useEffect(() => {
+    pageResetRef.current = () => {
+      resetPageOrchestrationState();
+    };
+  }, [resetPageOrchestrationState]);
+
+  const discoveryResultExplain = useMemo(
+    () => deriveDiscoveryResultExplain(discoveryResult, lastDiscoveryRequest),
+    [discoveryResult, lastDiscoveryRequest]
+  );
+  const discoveryRequestSpace = requestSpaceOrFallback(discoveryResult);
+  const discoveryResponseSpace = String(discoveryResult?.space_meta?.space_name || "").trim();
   const discoveryWorkspaceReady = workspaceMode === "discovery" && graphSourceMode === "discovery" && !!discoveryResult;
   const effectiveGraphNodes =
     workspaceMode === "discovery"
@@ -1592,8 +1768,10 @@ export default function App() {
   }, [workspaceMode, panelGroups, setPanelGroupCollapsed]);
 
   useEffect(() => {
+    if (spaceSwitchBlocked) return;
     if (!relationFilter.open) return;
     const controller = new AbortController();
+    const requestSpace = activeSpaceRef.current;
     const timeoutId = window.setTimeout(() => {
       setRelationTypeCatalogLoading(true);
       void relationTypesApi({
@@ -1601,8 +1779,11 @@ export default function App() {
         limit: RELATION_TYPES_PAGE_SIZE,
         offset: 0,
         signal: controller.signal,
+        spaceName: effectiveCurrentSpace,
       })
         .then((resp) => {
+          if (controller.signal.aborted) return;
+          if (activeSpaceRef.current !== requestSpace) return;
           setRelationTypeCatalogItems(resp.items);
           setRelationTypeCatalogMatchedTotal(resp.matched_total);
           setRelationTypeCatalogNextOffset(resp.next_offset);
@@ -1622,18 +1803,22 @@ export default function App() {
       controller.abort();
       window.clearTimeout(timeoutId);
     };
-  }, [relationFilter.open, relationTypeCatalogQuery]);
+  }, [effectiveCurrentSpace, relationFilter.open, relationTypeCatalogQuery, spaceSwitchBlocked]);
 
   const handleLoadMoreRelationTypes = useCallback(async () => {
+    if (!guardSpaceScopedRequest("关系类型目录加载")) return;
     if (relationTypeCatalogLoading) return;
     if (!relationTypeCatalogHasMore || relationTypeCatalogNextOffset == null) return;
+    const requestSpace = activeSpaceRef.current;
     setRelationTypeCatalogLoading(true);
     try {
       const resp = await relationTypesApi({
         q: relationTypeCatalogQuery,
         limit: RELATION_TYPES_PAGE_SIZE,
         offset: relationTypeCatalogNextOffset,
+        spaceName: requestSpace,
       });
+      if (activeSpaceRef.current !== requestSpace) return;
       setRelationTypeCatalogItems((prev) => mergeRelationTypeItems(prev, resp.items));
       setRelationTypeCatalogMatchedTotal(resp.matched_total);
       setRelationTypeCatalogNextOffset(resp.next_offset);
@@ -1645,6 +1830,7 @@ export default function App() {
       setRelationTypeCatalogLoading(false);
     }
   }, [
+    guardSpaceScopedRequest,
     relationTypeCatalogHasMore,
     relationTypeCatalogLoading,
     relationTypeCatalogNextOffset,
@@ -1795,6 +1981,7 @@ export default function App() {
         expandTopKPerType: 8,
       })
       .catch((e: unknown) => {
+        if (e instanceof Error && e.name === "AbortError") return;
         const parsed = parseApiError(e);
         setUiNotice({ level: "error", message: `Expand 探测失败：${parsed.message}` });
       })
@@ -2020,6 +2207,19 @@ export default function App() {
         return;
       }
       const resp = result.response;
+      if (resp) {
+        console.info("discovery expand payload received", {
+          requestSpace: requestSpaceOrFallback(resp),
+          responseSpace: String(resp.space_meta?.space_name || ""),
+          graphStatus: resp.space_meta?.graph_status || "",
+          newNodeCount: Number(resp.stats?.new_nodes_count ?? resp.new_nodes?.length ?? 0),
+          newEdgeCount: Number(resp.stats?.new_edges_count ?? resp.new_edges?.length ?? 0),
+          droppedCount: Number(resp.dropped_candidates?.length ?? 0),
+        });
+      }
+      if (resp?.warnings?.length) {
+        setUiNotice({ level: "warn", message: resp.warnings[0] });
+      }
       if (!resp || ((resp.new_nodes?.length || 0) <= 0 && (resp.new_edges?.length || 0) <= 0 && (resp.support_edges?.length || 0) <= 0)) {
         setUiNotice({
           level: resp?.terminal ? "info" : "warn",
@@ -2029,6 +2229,7 @@ export default function App() {
       }
       locateNodeInGraph(result.firstNodeId ?? vid);
     } catch (e: unknown) {
+      if (e instanceof Error && e.name === "AbortError") return;
       const parsed = parseApiError(e);
       setUiNotice({ level: "error", message: `Expand 失败：${parsed.message}` });
     }
@@ -2127,6 +2328,7 @@ export default function App() {
         <div style={{ gridColumn: "1 / -1", minWidth: 0, overflow: "auto" }}>
           <div style={{ padding: "12px 16px 0 16px", display: "flex", gap: 8, position: "sticky", top: 0, zIndex: 30 }}>
             <button
+              data-testid="workspace-tab-legacy"
               onClick={() => {
                 void switchWorkspaceMode("legacy");
               }}
@@ -2142,6 +2344,7 @@ export default function App() {
               旧模块
             </button>
             <button
+              data-testid="workspace-tab-discovery"
               onClick={() => {
                 void switchWorkspaceMode("discovery");
               }}
@@ -2157,6 +2360,7 @@ export default function App() {
               统一关系发现
             </button>
             <button
+              data-testid="workspace-tab-import"
               onClick={() => {
                 void switchWorkspaceMode("import");
               }}
@@ -2172,13 +2376,23 @@ export default function App() {
               Import
             </button>
           </div>
-          <ImportWorkspace onNotice={setUiNotice} />
+          <ImportWorkspace
+            onNotice={setUiNotice}
+            spaces={spaces}
+            resolvedCurrent={resolvedCurrent}
+            loadingSpaces={spacesLoading}
+            spacesError={spacesError}
+            refreshSpaces={refreshSpaces}
+            spaceSwitching={spaceSwitchBlocked}
+            spaceSwitchPhase={spaceSwitchPhaseLabel}
+          />
         </div>
       ) : (
         <>
       <div className="kg-pane kg-pane-left">
         <div style={{ padding: "12px 16px 0 16px", display: "flex", gap: 8 }}>
           <button
+            data-testid="workspace-tab-legacy"
             onClick={() => {
               void switchWorkspaceMode("legacy");
             }}
@@ -2194,6 +2408,7 @@ export default function App() {
             旧模块
           </button>
           <button
+            data-testid="workspace-tab-discovery"
             onClick={() => {
               void switchWorkspaceMode("discovery");
             }}
@@ -2209,6 +2424,7 @@ export default function App() {
             统一关系发现
           </button>
           <button
+            data-testid="workspace-tab-import"
             onClick={() => {
               void switchWorkspaceMode("import");
             }}
@@ -2227,6 +2443,9 @@ export default function App() {
 
         {workspaceMode === "legacy" ? (
           <LeftSearchPanel
+            key={`legacy-${effectiveCurrentSpace}`}
+            currentSpaceName={effectiveCurrentSpace}
+            spaceScopeKey={effectiveCurrentSpace}
             q={q}
             onQChange={onInputChange}
             loadingSearch={loadingSearch}
@@ -2318,6 +2537,20 @@ export default function App() {
           />
         ) : (
           <DiscoveryPanel
+            key={`discovery-${effectiveCurrentSpace}`}
+            currentSpace={effectiveCurrentSpace}
+            selectedSpace={selectedSpaceSummary}
+            spaces={spaces}
+            spaceLoading={spacesLoading}
+            spaceError={spacesError}
+            currentSpaceStatus={currentSpaceStatus}
+            currentSpaceGraphStatus={currentSpaceGraphStatus}
+            currentSpaceSearchStatus={currentSpaceSearchStatus}
+            currentSpaceCoveragePct={currentSpaceCoveragePct}
+            currentSpaceIndexStatus={currentSpaceIndexStatus}
+            spaceSwitching={spaceSwitchBlocked}
+            spaceSwitchPhase={spaceSwitchPhaseLabel}
+            onSelectSpace={setCurrentSpace}
             seeds={discoverySeeds}
             searchQuery={discoveryCandidateSearch.query}
             searchAdvancedOpen={discoveryCandidateSearch.advancedOpen}
@@ -2374,6 +2607,7 @@ export default function App() {
             onUpdateSearchQuery={discoveryCandidateSearch.updateQuery}
             onToggleSearchAdvanced={discoveryCandidateSearch.toggleAdvancedOpen}
             onSubmitSearch={() => {
+              if (!guardSpaceScopedRequest("候选搜索")) return;
               void discoveryCandidateResults.runSearch({
                 append: false,
                 page: 1,
@@ -2395,6 +2629,7 @@ export default function App() {
             }}
             onClearSeeds={discoverySeedsState.clear}
             onLoadMoreCandidates={() => {
+              if (!guardSpaceScopedRequest("候选搜索")) return;
               void discoveryCandidateResults.loadMore();
             }}
             onToggleCandidateSelect={discoveryCandidateResults.toggleSelected}
@@ -2435,7 +2670,12 @@ export default function App() {
       <Resizer side="left" onPointerDown={(e) => beginResize("left", e)} />
 
       <div className="kg-center">
-        <div className="kg-topbar-sticky">
+        <div
+          className="kg-topbar-sticky"
+          data-testid="workspace-topbar"
+          data-workspace-mode={workspaceMode}
+          data-current-space={effectiveCurrentSpace || ""}
+        >
           {workspaceMode === "legacy" ? (
             <TopBar
               rootVid={rootVid}
@@ -2468,16 +2708,34 @@ export default function App() {
           ) : (
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", flexWrap: "wrap" }}>
               <div style={{ fontSize: 13, fontWeight: 600 }}>统一关系发现</div>
-              {discoveryWorkspaceReady ? (
+              <div style={{ fontSize: 12, color: "#666" }}>space={effectiveCurrentSpace || "-"}</div>
+              <div style={{ fontSize: 12, color: "#666" }}>readiness={currentSpaceStatus || "-"}</div>
+              {currentSpaceIndexStatus ? (
                 <div style={{ fontSize: 12, color: "#666" }}>
-                  last_run_seeds={discoveryResult?.stats.seed_count ?? lastDiscoveryRequest?.seed_vids.length ?? 0} current_seeds=
-                  {discoverySeeds.length}
-                  {" | "}candidates=
-                  {discoveryResult?.stats.candidate_count ?? 0}
-                  {" | "}nodes={effectiveGraphNodes.length} edges={effectiveGraphEdges.length}
-                  {graphBusy ? " | 加载中…" : ""}
+                  index_status={currentSpaceIndexStatus.status} | canonical_docs={currentSpaceIndexStatus.doc_count}
                 </div>
-              ) : (
+              ) : null}
+	              {discoveryWorkspaceReady ? (
+	                <div
+	                  data-testid="discovery-result-contract"
+	                  data-request-space={discoveryRequestSpace}
+	                  data-response-space={discoveryResponseSpace}
+	                  data-node-count={String(Number(discoveryResult?.stats.node_count ?? effectiveGraphNodes.length ?? 0))}
+	                  data-edge-count={String(Number(discoveryResult?.stats.edge_count ?? effectiveGraphEdges.length ?? 0))}
+	                  data-candidate-count={String(Number(discoveryResult?.stats.candidate_count ?? 0))}
+	                  style={{ fontSize: 12, color: "#666" }}
+	                >
+	                  last_run_seeds={discoveryResult?.stats.seed_count ?? lastDiscoveryRequest?.seed_vids.length ?? 0} current_seeds=
+	                  {discoverySeeds.length}
+	                  {" | "}candidates=
+	                  {discoveryResult?.stats.candidate_count ?? 0}
+	                  {" | "}nodes={effectiveGraphNodes.length} edges={effectiveGraphEdges.length}
+	                  {discoveryRequestSpace ? ` | request_space=${discoveryRequestSpace}` : ""}
+	                  {discoveryResponseSpace ? ` | response_space=${discoveryResponseSpace}` : ""}
+	                  {discoveryResult?.space_meta?.graph_status ? ` | response_graph_status=${discoveryResult.space_meta.graph_status}` : ""}
+	                  {graphBusy ? " | 加载中…" : ""}
+	                </div>
+	              ) : (
                 <div style={{ fontSize: 12, color: "#666" }}>
                   添加 1 个或多个 seed 节点后运行 discovery，结果会以主题关系图形式渲染在这里。
                 </div>
@@ -2487,12 +2745,36 @@ export default function App() {
                   当前 seeds 或 discovery 参数与上次运行结果不一致，请重新生成以同步图谱结果。
                 </div>
               ) : null}
-              {effectiveGraphStats?.truncated ? (
-                <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
-                  图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)} dropped_by_budget={Number(effectiveGraphStats?.dropped_by_budget || 0)} dropped_by_type_budget={Number(effectiveGraphStats?.dropped_by_type_budget || 0)} dropped_generic_hubs={Number(effectiveGraphStats?.dropped_generic_hubs || 0)}
+              {spaceSwitchBlocked ? (
+                <div
+                  data-testid="space-switch-state"
+                  data-switching="true"
+                  data-switch-phase={spaceSwitchPhaseLabel}
+                  data-space-name={effectiveCurrentSpace || spaceSwitchState.switchTarget || ""}
+                  style={{ width: "100%", fontSize: 12, color: "#ad6800" }}
+                >
+                  current space switching: {spaceSwitchPhaseLabel}
                 </div>
               ) : null}
-              <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
+	              {effectiveGraphStats?.truncated ? (
+	                <div style={{ width: "100%", fontSize: 12, color: "#ad6800" }}>
+	                  图结果已裁剪：dropped_nodes={Number(effectiveGraphStats?.dropped_nodes || 0)} dropped_edges={Number(effectiveGraphStats?.dropped_edges || 0)} dropped_neighbors={Number(effectiveGraphStats?.dropped_neighbors || 0)} dropped_by_budget={Number(effectiveGraphStats?.dropped_by_budget || 0)} dropped_by_type_budget={Number(effectiveGraphStats?.dropped_by_type_budget || 0)} dropped_generic_hubs={Number(effectiveGraphStats?.dropped_generic_hubs || 0)}
+	                </div>
+	              ) : null}
+	              {discoveryWorkspaceReady && discoveryResultExplain ? (
+	                <div
+	                  data-testid="discovery-empty-result-notice"
+	                  data-request-space={discoveryResultExplain.requestSpace}
+	                  data-response-space={discoveryResultExplain.responseSpace}
+	                  data-node-count={String(discoveryResultExplain.nodeCount)}
+	                  data-edge-count={String(discoveryResultExplain.edgeCount)}
+	                  data-candidate-count={String(discoveryResultExplain.candidateCount)}
+	                  style={{ width: "100%", fontSize: 12, color: "#003a8c", background: "#e6f4ff", border: "1px solid #91caff", borderRadius: 8, padding: "8px 10px" }}
+	                >
+	                  {discoveryResultExplain.message}
+	                </div>
+	              ) : null}
+	              <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button
                   onClick={handleRelayoutCurrentGraph}
                   disabled={graphBusy || !discoveryWorkspaceReady || effectiveGraphNodes.length <= 0}
@@ -2512,33 +2794,73 @@ export default function App() {
           )}
         </div>
 
-        <div className="kg-canvas-wrap">
+        <div className="kg-canvas-wrap" style={{ position: "relative" }}>
+          {spaceSwitchBlocked ? (
+            <div
+              data-testid="space-switch-overlay"
+              data-switching="true"
+              data-switch-phase={spaceSwitchPhaseLabel}
+              data-space-name={effectiveCurrentSpace || spaceSwitchState.switchTarget || ""}
+              style={{
+                position: "absolute",
+                inset: 12,
+                zIndex: 32,
+                display: "grid",
+                placeItems: "center",
+                background: "rgba(255,255,255,0.78)",
+                border: "1px solid #e5e6eb",
+                borderRadius: 14,
+                backdropFilter: "blur(2px)",
+              }}
+            >
+              <div style={{ display: "grid", gap: 6, textAlign: "center", maxWidth: 420, color: "#5b4636" }}>
+                <strong>Switching Current Space</strong>
+                <div style={{ fontSize: 13 }}>
+                  target={effectiveCurrentSpace || spaceSwitchState.switchTarget || "-"} | {spaceSwitchPhaseLabel}
+                </div>
+              </div>
+            </div>
+          ) : null}
           <Suspense fallback={<LoadingPanel message="图谱画布加载中..." style={{ minHeight: "100%" }} />}>
             {workspaceMode === "discovery" && !discoveryWorkspaceReady ? (
-              <LoadingPanel message="统一关系发现结果尚未生成。请在左侧添加 seed 节点并运行 discovery。" style={{ minHeight: "100%" }} />
+              <div
+                className="kg-canvas-anchor"
+                data-testid="discovery-result-anchor"
+                data-state="empty"
+                data-workspace-mode={workspaceMode}
+              >
+                <LoadingPanel message="统一关系发现结果尚未生成。请在左侧添加 seed 节点并运行 discovery。" style={{ minHeight: "100%" }} />
+              </div>
             ) : (
-              <GraphCanvas
-                viewModel={viewModel}
-                renderPatch={renderPatch}
-                layoutPlan={layoutPlan}
-                viewportRequest={viewportRequest}
-                renderNodeLabels={renderNodeLabels}
-                renderEdgeLabels={renderEdgeLabels}
-                edgeLabelSelectedDisplays={effectiveEdgeLabelSelectedDisplays}
-                showSelfLoops={showSelfLoops}
-                selectedNodeId={selectedNodeId}
-                selectedEdgeId={selectedEdgeId}
-                onNodeClick={handleGraphNodeClick}
-                onEdgeClick={handleGraphEdgeClick}
-                onNodePositionChange={
-                  workspaceMode === "discovery"
-                    ? (positions, source) => discoveryGraphState.syncNodePositions(positions, source)
-                    : undefined
-                }
-                registerApplyHighlight={(fn) => {
-                  applyHighlightRef.current = fn;
-                }}
-              />
+              <div
+                className="kg-canvas-anchor"
+                data-testid="discovery-result-anchor"
+                data-state={workspaceMode === "discovery" ? "ready" : "legacy"}
+                data-workspace-mode={workspaceMode}
+              >
+                <GraphCanvas
+                  viewModel={viewModel}
+                  renderPatch={renderPatch}
+                  layoutPlan={layoutPlan}
+                  viewportRequest={viewportRequest}
+                  renderNodeLabels={renderNodeLabels}
+                  renderEdgeLabels={renderEdgeLabels}
+                  edgeLabelSelectedDisplays={effectiveEdgeLabelSelectedDisplays}
+                  showSelfLoops={showSelfLoops}
+                  selectedNodeId={selectedNodeId}
+                  selectedEdgeId={selectedEdgeId}
+                  onNodeClick={handleGraphNodeClick}
+                  onEdgeClick={handleGraphEdgeClick}
+                  onNodePositionChange={
+                    workspaceMode === "discovery"
+                      ? (positions, source) => discoveryGraphState.syncNodePositions(positions, source)
+                      : undefined
+                  }
+                  registerApplyHighlight={(fn) => {
+                    applyHighlightRef.current = fn;
+                  }}
+                />
+              </div>
             )}
           </Suspense>
         </div>

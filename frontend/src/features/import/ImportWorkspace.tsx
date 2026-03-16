@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { parseApiError } from "../../utils/httpError";
 import {
   cancelImportJob,
   downloadFailedRows,
+  downloadImportArtifact,
   fetchImportSchema,
   fetchImportSchemaPlan,
   getImportJobLogs,
@@ -13,64 +14,113 @@ import {
   uploadImportFile,
   validateImportDraft,
 } from "./api/import";
+import { ImportSpaceContextBar } from "./components/ImportSpaceContextBar";
 import { JobPanel } from "./components/JobPanel";
 import { MappingTable } from "./components/MappingTable";
 import { useImportJobs } from "./hooks/useImportJobs";
+import { useCreateSpace } from "../space/hooks/useCreateSpace";
+import { useCurrentSpace } from "../space/hooks/useCurrentSpace";
+import type { CurrentSpaceResp, SpaceSummary } from "../space/types/space";
 import type {
   CompiledImportPlan,
   ImportDraftResp,
   ImportFileUploadResp,
   ImportMode,
+  ImportObjectType,
   ImportSchemaObjectPlan,
   ImportSchemaResp,
+  ImportSource,
   ImportTargetMapping,
 } from "./types/import";
 
 type ImportWorkspaceProps = {
   onNotice: (notice: { level: "error" | "warn" | "info"; message: string } | null) => void;
+  spaces: SpaceSummary[];
+  resolvedCurrent: CurrentSpaceResp | null;
+  loadingSpaces: boolean;
+  spacesError: string | null;
+  refreshSpaces: () => Promise<void>;
+  spaceSwitching: boolean;
+  spaceSwitchPhase: string;
 };
 
 const SURFACE = "#f5efe4";
 const CARD = "#fffaf1";
 const VALIDATE_FIXED_NOTE =
-  "Validate only checks CSV format, column mapping, and import rules. It is not a Nebula existence preflight and does not guarantee final write success.";
+  "Validate 现在按 target 使用各自 source 校验 identity/property/schema，不再共享第一份文件 columns。";
 const INTEGRATION_FIXED_NOTE =
   "Import success does not automatically mean the data enters current search, discovery, or graph primary flows. Check integration level and integration warnings.";
+const SPACE_SWITCH_NOTE =
+  "Switching current space changes where draft validation, compiled plan freeze, job submission, metadata refresh, and entity ES sync will land.";
+const IMPORT_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const IMPORT_MAX_DRAFT_TOTAL_BYTES = 200 * 1024 * 1024;
+const IMPORT_MAX_DRAFT_FILES = 5;
+const IMPORT_PREVIEW_ROWS = 50;
+const LARGE_UPLOAD_HINT_BYTES = 50 * 1024 * 1024;
 
-function defaultFieldForColumn(column: string, mode: ImportMode) {
-  const normalized = column.trim().toLowerCase();
-  const vertexMap: Record<string, string> = {
-    id: "ID",
-    entity_name: "entity_name",
-    entity_type: "entity_type",
-    entity_raw_id: "entity_raw_id",
-    description: "description",
-    source: "source",
-  };
-  const edgeMap: Record<string, string> = {
-    srcvid: "srcVID",
-    dstvid: "dstVID",
-    subject_our_defined_id: "srcVID",
-    object_our_defined_id: "dstVID",
-    relation: "relation",
-    source: "source",
-    pmid: "evidence",
-    relation_detail: "evidence",
-    score: "score",
-    rank: "rank",
-  };
-  return mode === "edge" ? edgeMap[normalized] || "" : vertexMap[normalized] || "";
+function formatBytes(bytes: number) {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${bytes} B`;
 }
 
-function buildDefaultTarget(mode: ImportMode, columns: string[]): ImportTargetMapping {
-  return {
-    object_type: mode === "edge" ? "edge_type" : "tag",
-    object_name: mode === "edge" ? "REL2" : "Entity",
-    discriminator_value: "",
-    field_mappings: columns.map((column) => ({
+function normalizeColumn(value: string) {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function aliasLogicalField(column: string) {
+  const token = normalizeColumn(column);
+  const lookup: Record<string, string> = {
+    id: "ID",
+    vid: "ID",
+    srcvid: "srcVID",
+    src_vid: "srcVID",
+    subjectourdefinedid: "srcVID",
+    dstvid: "dstVID",
+    dst_vid: "dstVID",
+    objectourdefinedid: "dstVID",
+    rank: "rank",
+    relation: "relation",
+    source: "source",
+    evidence: "evidence",
+    pmid: "evidence",
+    relationdetail: "evidence",
+    score: "score",
+    entityname: "entity_name",
+    entitytype: "entity_type",
+    entityrawid: "entity_raw_id",
+    description: "description",
+  };
+  return lookup[token] || "";
+}
+
+function suggestTargetFromSource(source: ImportSource, objectType?: ImportObjectType): ImportTargetMapping {
+  const nextObjectType = objectType || source.recommended_object_type || (source.inferred_kind === "edge" ? "edge_type" : "tag");
+  const aliasMap = new Map(source.alias_hints.map((item) => [item.logical_field, item.source_column]));
+  const identity_mapping =
+    nextObjectType === "tag"
+      ? { id_column: aliasMap.get("ID") || "" }
+      : {
+          src_column: aliasMap.get("srcVID") || "",
+          dst_column: aliasMap.get("dstVID") || "",
+          rank_column: aliasMap.get("rank") || "",
+        };
+  const identityColumns = new Set(Object.values(identity_mapping).filter(Boolean));
+  const property_mappings = source.columns
+    .filter((column) => !identityColumns.has(column))
+    .map((column) => ({
       source_column: column,
-      target_field: defaultFieldForColumn(column, mode),
-    })),
+      target_field: aliasLogicalField(column) || column,
+      logical_field: aliasLogicalField(column) || undefined,
+    }));
+  return {
+    object_type: nextObjectType,
+    object_name: nextObjectType === "tag" ? "Entity" : "REL2",
+    source_id: source.source_id,
+    identity_mapping,
+    property_mappings,
+    row_selector: null,
+    target_options: {},
   };
 }
 
@@ -95,12 +145,23 @@ function integrationLabel(level?: string | null) {
   return "-";
 }
 
-export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
+export function ImportWorkspace({
+  onNotice,
+  spaces,
+  resolvedCurrent,
+  loadingSpaces,
+  spacesError,
+  refreshSpaces,
+  spaceSwitching,
+  spaceSwitchPhase,
+}: ImportWorkspaceProps) {
+  const { currentSpace, setCurrentSpace } = useCurrentSpace();
+  const { createSpace, submitting: creatingSpace, error: createSpaceError } = useCreateSpace();
   const [files, setFiles] = useState<ImportFileUploadResp[]>([]);
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof previewImport>> | null>(null);
   const [schema, setSchema] = useState<ImportSchemaResp | null>(null);
-  const [mode, setMode] = useState<ImportMode>("vertex");
-  const [discriminatorColumn, setDiscriminatorColumn] = useState("");
+  const [workspaceMode, setWorkspaceMode] = useState<ImportMode>("vertex");
+  const [sources, setSources] = useState<ImportSource[]>([]);
   const [targets, setTargets] = useState<ImportTargetMapping[]>([]);
   const [draft, setDraft] = useState<ImportDraftResp | null>(null);
   const [compiledPlan, setCompiledPlan] = useState<CompiledImportPlan | null>(null);
@@ -111,7 +172,75 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
   const [jobLogs, setJobLogs] = useState<string[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [createPanelOpen, setCreatePanelOpen] = useState(false);
+  const [spaceActionSummary, setSpaceActionSummary] = useState<{ title: string; message: string } | null>(null);
   const { jobs, loading: jobsLoading, reload: reloadJobs } = useImportJobs(true);
+  const effectiveCurrentSpace = currentSpace || resolvedCurrent?.space_name || "";
+  const selectedSpace = useMemo(
+    () => spaces.find((item) => item.space_name === effectiveCurrentSpace) || null,
+    [effectiveCurrentSpace, spaces]
+  );
+  const defaultSpaceName = useMemo(() => {
+    const fromRegistry = spaces.find((item) => item.created_by === "system");
+    if (fromRegistry) return fromRegistry.space_name;
+    if (resolvedCurrent?.source === "default") return resolvedCurrent.space_name;
+    return "";
+  }, [resolvedCurrent, spaces]);
+  const lastSpaceRef = useRef("");
+  const draftTotalBytes = useMemo(() => files.reduce((sum, item) => sum + item.size_bytes, 0), [files]);
+
+  function clearFileBoundState() {
+    setPreview(null);
+    setSources([]);
+    setTargets([]);
+    setDraft(null);
+    setCompiledPlan(null);
+    setSchemaPlan([]);
+    setSchemaWarnings([]);
+    setIntegrationWarnings([]);
+  }
+
+  function clearSpaceBoundState() {
+    clearFileBoundState();
+    setJobLogs([]);
+    setSelectedJobId(null);
+  }
+
+  function validateSelectedUpload(file: File) {
+    if (!file.name.toLowerCase().endsWith(".csv")) {
+      return "类型不支持：仅支持 CSV 文件。";
+    }
+    if (files.length >= IMPORT_MAX_DRAFT_FILES) {
+      return `当前 draft 最多允许 ${IMPORT_MAX_DRAFT_FILES} 个文件。`;
+    }
+    if (file.size > IMPORT_MAX_UPLOAD_BYTES) {
+      return `文件过大：单文件上限 ${formatBytes(IMPORT_MAX_UPLOAD_BYTES)}。`;
+    }
+    if (draftTotalBytes + file.size > IMPORT_MAX_DRAFT_TOTAL_BYTES) {
+      return `draft 总大小超限：总上限 ${formatBytes(IMPORT_MAX_DRAFT_TOTAL_BYTES)}。`;
+    }
+    return "";
+  }
+
+  function describeUploadFailure(error: unknown) {
+    const parsed = parseApiError(error);
+    if (parsed.code === "IMPORT_UPLOAD_TOO_LARGE") {
+      return `文件过大：单文件上限 ${formatBytes(IMPORT_MAX_UPLOAD_BYTES)}。`;
+    }
+    if (parsed.code === "IMPORT_DRAFT_TOTAL_SIZE_EXCEEDED") {
+      return `draft 总大小超限：总上限 ${formatBytes(IMPORT_MAX_DRAFT_TOTAL_BYTES)}。`;
+    }
+    if (parsed.code === "IMPORT_UNSUPPORTED_FILE_TYPE" || parsed.code === "IMPORT_UNSUPPORTED_CONTENT_TYPE") {
+      return "类型不支持：仅支持 CSV 文件。";
+    }
+    if (parsed.message.includes("Request timeout")) {
+      return "网络或超时：上传大文件超时，请检查网络后重试。";
+    }
+    if (parsed.status == null) {
+      return "网络或超时：请求未成功到达服务端。";
+    }
+    return parsed.message;
+  }
 
   useEffect(() => {
     void (async () => {
@@ -122,31 +251,31 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
         onNotice({ level: "error", message: `加载 import schema 失败：${parsed.message}` });
       }
     })();
-  }, [onNotice]);
+  }, [effectiveCurrentSpace, onNotice]);
 
   useEffect(() => {
-    if (selectedJobId == null && jobs.length > 0) setSelectedJobId(jobs[0].job_id);
-  }, [jobs, selectedJobId]);
+    if (!effectiveCurrentSpace) return;
+    if (lastSpaceRef.current && lastSpaceRef.current !== effectiveCurrentSpace) {
+      clearSpaceBoundState();
+      onNotice({
+        level: "info",
+        message: `current space 已切换到 ${effectiveCurrentSpace}。请重新 preview / validate，再提交新的 import job。`,
+      });
+    }
+    lastSpaceRef.current = effectiveCurrentSpace;
+  }, [effectiveCurrentSpace, onNotice]);
 
   useEffect(() => {
-    if (!preview?.columns?.length) return;
-    if (targets.length === 0) {
-      setTargets([buildDefaultTarget(mode, preview.columns)]);
+    if (jobs.length === 0) {
+      if (selectedJobId != null) setSelectedJobId(null);
       return;
     }
-    setTargets((prev) =>
-      prev.map((target) => ({
-        ...target,
-        field_mappings:
-          target.field_mappings.length === preview.columns.length
-            ? target.field_mappings
-            : preview.columns.map((column) => ({
-                source_column: column,
-                target_field: defaultFieldForColumn(column, target.object_type === "edge_type" ? "edge" : "vertex"),
-              })),
-      }))
-    );
-  }, [mode, preview, targets.length]);
+    if (selectedJobId == null) {
+      setSelectedJobId(jobs[0].job_id);
+      return;
+    }
+    if (!jobs.some((job) => job.job_id === selectedJobId)) setSelectedJobId(jobs[0].job_id);
+  }, [jobs, selectedJobId]);
 
   useEffect(() => {
     if (!selectedJobId) {
@@ -163,23 +292,101 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
     })();
   }, [selectedJobId, jobs]);
 
+  useEffect(() => {
+    if (!preview) return;
+    setSources(preview.sources || []);
+    if (preview.workspace_mode_candidates.length > 0) {
+      setWorkspaceMode(preview.workspace_mode_candidates[0]);
+    }
+    if (targets.length === 0 && preview.sources.length > 0) {
+      const nextTargets = preview.sources.map((source) => suggestTargetFromSource(source));
+      setTargets(nextTargets);
+    }
+  }, [preview]);
+
+  const schemaObjects = [
+    ...(schema?.tags || []).map((item) => ({ ...item, object_type: "tag" as const })),
+    ...(schema?.edge_types || []).map((item) => ({ ...item, object_type: "edge_type" as const })),
+  ];
+  const currentSpaceStatus = selectedSpace?.status || resolvedCurrent?.registry_status || "-";
+  const currentTemplateType = selectedSpace?.template_type || "-";
+  const currentIntegrationScope = selectedSpace?.integration_scope || "-";
+  const importBlockedReason =
+    currentSpaceStatus === "ready"
+      ? ""
+      : currentSpaceStatus === "provisioning"
+        ? `当前 space ${effectiveCurrentSpace || "-"} 仍在 provisioning，暂时不能执行 import。`
+        : currentSpaceStatus === "failed"
+          ? `当前 space ${effectiveCurrentSpace || "-"} provisioning 失败，暂时不能执行 import。`
+          : `当前 space ${effectiveCurrentSpace || "-"} 尚未 ready，暂时不能执行 import。`;
+  const canRunImportFlow = !!effectiveCurrentSpace && currentSpaceStatus === "ready";
+
+  function ensureImportReady(actionLabel: string) {
+    if (canRunImportFlow) return true;
+    onNotice({ level: "warn", message: `${actionLabel}已阻止：${importBlockedReason}` });
+    return false;
+  }
+
+  async function handleSelectSpace(spaceName: string) {
+    if (!spaceName || spaceName === effectiveCurrentSpace) return;
+    setCurrentSpace(spaceName);
+    setCreatePanelOpen(false);
+    setSpaceActionSummary({
+      title: `Current space switched to ${spaceName}`,
+      message: "Current-space switch coordinator is refreshing readiness and index status. Re-run preview and validate before submitting a new job.",
+    });
+  }
+
+  async function handleCreateSpace(payload: {
+    space_name: string;
+    display_name: string;
+    description: string;
+    template_type: "entity_rel2_default";
+    created_by: string;
+  }) {
+    const resp = await createSpace(payload, { autoSelect: true });
+    setCreatePanelOpen(false);
+    setSpaceActionSummary({
+      title: `Space ${resp.space.space_name} is ready and selected`,
+      message: "Next step: upload CSV in this Import Workspace. The current-space switch coordinator will refresh readiness and index status for the new space automatically.",
+    });
+    onNotice({
+      level: "info",
+      message: `space ${resp.space.space_name} 已创建并自动切换，下一步请上传 CSV。`,
+    });
+    return resp;
+  }
+
   async function handleUpload(fileList: FileList | null) {
+    if (!ensureImportReady("上传")) return;
     const nextFile = fileList?.[0];
     if (!nextFile) return;
+    const selectionError = validateSelectedUpload(nextFile);
+    if (selectionError) {
+      onNotice({ level: "warn", message: selectionError });
+      return;
+    }
     setBusy("upload");
     try {
+      if (nextFile.size >= LARGE_UPLOAD_HINT_BYTES) {
+        onNotice({ level: "info", message: "Uploading large CSV... Files near 100MB may take longer." });
+      }
       const uploaded = await uploadImportFile(nextFile);
+      clearFileBoundState();
       setFiles((prev) => [...prev, uploaded]);
-      onNotice({ level: "info", message: `已上传 ${uploaded.original_name}` });
+      onNotice({
+        level: "info",
+        message: `已上传 ${uploaded.original_name} (${formatBytes(uploaded.size_bytes)}). Preview 会为每个文件生成 source snapshot。`,
+      });
     } catch (error) {
-      const parsed = parseApiError(error);
-      onNotice({ level: "error", message: `上传失败：${parsed.message}` });
+      onNotice({ level: "error", message: `上传失败：${describeUploadFailure(error)}` });
     } finally {
       setBusy(null);
     }
   }
 
   async function handlePreview() {
+    if (!ensureImportReady("Preview")) return;
     if (files.length === 0) {
       onNotice({ level: "warn", message: "请先上传 CSV 文件" });
       return;
@@ -188,11 +395,15 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
     try {
       const nextPreview = await previewImport({
         file_ids: files.map((item) => item.file_id),
-        sample_rows: 8,
-        mode_hint: mode,
+        sample_rows: IMPORT_PREVIEW_ROWS,
+        mode_hint: workspaceMode,
       });
       setPreview(nextPreview);
-      onNotice(nextPreview.warnings.length > 0 ? { level: "warn", message: nextPreview.warnings[0] } : null);
+      onNotice(
+        nextPreview.sources.length > 0
+          ? { level: "info", message: `preview 已生成 ${nextPreview.sources.length} 个 draft source` }
+          : { level: "warn", message: "preview 未返回 source" }
+      );
     } catch (error) {
       const parsed = parseApiError(error);
       onNotice({ level: "error", message: `预览失败：${parsed.message}` });
@@ -202,19 +413,22 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
   }
 
   async function handleSchemaPlan() {
-    if (!preview) {
-      onNotice({ level: "warn", message: "请先生成 preview" });
+    if (!ensureImportReady("Schema plan")) return;
+    if (sources.length === 0) {
+      onNotice({ level: "warn", message: "请先生成 preview / sources" });
       return;
     }
     setBusy("schema_plan");
     try {
       const resp = await fetchImportSchemaPlan({
         file_ids: files.map((item) => item.file_id),
+        sources,
         mapping: targets,
         schema_options: {
           allow_create_object: true,
           allow_add_properties: true,
         },
+        workspace_mode: workspaceMode,
       });
       setSchemaPlan(resp.schema_create_plan || []);
       setSchemaWarnings(resp.warnings || []);
@@ -227,24 +441,30 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
     }
   }
 
+  async function persistDraft() {
+    const saved = await upsertImportDraft({
+      draft_id: draft?.draft_id,
+      workspace_mode: workspaceMode,
+      file_ids: files.map((item) => item.file_id),
+      sources,
+      mapping: targets,
+      update_strategy: { mode: "merge_partial", create_if_missing: true, update_existing: true },
+      schema_options: { allow_create_object: true, allow_add_properties: true },
+      postprocess_options: { refresh_metadata: true, sync_entity_es: true },
+    });
+    setDraft(saved);
+    return saved;
+  }
+
   async function handleSaveDraft() {
-    if (!preview) {
+    if (!ensureImportReady("保存 draft")) return;
+    if (sources.length === 0) {
       onNotice({ level: "warn", message: "请先完成 preview" });
       return;
     }
     setBusy("draft");
     try {
-      const saved = await upsertImportDraft({
-        draft_id: draft?.draft_id,
-        mode,
-        file_ids: files.map((item) => item.file_id),
-        discriminator_column: mode === "mixed" ? discriminatorColumn : null,
-        mapping: targets,
-        update_strategy: { mode: "merge_partial", create_if_missing: true, update_existing: true },
-        schema_options: { allow_create_object: true, allow_add_properties: true },
-        postprocess_options: { refresh_metadata: true, sync_entity_es: true },
-      });
-      setDraft(saved);
+      const saved = await persistDraft();
       onNotice({ level: "info", message: `draft 已保存：${saved.draft_id}` });
     } catch (error) {
       const parsed = parseApiError(error);
@@ -255,14 +475,14 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
   }
 
   async function handleValidate() {
-    if (!draft) {
-      await handleSaveDraft();
-    }
-    if (!draft?.draft_id) return;
+    if (!ensureImportReady("校验")) return;
     setBusy("validate");
     try {
-      const validation = await validateImportDraft(draft.draft_id);
-      setDraft((prev) => (prev ? { ...prev, validation, status: validation.passed ? "validated" : prev.status } : prev));
+      const currentDraft = draft?.draft_id ? draft : await persistDraft();
+      const validation = await validateImportDraft(currentDraft.draft_id);
+      setDraft((prev) =>
+        prev ? { ...prev, validation, status: validation.passed ? "validated" : prev.status, sources, mapping: targets } : currentDraft
+      );
       setCompiledPlan(validation.compiled_plan || null);
       setIntegrationWarnings(validation.integration_warnings || []);
       setSchemaWarnings(validation.warnings || []);
@@ -280,6 +500,7 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
   }
 
   async function handleSubmitJob() {
+    if (!ensureImportReady("提交 job")) return;
     if (!draft?.draft_id) {
       onNotice({ level: "warn", message: "请先保存并校验 draft" });
       return;
@@ -308,6 +529,16 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
     }
   }
 
+  async function handleDownloadArtifact(jobId: string, artifactName: string) {
+    try {
+      const blob = await downloadImportArtifact(jobId, artifactName);
+      downloadBlobToFile(blob, artifactName);
+    } catch (error) {
+      const parsed = parseApiError(error);
+      onNotice({ level: "error", message: `artifact 下载失败：${parsed.message}` });
+    }
+  }
+
   async function handleCancelJob(jobId: string) {
     try {
       await cancelImportJob(jobId);
@@ -317,11 +548,6 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
       onNotice({ level: "error", message: `取消 job 失败：${parsed.message}` });
     }
   }
-
-  const schemaObjects = [
-    ...(schema?.tags || []).map((item) => ({ ...item, object_type: "tag" as const })),
-    ...(schema?.edge_types || []).map((item) => ({ ...item, object_type: "edge_type" as const })),
-  ];
 
   return (
     <div
@@ -333,34 +559,81 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
         color: "#3d2d1f",
       }}
     >
-      <div style={{ maxWidth: 1380, margin: "0 auto", padding: "28px 24px 48px", display: "grid", gap: 18 }}>
-        <div
-          style={{
-            background: "linear-gradient(135deg, rgba(85, 56, 30, 0.95), rgba(129, 88, 45, 0.88))",
-            color: "#fff7ed",
-            borderRadius: 28,
-            padding: 24,
-            display: "grid",
-            gap: 8,
-            boxShadow: "0 24px 80px rgba(94, 63, 32, 0.18)",
-          }}
-        >
-          <div style={{ fontSize: 13, letterSpacing: "0.18em", textTransform: "uppercase", opacity: 0.8 }}>Import Workspace</div>
-          <div style={{ fontSize: 32, fontWeight: 700, lineHeight: 1.1 }}>一期在线批量导入子系统</div>
-          <div style={{ maxWidth: 880, fontSize: 14, color: "rgba(255,247,237,0.88)" }}>
-            上传 CSV，完成 Draft 预览、列映射、schema create plan、校验、compiled plan 冻结与单 worker 串行 job 执行。
-          </div>
+      <div style={{ maxWidth: 1480, margin: "0 auto", padding: "28px 24px 48px", display: "grid", gap: 18 }}>
+        <div style={{ position: "sticky", top: 12, zIndex: 20 }}>
+          <ImportSpaceContextBar
+            currentSpace={effectiveCurrentSpace}
+            current={selectedSpace}
+            resolvedCurrent={resolvedCurrent}
+            spaces={spaces}
+            loading={loadingSpaces}
+            error={createSpaceError || spacesError}
+            spaceSwitching={spaceSwitching}
+            spaceSwitchPhase={spaceSwitchPhase}
+            defaultSpaceName={defaultSpaceName}
+            createOpen={createPanelOpen}
+            createSubmitting={creatingSpace}
+            createError={createSpaceError}
+            actionSummary={spaceActionSummary}
+            onDismissActionSummary={() => setSpaceActionSummary(null)}
+            onSelectSpace={(spaceName) => {
+              void handleSelectSpace(spaceName);
+            }}
+            onOpenCreate={() => setCreatePanelOpen(true)}
+            onCloseCreate={() => setCreatePanelOpen(false)}
+            onRefresh={() => {
+              void refreshSpaces();
+              void reloadJobs();
+            }}
+            onCreateSpace={handleCreateSpace}
+          />
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.2fr) minmax(320px, 420px)", gap: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.35fr) minmax(360px, 460px)", gap: 18 }}>
           <div style={{ display: "grid", gap: 18 }}>
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-                <strong>1. CSV Upload</strong>
-                <input type="file" accept=".csv,text/csv" onChange={(event) => void handleUpload(event.target.files)} />
-                <button onClick={() => void handlePreview()} disabled={busy === "preview"}>
-                  生成预览
+                <strong>1. Upload + Sources</strong>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>target space={effectiveCurrentSpace || "-"}</span>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>status={currentSpaceStatus}</span>
+                <input
+                  type="file"
+                  accept=".csv,text/csv"
+                  disabled={!canRunImportFlow}
+                  onChange={(event) => {
+                    void handleUpload(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                <button onClick={() => void handlePreview()} disabled={busy === "preview" || !canRunImportFlow}>
+                  生成 Sources 预览
                 </button>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>workspace_mode</span>
+                  <select value={workspaceMode} onChange={(event) => setWorkspaceMode(event.target.value as ImportMode)}>
+                    <option value="vertex">vertex</option>
+                    <option value="edge">edge</option>
+                    <option value="mixed">mixed</option>
+                  </select>
+                </label>
+              </div>
+              <div style={{ marginBottom: 12, padding: 10, borderRadius: 12, background: "#f6efe4", color: "#6c5b47", fontSize: 13 }}>
+                {SPACE_SWITCH_NOTE}
+              </div>
+              <div style={{ marginBottom: 12, padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91", fontSize: 13 }}>
+                <div>CSV only</div>
+                <div>Max file size: {formatBytes(IMPORT_MAX_UPLOAD_BYTES)}</div>
+                <div>Max draft total size: {formatBytes(IMPORT_MAX_DRAFT_TOTAL_BYTES)}</div>
+                <div>Preview returns per-source columns/sample rows and inferred kind</div>
+              </div>
+              {!canRunImportFlow ? (
+                <div style={{ marginBottom: 12, padding: 10, borderRadius: 12, background: "#fff1f0", color: "#a61d24", fontSize: 13 }}>
+                  {importBlockedReason}
+                </div>
+              ) : null}
+              <div style={{ marginBottom: 12, fontSize: 13, color: "#6c5b47" }}>
+                uploaded files={files.length}/{IMPORT_MAX_DRAFT_FILES} | draft total={formatBytes(draftTotalBytes)} /{" "}
+                {formatBytes(IMPORT_MAX_DRAFT_TOTAL_BYTES)}
               </div>
               <div style={{ display: "grid", gap: 8 }}>
                 {files.map((file) => (
@@ -384,182 +657,202 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
                   </div>
                 ))}
               </div>
+              {sources.length > 0 ? (
+                <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
+                  {sources.map((source) => (
+                    <div key={source.source_id} style={{ padding: 14, borderRadius: 14, background: "#fffdf8", border: "1px solid #f0e6d8" }}>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                        <strong>{source.filename}</strong>
+                        <span style={{ fontSize: 12, color: "#7d6b57" }}>source_id={source.source_id}</span>
+                        <span style={{ fontSize: 12, color: "#7d6b57" }}>kind={source.inferred_kind}</span>
+                        <span style={{ fontSize: 12, color: "#7d6b57" }}>recommend={source.recommended_object_type || "-"}</span>
+                      </div>
+                      <div style={{ marginTop: 8, fontSize: 13, color: "#5b4b38" }}>columns={source.columns.join(", ")}</div>
+                      {source.alias_hints.length > 0 ? (
+                        <div style={{ marginTop: 8, fontSize: 13, color: "#1d4f91" }}>
+                          alias hints={source.alias_hints.map((item) => `${item.source_column}->${item.logical_field}`).join(", ")}
+                        </div>
+                      ) : null}
+                      {source.sample_rows.length > 0 ? (
+                        <div style={{ overflowX: "auto", marginTop: 10 }}>
+                          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                            <thead>
+                              <tr style={{ background: "#f6efe4" }}>
+                                {source.columns.map((column) => (
+                                  <th key={column} style={{ textAlign: "left", padding: 6 }}>
+                                    {column}
+                                  </th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {source.sample_rows.slice(0, 3).map((row, index) => (
+                                <tr key={index} style={{ borderTop: "1px solid #f0e6d8" }}>
+                                  {source.columns.map((column) => (
+                                    <td key={column} style={{ padding: 6 }}>
+                                      {row[column] || ""}
+                                    </td>
+                                  ))}
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </section>
 
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
-                <strong>2. Draft</strong>
-                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span>Mode</span>
-                  <select value={mode} onChange={(event) => setMode(event.target.value as ImportMode)}>
-                    <option value="vertex">vertex</option>
-                    <option value="edge">edge</option>
-                    <option value="mixed">mixed</option>
-                  </select>
-                </label>
-                {mode === "mixed" ? (
-                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    <span>discriminator</span>
-                    <input value={discriminatorColumn} onChange={(event) => setDiscriminatorColumn(event.target.value)} />
-                  </label>
-                ) : null}
+                <strong>2. Targets</strong>
                 <button
-                  onClick={() =>
-                    setTargets((prev) => [...prev, buildDefaultTarget(mode === "mixed" ? "vertex" : mode, preview?.columns || [])])
-                  }
+                  onClick={() => {
+                    const nextSource = sources[0];
+                    if (!nextSource) return;
+                    setTargets((prev) => [...prev, suggestTargetFromSource(nextSource)]);
+                  }}
+                  disabled={!canRunImportFlow || sources.length === 0}
                 >
-                  新增目标
+                  新增 Target
                 </button>
+                <button onClick={() => void handleSaveDraft()} disabled={!canRunImportFlow || sources.length === 0}>
+                  保存 draft
+                </button>
+                <button onClick={() => void handleValidate()} disabled={!canRunImportFlow || sources.length === 0}>
+                  运行 Validate
+                </button>
+                <button onClick={() => void handleSchemaPlan()} disabled={!canRunImportFlow || sources.length === 0}>
+                  生成 Plan
+                </button>
+                <button onClick={() => void handleSubmitJob()} disabled={(!draft?.validation?.passed && !compiledPlan) || !canRunImportFlow}>
+                  提交 Job
+                </button>
+                <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span>created_by</span>
+                  <input value={createdBy} onChange={(event) => setCreatedBy(event.target.value)} />
+                </label>
               </div>
 
-              {preview ? (
+              {targets.length > 0 ? (
                 <div style={{ display: "grid", gap: 14 }}>
-                  <div style={{ fontSize: 13, color: "#6c5b47" }}>
-                    columns={preview.columns.join(", ")} | inferred={preview.inferred_mode_candidates.join(", ")}
-                  </div>
                   {targets.map((target, index) => (
                     <MappingTable
-                      key={`${target.object_name}-${index}`}
-                      mode={mode}
+                      key={target.target_id || `${target.object_name}-${index}`}
                       target={target}
+                      sources={sources}
                       schemaObjects={schemaObjects}
                       onChange={(next) => setTargets((prev) => prev.map((item, itemIndex) => (itemIndex === index ? next : item)))}
                       onRemove={targets.length > 1 ? () => setTargets((prev) => prev.filter((_, itemIndex) => itemIndex !== index)) : undefined}
                     />
                   ))}
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <button onClick={() => void handleSchemaPlan()}>生成 schema plan</button>
-                    <button onClick={() => void handleSaveDraft()}>保存 draft</button>
-                    <button onClick={() => void handleValidate()}>运行校验</button>
-                    <button onClick={() => void handleSubmitJob()} disabled={!draft?.validation?.passed && !compiledPlan}>
-                      提交 job
-                    </button>
-                    <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span>created_by</span>
-                      <input value={createdBy} onChange={(event) => setCreatedBy(event.target.value)} />
-                    </label>
-                  </div>
                 </div>
               ) : (
-                <div style={{ color: "#7d6b57", fontSize: 13 }}>先上传并预览 CSV，再开始列映射。</div>
+                <div style={{ color: "#7d6b57", fontSize: 13 }}>先上传并预览 CSV，再创建 target。</div>
               )}
             </section>
 
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
-              <strong>3. Preview / Plan</strong>
-              {preview ? (
-                <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
-                  <div style={{ padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91", fontSize: 13 }}>
-                    {VALIDATE_FIXED_NOTE}
-                  </div>
-                  <div style={{ overflowX: "auto" }}>
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                      <thead>
-                        <tr style={{ background: "#f6efe4" }}>
-                          {preview.columns.map((column) => (
-                            <th key={column} style={{ padding: 8, textAlign: "left" }}>
-                              {column}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {preview.sample_rows.map((row, rowIndex) => (
-                          <tr key={rowIndex} style={{ borderTop: "1px solid #f0e6d8" }}>
-                            {preview.columns.map((column) => (
-                              <td key={column} style={{ padding: 8 }}>
-                                {row[column] || ""}
-                              </td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                  {schemaPlan.length > 0 ? (
-                    <div style={{ display: "grid", gap: 12 }}>
-                      {schemaPlan.map((item, index) => (
-                        <div key={`${item.object_name}-${index}`} style={{ padding: 14, borderRadius: 14, background: SURFACE }}>
-                          <div style={{ fontWeight: 700 }}>
-                            {item.object_type} `{item.object_name}` {item.object_exists ? "(existing)" : "(new)"}
-                          </div>
-                          <div style={{ marginTop: 6, fontSize: 13 }}>
-                            add_properties:
-                            {item.add_properties.length > 0
-                              ? ` ${item.add_properties.map((prop) => `${prop.name}:${prop.type}`).join(", ")}`
-                              : " none"}
-                          </div>
-                          {item.ignored_columns.length > 0 ? (
-                            <div style={{ marginTop: 6, fontSize: 13, color: "#7d6b57" }}>
-                              ignored columns: {item.ignored_columns.join(", ")}
-                            </div>
-                          ) : null}
-                          {item.integration_warnings.length > 0 ? (
-                            <div style={{ marginTop: 8, display: "grid", gap: 6 }}>
-                              {item.integration_warnings.map((warning, warningIndex) => (
-                                <div
-                                  key={`${warning}-${warningIndex}`}
-                                  style={{ padding: 10, borderRadius: 10, background: "#fff7e6", color: "#ad6800", fontSize: 13 }}
-                                >
-                                  {warning}
-                                </div>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                  {compiledPlan ? (
-                    <div style={{ display: "grid", gap: 10 }}>
-                      <div style={{ padding: 14, borderRadius: 14, background: "#eefbf1", fontSize: 13, color: "#166534" }}>
-                        compiled plan frozen: {compiledPlan.plan_id} | mode={compiledPlan.mode} | integration=
-                        {compiledPlan.integration_level}
-                      </div>
-                      <div style={{ padding: 12, borderRadius: 12, background: "#fffbe6", color: "#ad6800", fontSize: 13 }}>
-                        {INTEGRATION_FIXED_NOTE}
-                      </div>
-                    </div>
-                  ) : null}
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <strong>3. Plan / Validate</strong>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>space={effectiveCurrentSpace || "-"}</span>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>scope={currentIntegrationScope}</span>
+              </div>
+              <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
+                <div style={{ padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91", fontSize: 13 }}>
+                  {VALIDATE_FIXED_NOTE}
                 </div>
-              ) : null}
+                {draft?.validation?.target_results?.length ? (
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {draft.validation.target_results.map((item) => (
+                      <div key={item.target_id} style={{ padding: 14, borderRadius: 14, background: SURFACE }}>
+                        <div style={{ fontWeight: 700 }}>
+                          {item.object_type} `{item.object_name}` | source={item.source_id} | {item.passed ? "passed" : "failed"}
+                        </div>
+                        <div style={{ marginTop: 6, fontSize: 13 }}>columns={item.source_columns.join(", ")}</div>
+                        <div style={{ marginTop: 6, fontSize: 13 }}>
+                          scanned_rows={item.scanned_rows} | error_rows={item.error_rows}
+                        </div>
+                        {item.hints.length > 0 ? (
+                          <div style={{ marginTop: 6, fontSize: 13, color: "#1d4f91" }}>hints={item.hints.join(" | ")}</div>
+                        ) : null}
+                        {item.errors.map((error, index) => (
+                          <div key={`${item.target_id}-error-${index}`} style={{ marginTop: 6, color: "#a61d24", fontSize: 13 }}>
+                            {error}
+                          </div>
+                        ))}
+                        {item.warnings.map((warning, index) => (
+                          <div key={`${item.target_id}-warning-${index}`} style={{ marginTop: 6, color: "#ad6800", fontSize: 13 }}>
+                            {warning}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {schemaPlan.length > 0 ? (
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {schemaPlan.map((item) => (
+                      <div key={`${item.target_id}-${item.object_name}`} style={{ padding: 14, borderRadius: 14, background: "#fffdf8" }}>
+                        <div style={{ fontWeight: 700 }}>
+                          {`${item.object_type} "${item.object_name}" <- source ${item.source_id} ${item.object_exists ? "(existing)" : "(new)"}`}
+                        </div>
+                        <div style={{ marginTop: 6, fontSize: 13 }}>
+                          add_properties:
+                          {item.add_properties.length > 0
+                            ? ` ${item.add_properties.map((prop) => `${prop.name}:${prop.type}`).join(", ")}`
+                            : " none"}
+                        </div>
+                        {item.ignored_columns.length > 0 ? (
+                          <div style={{ marginTop: 6, fontSize: 13, color: "#7d6b57" }}>
+                            ignored columns: {item.ignored_columns.join(", ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                {compiledPlan ? (
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <div style={{ padding: 14, borderRadius: 14, background: "#eefbf1", fontSize: 13, color: "#166534" }}>
+                      compiled plan frozen: {compiledPlan.plan_id} | workspace={compiledPlan.workspace_mode} | integration=
+                      {compiledPlan.integration_level} | space={compiledPlan.space_name}
+                    </div>
+                    {compiledPlan.targets.map((target) => (
+                      <div key={target.target_id} style={{ padding: 12, borderRadius: 12, background: "#f7f0e4", fontSize: 13 }}>
+                        {`${target.object_type} "${target.object_name}" <- ${target.source_filename} | columns=${target.source_columns.join(", ")}`}
+                      </div>
+                    ))}
+                    <div style={{ padding: 12, borderRadius: 12, background: "#fffbe6", color: "#ad6800", fontSize: 13 }}>
+                      {INTEGRATION_FIXED_NOTE}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
             </section>
           </div>
 
           <div style={{ display: "grid", gap: 18 }}>
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
-              <strong>Warnings</strong>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <strong>Warnings</strong>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>space={effectiveCurrentSpace || "-"}</span>
+              </div>
               <div style={{ display: "grid", gap: 10, marginTop: 14 }}>
-                {schemaWarnings.length === 0 &&
-                integrationWarnings.length === 0 &&
-                (draft?.validation?.errors?.length || 0) === 0 &&
-                (draft?.validation?.warnings?.length || 0) === 0 ? (
-                  <div style={{ color: "#7d6b57", fontSize: 13 }}>暂无 validate/schema/integration 提示</div>
-                ) : null}
-                {draft?.validation?.errors?.length ? (
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#a61d24" }}>Validate Errors</div>
-                ) : null}
+                {preview?.warnings?.map((warning, index) => (
+                  <div key={`preview-warning-${index}`} style={{ padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91" }}>
+                    {warning}
+                  </div>
+                ))}
                 {schemaWarnings.map((warning, index) => (
                   <div key={`schema-${index}`} style={{ padding: 12, borderRadius: 12, background: "#fffbe6", color: "#ad6800" }}>
                     {warning}
                   </div>
                 ))}
-                {draft?.validation?.warnings?.length ? (
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#ad6800" }}>Validate Warnings</div>
-                ) : null}
-                {draft?.validation?.warnings?.map((warning, index) => (
-                  <div key={`validate-warning-${index}`} style={{ padding: 12, borderRadius: 12, background: "#fffbe6", color: "#ad6800" }}>
-                    {warning}
-                  </div>
-                ))}
-                {draft?.validation?.semantic_notes?.map((note, index) => (
-                  <div key={`semantic-note-${index}`} style={{ padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91" }}>
-                    {note}
-                  </div>
-                ))}
-                {integrationWarnings.length > 0 ? (
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#8c4b11" }}>Integration Warnings</div>
-                ) : null}
                 {integrationWarnings.map((warning, index) => (
                   <div key={`integration-${index}`} style={{ padding: 12, borderRadius: 12, background: "#fff1f0", color: "#a61d24" }}>
                     {warning}
@@ -568,6 +861,11 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
                 {draft?.validation?.errors?.map((error, index) => (
                   <div key={`error-${index}`} style={{ padding: 12, borderRadius: 12, background: "#fff1f0", color: "#a61d24" }}>
                     {error}
+                  </div>
+                ))}
+                {draft?.validation?.semantic_notes?.map((note, index) => (
+                  <div key={`note-${index}`} style={{ padding: 12, borderRadius: 12, background: "#eef4ff", color: "#1d4f91" }}>
+                    {note}
                   </div>
                 ))}
               </div>
@@ -579,19 +877,29 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
                 <span style={{ fontSize: 12, color: "#7d6b57" }}>{draft ? `${draft.draft_id} | ${draft.status}` : "未保存"}</span>
               </div>
               <div style={{ display: "grid", gap: 6, fontSize: 13, color: "#5b4b38" }}>
-                <div>mode={mode}</div>
-                <div>files={files.map((item) => item.file_id).join(", ") || "-"}</div>
+                <div>space={draft?.space_name || effectiveCurrentSpace || "-"}</div>
+                <div>template={currentTemplateType}</div>
+                <div>workspace_mode={workspaceMode}</div>
+                <div>sources={sources.map((item) => item.source_id).join(", ") || "-"}</div>
+                <div>targets={targets.length}</div>
+                <div>draft_total_size={formatBytes(draftTotalBytes)}</div>
                 <div>updated={formatTs(draft?.updated_at)}</div>
                 <div>integration={integrationLabel(compiledPlan?.integration_level)}</div>
-                <div>postprocess=metadata refresh + entity ES incremental sync</div>
-                <div style={{ color: "#8c4b11" }}>{INTEGRATION_FIXED_NOTE}</div>
+                {draft?.validation ? (
+                  <div>
+                    validate scanned_rows={draft.validation.scanned_rows} | error_rows={draft.validation.error_rows} | errors_truncated=
+                    {draft.validation.errors_truncated ? "yes" : "no"}
+                  </div>
+                ) : null}
               </div>
             </section>
 
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
                 <strong>Job Logs</strong>
-                <span style={{ fontSize: 12, color: "#7d6b57" }}>{selectedJobId || "未选择 job"}</span>
+                <span style={{ fontSize: 12, color: "#7d6b57" }}>
+                  {selectedJobId || "未选择 job"} | space={effectiveCurrentSpace || "-"}
+                </span>
               </div>
               <pre
                 style={{
@@ -615,8 +923,10 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
 
         <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
-            <strong>4. Import Jobs</strong>
-            <div style={{ fontSize: 12, color: "#7d6b57" }}>{jobsLoading ? "jobs loading..." : `jobs=${jobs.length}`}</div>
+            <strong>4. Jobs</strong>
+            <div style={{ fontSize: 12, color: "#7d6b57" }}>
+              {jobsLoading ? "jobs loading..." : `jobs=${jobs.length}`} | space={effectiveCurrentSpace || "-"}
+            </div>
           </div>
           <JobPanel
             jobs={jobs}
@@ -624,6 +934,7 @@ export function ImportWorkspace({ onNotice }: ImportWorkspaceProps) {
             onSelect={setSelectedJobId}
             onCancel={(jobId) => void handleCancelJob(jobId)}
             onDownloadFailedRows={(jobId) => void handleDownloadFailedRows(jobId)}
+            onDownloadArtifact={(jobId, artifactName) => void handleDownloadArtifact(jobId, artifactName)}
           />
         </section>
       </div>

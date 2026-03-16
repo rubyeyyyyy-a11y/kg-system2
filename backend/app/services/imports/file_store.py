@@ -20,14 +20,17 @@ RUN_ROOT = Path(__import__("os").getenv("IMPORT_RUN_ROOT", str(REPO_ROOT / ".run
 STAGING_FILES_DIR = RUN_ROOT / "import-staging" / "files"
 DRAFTS_DIR = RUN_ROOT / "import-drafts"
 JOBS_DIR = RUN_ROOT / "import-jobs"
-MAX_UPLOAD_BYTES = int(os.getenv("IMPORT_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+MAX_UPLOAD_BYTES = int(os.getenv("IMPORT_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
+MAX_DRAFT_TOTAL_BYTES = int(os.getenv("IMPORT_MAX_DRAFT_TOTAL_BYTES", str(200 * 1024 * 1024)))
 MAX_DRAFT_FILES = int(os.getenv("IMPORT_MAX_DRAFT_FILES", "5"))
-MAX_JOB_ROWS = int(os.getenv("IMPORT_MAX_JOB_ROWS", "5000"))
-MAX_SAMPLE_ROWS = int(os.getenv("IMPORT_MAX_SAMPLE_ROWS", "50"))
+MAX_JOB_ROWS = int(os.getenv("IMPORT_MAX_JOB_ROWS", "300000"))
+MAX_SAMPLE_ROWS = int(os.getenv("IMPORT_MAX_SAMPLE_ROWS", "300"))
 STAGING_RETENTION_SEC = int(os.getenv("IMPORT_STAGING_RETENTION_SEC", str(3 * 24 * 3600)))
 JOB_ARTIFACT_RETENTION_SEC = int(os.getenv("IMPORT_JOB_ARTIFACT_RETENTION_SEC", str(7 * 24 * 3600)))
 MAX_JOB_LOG_BYTES = int(os.getenv("IMPORT_MAX_JOB_LOG_BYTES", str(512 * 1024)))
 MAX_JOB_EVENTS_BYTES = int(os.getenv("IMPORT_MAX_JOB_EVENTS_BYTES", str(512 * 1024)))
+UPLOAD_STREAM_CHUNK_BYTES = int(os.getenv("IMPORT_UPLOAD_STREAM_CHUNK_BYTES", str(1024 * 1024)))
+UPLOAD_DETECT_SAMPLE_BYTES = int(os.getenv("IMPORT_UPLOAD_DETECT_SAMPLE_BYTES", str(64 * 1024)))
 ALLOWED_UPLOAD_MIME_TYPES = {
     "text/csv",
     "application/csv",
@@ -87,6 +90,18 @@ def job_normalized_rows_path(job_id: str) -> Path:
     return job_dir(job_id) / "normalized_rows.csv"
 
 
+def job_target_failed_rows_path(job_id: str, target_id: str) -> Path:
+    return job_artifacts_dir(job_id) / f"failed_rows.{target_id}.csv"
+
+
+def job_target_normalized_rows_path(job_id: str, target_id: str) -> Path:
+    return job_artifacts_dir(job_id) / f"normalized_rows.{target_id}.csv"
+
+
+def job_target_summary_path(job_id: str, target_id: str) -> Path:
+    return job_artifacts_dir(job_id) / f"summary.{target_id}.json"
+
+
 def job_compiled_plan_path(job_id: str) -> Path:
     return job_dir(job_id) / "compiled_plan.json"
 
@@ -123,41 +138,51 @@ async def save_upload(upload: UploadFile) -> ImportFileRecord:
     file_id = new_id("file")
     file_dir = _file_dir(file_id)
     file_dir.mkdir(parents=True, exist_ok=True)
-    raw = await upload.read()
-    if len(raw) > MAX_UPLOAD_BYTES:
-        shutil.rmtree(file_dir, ignore_errors=True)
-        raise_import_http_error(
-            status_code=413,
-            error_code="IMPORT_UPLOAD_TOO_LARGE",
-            message=f"upload exceeds max size {MAX_UPLOAD_BYTES} bytes",
-            field="file",
-            extra={"max_upload_bytes": MAX_UPLOAD_BYTES},
-        )
-    encoding = _detect_encoding(raw)
-    decoded = raw.decode(encoding, errors="replace")
-    delimiter = _detect_delimiter(decoded[:8192])
     staged = staged_file_path(file_id)
-    staged.write_bytes(raw)
-    row_count = _count_csv_rows_from_text(decoded, delimiter)
-    if row_count > MAX_JOB_ROWS:
-        shutil.rmtree(file_dir, ignore_errors=True)
-        raise_import_http_error(
-            status_code=413,
-            error_code="IMPORT_ROW_LIMIT_EXCEEDED",
-            message=f"csv row count exceeds max limit {MAX_JOB_ROWS}",
-            field="file",
-            extra={"max_job_rows": MAX_JOB_ROWS, "row_count": row_count},
+    staging_tmp = staged.with_suffix(".part")
+    size_bytes = 0
+    sample = bytearray()
+    try:
+        with staging_tmp.open("wb") as handle:
+            while True:
+                chunk = await upload.read(UPLOAD_STREAM_CHUNK_BYTES)
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                if size_bytes > MAX_UPLOAD_BYTES:
+                    raise_import_http_error(
+                        status_code=413,
+                        error_code="IMPORT_UPLOAD_TOO_LARGE",
+                        message=f"upload exceeds max size {MAX_UPLOAD_BYTES} bytes",
+                        field="file",
+                        extra={"max_upload_bytes": MAX_UPLOAD_BYTES},
+                    )
+                if len(sample) < UPLOAD_DETECT_SAMPLE_BYTES:
+                    remaining = UPLOAD_DETECT_SAMPLE_BYTES - len(sample)
+                    sample.extend(chunk[:remaining])
+                handle.write(chunk)
+        encoding = _detect_encoding(bytes(sample))
+        delimiter = _detect_delimiter(bytes(sample).decode(encoding, errors="replace")[:8192])
+        staging_tmp.replace(staged)
+        record = ImportFileRecord(
+            file_id=file_id,
+            original_name=upload.filename or "upload.csv",
+            size_bytes=size_bytes,
+            detected_delimiter=delimiter,
+            detected_encoding=encoding,
+            row_count=0,
+            row_count_pending=True,
         )
-    record = ImportFileRecord(
-        file_id=file_id,
-        original_name=upload.filename or "upload.csv",
-        size_bytes=len(raw),
-        detected_delimiter=delimiter,
-        detected_encoding=encoding,
-        row_count=row_count,
-    )
-    write_json(file_meta_path(file_id), record.model_dump())
-    return record
+        save_file_record(record)
+        return record
+    except HTTPException:
+        shutil.rmtree(file_dir, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(file_dir, ignore_errors=True)
+        raise
+    finally:
+        await upload.close()
 
 
 def _validate_upload_metadata(upload: UploadFile) -> None:
@@ -180,19 +205,6 @@ def _validate_upload_metadata(upload: UploadFile) -> None:
         )
 
 
-def _count_csv_rows_from_text(text: str, delimiter: str) -> int:
-    import io
-
-    handle = io.StringIO(text)
-    reader = csv.DictReader(handle, delimiter=delimiter or ",")
-    count = 0
-    for _row in reader:
-        count += 1
-        if count > MAX_JOB_ROWS:
-            return count
-    return count
-
-
 def load_file_record(file_id: str) -> ImportFileRecord:
     path = file_meta_path(file_id)
     if not path.exists():
@@ -205,10 +217,22 @@ def load_file_record(file_id: str) -> ImportFileRecord:
     return ImportFileRecord.model_validate(read_json(path))
 
 
+def save_file_record(record: ImportFileRecord) -> None:
+    write_json(file_meta_path(record.file_id), record.model_dump())
+
+
+def update_file_row_count(file_id: str, row_count: int) -> ImportFileRecord:
+    record = load_file_record(file_id)
+    record.row_count = max(0, int(row_count))
+    record.row_count_pending = False
+    save_file_record(record)
+    return record
+
+
 def iter_csv_rows(file_id: str) -> tuple[list[str], Iterable[dict[str, str]], ImportFileRecord]:
     record = load_file_record(file_id)
     path = staged_file_path(file_id)
-    handle = path.open("r", encoding=record.detected_encoding, newline="")
+    handle = path.open("r", encoding=record.detected_encoding, errors="replace", newline="")
     reader = csv.DictReader(handle, delimiter=record.detected_delimiter or ",")
 
     def _generator() -> Iterable[dict[str, str]]:
@@ -223,45 +247,50 @@ def iter_csv_rows(file_id: str) -> tuple[list[str], Iterable[dict[str, str]], Im
 
 def read_csv_columns(file_id: str) -> list[str]:
     record = load_file_record(file_id)
-    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, newline="") as handle:
+    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=record.detected_delimiter or ",")
         return list(reader.fieldnames or [])
 
 
-def read_csv_sample(file_id: str, sample_rows: int) -> tuple[list[str], list[dict[str, str]], ImportFileRecord]:
+def read_csv_sample(file_id: str, sample_rows: int) -> tuple[list[str], list[dict[str, str]], ImportFileRecord, bool]:
     record = load_file_record(file_id)
     out: list[dict[str, str]] = []
-    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, newline="") as handle:
+    limit = max(1, min(int(sample_rows), MAX_SAMPLE_ROWS))
+    sample_truncated = False
+    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=record.detected_delimiter or ",")
         columns = list(reader.fieldnames or [])
-        for index, row in enumerate(reader):
-            if index >= max(1, min(int(sample_rows), MAX_SAMPLE_ROWS)):
+        for index, row in enumerate(reader, start=1):
+            if index > limit:
+                sample_truncated = True
                 break
             out.append({str(k or ""): str(v or "") for k, v in row.items()})
-    return columns, out, record
+    return columns, out, record, sample_truncated
 
 
 def count_csv_rows(file_id: str) -> int:
     record = load_file_record(file_id)
-    if record.row_count > 0:
+    if not record.row_count_pending:
         return int(record.row_count)
-    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, newline="") as handle:
+    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=record.detected_delimiter or ",")
         count = sum(1 for _ in reader)
-    record.row_count = count
-    write_json(file_meta_path(file_id), record.model_dump())
-    return count
+    return update_file_row_count(file_id, count).row_count
 
 
 def read_csv_rows(file_id: str) -> tuple[list[str], list[dict[str, str]], ImportFileRecord]:
     record = load_file_record(file_id)
     rows: list[dict[str, str]] = []
-    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, newline="") as handle:
+    with staged_file_path(file_id).open("r", encoding=record.detected_encoding, errors="replace", newline="") as handle:
         reader = csv.DictReader(handle, delimiter=record.detected_delimiter or ",")
         columns = list(reader.fieldnames or [])
         for row in reader:
             rows.append({str(k or ""): str(v or "") for k, v in row.items()})
     return columns, rows, record
+
+
+def sum_file_sizes(file_ids: list[str]) -> int:
+    return sum(load_file_record(file_id).size_bytes for file_id in file_ids)
 
 
 def write_json(path: Path, payload: Any) -> None:
@@ -332,6 +361,8 @@ def copy_inputs_to_job(job_id: str, file_ids: list[str], draft_payload: dict[str
     base = job_dir(job_id)
     (base / "input").mkdir(parents=True, exist_ok=True)
     (base / "artifacts").mkdir(parents=True, exist_ok=True)
+    # The job snapshot becomes the execution truth source. Workers must read the
+    # frozen draft snapshot + compiled_plan copy under .run/import-jobs/<job_id>/.
     write_json(base / "draft_snapshot.json", draft_payload)
     write_json(job_compiled_plan_path(job_id), compiled_plan)
     for file_id in file_ids:
@@ -354,6 +385,16 @@ def append_csv_row(path: Path, headers: list[str], row: dict[str, Any]) -> None:
     with path.open("a", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=headers)
         writer.writerow({key: row.get(key, "") for key in headers})
+
+
+def append_csv_rows(path: Path, headers: list[str], rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers)
+        for row in rows:
+            writer.writerow({key: row.get(key, "") for key in headers})
 
 
 def _append_limited_text(path: Path, payload: str, max_bytes: int, truncation_marker: str) -> bool:

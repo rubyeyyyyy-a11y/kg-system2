@@ -35,6 +35,13 @@ const EMPTY_RESULT: DiscoveryCandidateResultState = {
   has_more: false,
   next_page: null,
   meta: {},
+  space_meta: {
+    space_name: "",
+    graph_status: "unavailable",
+    search_status: "unavailable",
+    coverage_pct: null,
+    index_status: null,
+  },
   loading: false,
   loadingMore: false,
   error: null,
@@ -74,9 +81,13 @@ function candidateKey(item: DiscoveryEntityCandidateItem) {
 
 export function useDiscoveryCandidateResults({
   query,
+  spaceName,
+  scopeKey,
   onError,
 }: {
   query: DiscoveryEntityCandidateQueryState;
+  spaceName?: string;
+  scopeKey?: string;
   onError: (message: string) => void;
 }) {
   const [preview, setPreview] = useState<DiscoveryCandidatePreviewState>(EMPTY_PREVIEW);
@@ -110,8 +121,12 @@ export function useDiscoveryCandidateResults({
   useEffect(() => {
     const keyword = query.q.trim();
     if (keyword.length < MIN_PREVIEW_QUERY_LEN) {
-      closePreview();
-      return;
+      const timer = window.setTimeout(() => {
+        closePreview();
+      }, 0);
+      return () => {
+        window.clearTimeout(timer);
+      };
     }
 
     const timer = window.setTimeout(() => {
@@ -130,6 +145,7 @@ export function useDiscoveryCandidateResults({
       void discoveryEntityCandidatesApi({
         ...buildRequest(query, 1, PREVIEW_PAGE_SIZE),
         signal: controller.signal,
+        spaceName,
       })
         .then((resp) => {
           if (controller.signal.aborted) return;
@@ -157,7 +173,7 @@ export function useDiscoveryCandidateResults({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [closePreview, query]);
+  }, [closePreview, query, spaceName]);
 
   useEffect(() => {
     return () => {
@@ -165,6 +181,26 @@ export function useDiscoveryCandidateResults({
       resultAbortRef.current?.abort();
     };
   }, []);
+
+  const reset = useCallback(() => {
+    previewAbortRef.current?.abort();
+    resultAbortRef.current?.abort();
+    previewAbortRef.current = null;
+    resultAbortRef.current = null;
+    setPreview(EMPTY_PREVIEW);
+    setResult(EMPTY_RESULT);
+    setCommittedQuery(null);
+    setSelectedIds([]);
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      reset();
+    }, 0);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [reset, scopeKey]);
 
   const runSearch = useCallback(
     async (options?: { append?: boolean; page?: number; queryOverride?: DiscoveryEntityCandidateQueryState }) => {
@@ -223,6 +259,7 @@ export function useDiscoveryCandidateResults({
         const resp = await discoveryEntityCandidatesApi({
           ...buildRequest(nextQuery, page, FULL_LIST_PAGE_SIZE),
           signal: controller.signal,
+          spaceName,
         });
         if (controller.signal.aborted) return;
         setResult((prev) => {
@@ -254,7 +291,7 @@ export function useDiscoveryCandidateResults({
         onError(parsed.message || "候选搜索失败");
       }
     },
-    [closePreview, committedQuery, onError, query, result.next_page]
+    [closePreview, committedQuery, onError, query, result.next_page, spaceName]
   );
 
   const loadMore = useCallback(async () => {
@@ -308,5 +345,6 @@ export function useDiscoveryCandidateResults({
     clearSelected,
     removeSelected,
     patchCandidate,
+    reset,
   };
 }

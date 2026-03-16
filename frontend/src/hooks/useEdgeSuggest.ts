@@ -8,6 +8,8 @@ type UseEdgeSuggestParams = {
   q: string;
   relation: string;
   sourceDb: string;
+  spaceName?: string;
+  scopeKey?: string;
   onSelect: (item: EdgeSearchItem) => void;
   onQueryChange: (value: string) => void;
   onSearch: () => void;
@@ -32,6 +34,8 @@ export function useEdgeSuggest({
   q,
   relation,
   sourceDb,
+  spaceName,
+  scopeKey,
   onSelect,
   onQueryChange,
   onSearch,
@@ -97,6 +101,7 @@ export function useEdgeSuggest({
         relation,
         source_db: sourceDb,
         signal: controller.signal,
+        spaceName,
       });
 
       if (reqId !== suggestReqIdRef.current) return;
@@ -191,7 +196,7 @@ export function useEdgeSuggest({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [q, relation, sourceDb, suggestOpen]);
+  }, [q, relation, sourceDb, spaceName, suggestOpen]);
 
   useEffect(() => {
     if (!suggestOpen) return;
@@ -210,6 +215,10 @@ export function useEdgeSuggest({
       invalidateSuggestRequest();
     };
   }, []);
+
+  useEffect(() => {
+    closeSuggestPanel();
+  }, [scopeKey]);
 
   return {
     suggestOpen,

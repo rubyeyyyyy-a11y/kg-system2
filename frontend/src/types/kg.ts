@@ -1,3 +1,20 @@
+export type SpaceIndexStatus = {
+  status: "verified_nonempty" | "verified_empty" | "verified_partial" | "failed";
+  doc_count: number;
+  nebula_entity_count?: number | null;
+  coverage_pct?: number | null;
+  note?: string;
+  updated_at?: string | null;
+};
+
+export type SpaceMeta = {
+  space_name: string;
+  graph_status: "unavailable" | "ready";
+  search_status: "unavailable" | "empty" | "partial" | "full" | "failed";
+  coverage_pct?: number | null;
+  index_status?: SpaceIndexStatus | null;
+};
+
 export type NodeBrief = {
   id: number;
   label: string;
@@ -43,6 +60,7 @@ export type SearchResp = {
   total_candidates: number;
   truncated?: boolean;
   meta?: Record<string, unknown>;
+  space_meta: SpaceMeta;
 };
 
 export type SubgraphResp = {
@@ -140,6 +158,7 @@ export type SuggestResp = {
   q: string;
   items: SuggestItem[];
   truncated: boolean;
+  space_meta: SpaceMeta;
 };
 
 export type RawIdSuggestItem = {
@@ -154,6 +173,7 @@ export type RawIdSuggestResp = {
   q: string;
   items: RawIdSuggestItem[];
   truncated: boolean;
+  space_meta: SpaceMeta;
 };
 
 export type EntityTypeItem = {
@@ -314,6 +334,9 @@ export type GraphDiscoveryExpandResp = {
   has_more_candidates_before_budget: boolean;
   has_more_candidates_after_filters: boolean;
   terminal: boolean;
+  request_space: string;
+  space_meta: SpaceMeta;
+  warnings?: string[];
   stats: {
     candidate_neighbor_count: number;
     filtered_candidate_count: number;
@@ -348,6 +371,9 @@ export type NodeExpandSession = {
 export type GraphDiscoveryResp = {
   nodes: NodeBrief[];
   edges: EdgeBrief[];
+  request_space: string;
+  space_meta: SpaceMeta;
+  warnings?: string[];
   facets: {
     entity_types: GraphDiscoveryEntityFacetItem[];
     relation_types: GraphDiscoveryRelationFacetItem[];
@@ -410,6 +436,7 @@ export type DiscoveryEntityCandidatesResp = {
   has_more: boolean;
   next_page: number | null;
   meta?: Record<string, unknown>;
+  space_meta: SpaceMeta;
 };
 
 export type EditableFieldSpec = {

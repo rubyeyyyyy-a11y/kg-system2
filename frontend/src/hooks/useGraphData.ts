@@ -11,6 +11,8 @@ import { edgeKey } from "../utils/kg";
 type GraphStats = Record<string, unknown> | null;
 
 type UseGraphDataParams = {
+  spaceName?: string;
+  scopeKey?: string;
   selectedNodeVid: number | null;
   onSelectNode: (vid: number) => void;
   onClearSelection: () => void;
@@ -73,6 +75,8 @@ type UseGraphDataResult = {
 };
 
 export function useGraphData({
+  spaceName,
+  scopeKey,
   selectedNodeVid,
   onSelectNode,
   onClearSelection,
@@ -105,6 +109,16 @@ export function useGraphData({
   const relationsRef = useRef<string[]>([]);
   const graphNodesRef = useRef<NodeBrief[]>([]);
   const expandProbeTokenByVidRef = useRef<Record<number, number>>({});
+  const scopeVersionRef = useRef(0);
+  const subgraphAbortRef = useRef<AbortController | null>(null);
+  const expandAbortRef = useRef<AbortController | null>(null);
+
+  function abortGraphRequests() {
+    subgraphAbortRef.current?.abort();
+    subgraphAbortRef.current = null;
+    expandAbortRef.current?.abort();
+    expandAbortRef.current = null;
+  }
 
   function commitRenderMutation(
     reason: GraphRenderMutation["reason"],
@@ -179,6 +193,7 @@ export function useGraphData({
   }
 
   function clearGraphData() {
+    abortGraphRequests();
     setRootVid(null);
     setGraphNodes([]);
     setGraphEdges([]);
@@ -267,10 +282,14 @@ export function useGraphData({
     nextRelations: string[],
     overrideTier?: number
   ) {
+    const requestScopeVersion = scopeVersionRef.current;
     const tier = Number.isFinite(overrideTier as number)
       ? Math.max(0, Math.min(Number(overrideTier), SUBGRAPH_BUDGET_PRESETS.length - 1))
       : budgetTier;
     const budget = SUBGRAPH_BUDGET_PRESETS[tier];
+    subgraphAbortRef.current?.abort();
+    const controller = new AbortController();
+    subgraphAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const json = await subgraph({
@@ -279,7 +298,10 @@ export function useGraphData({
         relations: nextRelations,
         max_nodes: budget.max_nodes,
         max_edges: budget.max_edges,
+        signal: controller.signal,
+        spaceName,
       });
+      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
 
       setHop(nextHop);
       setRelations(nextRelations);
@@ -299,10 +321,14 @@ export function useGraphData({
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
+      if (controller.signal.aborted) return;
       const parsed = parseApiError(e);
       notify("error", `子图加载失败：${parsed.message}`);
     } finally {
-      setLoadingGraph(false);
+      if (subgraphAbortRef.current === controller) {
+        subgraphAbortRef.current = null;
+        setLoadingGraph(false);
+      }
     }
   }
 
@@ -312,7 +338,11 @@ export function useGraphData({
 
   async function expand1hop(fromVid: number) {
     if (!rootVid) return;
+    const requestScopeVersion = scopeVersionRef.current;
     const budget = currentBudgetPreset();
+    expandAbortRef.current?.abort();
+    const controller = new AbortController();
+    expandAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const existingIds = graphNodes.map((n) => n.id);
@@ -322,7 +352,10 @@ export function useGraphData({
         existing_node_ids: existingIds,
         max_nodes: budget.max_nodes,
         max_edges: budget.max_edges,
+        signal: controller.signal,
+        spaceName,
       });
+      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
 
       if ((json.added_nodes?.length || 0) === 0 && (json.added_edges?.length || 0) === 0) {
         setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "noextra" }));
@@ -415,15 +448,23 @@ export function useGraphData({
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
+      if (controller.signal.aborted) return;
       const parsed = parseApiError(e);
       notify("error", `Expand 失败：${parsed.message}`);
     } finally {
-      setLoadingGraph(false);
+      if (expandAbortRef.current === controller) {
+        expandAbortRef.current = null;
+        setLoadingGraph(false);
+      }
     }
   }
 
   async function reroot1hop(vid: number) {
+    const requestScopeVersion = scopeVersionRef.current;
     const budget = currentBudgetPreset();
+    subgraphAbortRef.current?.abort();
+    const controller = new AbortController();
+    subgraphAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const json = await subgraph({
@@ -432,7 +473,10 @@ export function useGraphData({
         relations,
         max_nodes: budget.max_nodes,
         max_edges: budget.max_edges,
+        signal: controller.signal,
+        spaceName,
       });
+      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
 
       setHop(1);
       setRootVid(vid);
@@ -456,10 +500,14 @@ export function useGraphData({
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
     } catch (e: unknown) {
+      if (controller.signal.aborted) return;
       const parsed = parseApiError(e);
       notify("error", `切换 root 失败：${parsed.message}`);
     } finally {
-      setLoadingGraph(false);
+      if (subgraphAbortRef.current === controller) {
+        subgraphAbortRef.current = null;
+        setLoadingGraph(false);
+      }
     }
   }
 
@@ -552,6 +600,7 @@ export function useGraphData({
   }
 
   async function probeExpand1hop(fromVid: number) {
+    const requestScopeVersion = scopeVersionRef.current;
     const curRoot = rootVidRef.current;
     const curGraphNodes = graphNodesRef.current;
     const curRelations = relationsRef.current;
@@ -572,7 +621,9 @@ export function useGraphData({
         existing_node_ids: existingIds,
         max_nodes: 20,
         max_edges: 120,
+        spaceName,
       });
+      if (requestScopeVersion !== scopeVersionRef.current) return;
 
       if (expandProbeTokenByVidRef.current[fromVid] !== nextToken) return;
 
@@ -586,10 +637,18 @@ export function useGraphData({
 
       setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: state }));
     } catch {
+      if (requestScopeVersion !== scopeVersionRef.current) return;
       if (expandProbeTokenByVidRef.current[fromVid] !== nextToken) return;
       setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
     }
   }
+
+  useEffect(() => {
+    scopeVersionRef.current += 1;
+    abortGraphRequests();
+    setLoadingGraph(false);
+    resetExpandProbeCache();
+  }, [scopeKey]);
 
   useEffect(() => {
     if (selectedNodeVid == null) return;

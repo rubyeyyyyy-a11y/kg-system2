@@ -4,6 +4,7 @@ from app.config import settings
 from app.db.nebula_client import execute_ngql_safe
 from app.services.common import vw
 from app.services.imports.models import (
+    DraftSource,
     ImportTargetConfig,
     IntegrationLevel,
     SchemaObject,
@@ -36,9 +37,9 @@ def _column_values(result: Any, candidates: list[str]) -> list[Any]:
     return []
 
 
-def _describe_object(object_type: str, name: str) -> list[SchemaProperty]:
+def _describe_object(object_type: str, name: str, *, space_name: str | None = None) -> list[SchemaProperty]:
     stmt = "TAG" if object_type == "tag" else "EDGE"
-    result = execute_ngql_safe(f"DESCRIBE {stmt} `{name}`;")
+    result = execute_ngql_safe(f"DESCRIBE {stmt} `{name}`;", space_name=space_name)
     fields = _column_values(result, ["Field", "field", "Name", "name"])
     types = _column_values(result, ["Type", "type"])
     nulls = _column_values(result, ["Null", "null"])
@@ -58,20 +59,26 @@ def _describe_object(object_type: str, name: str) -> list[SchemaProperty]:
     return props
 
 
-def introspect_schema() -> dict[str, list[dict[str, Any]]]:
-    tags_res = execute_ngql_safe("SHOW TAGS;")
-    edges_res = execute_ngql_safe("SHOW EDGES;")
+def introspect_schema(*, space_name: str | None = None) -> dict[str, list[dict[str, Any]]]:
+    tags_res = execute_ngql_safe("SHOW TAGS;", space_name=space_name)
+    edges_res = execute_ngql_safe("SHOW EDGES;", space_name=space_name)
     tags = []
     edges = []
     for value in _column_values(tags_res, ["Name", "name", "Tag"]):
         tag_name = str(vw(value) or "").strip()
         if tag_name:
-            tags.append(SchemaObject(object_type="tag", name=tag_name, properties=_describe_object("tag", tag_name)))
+            tags.append(
+                SchemaObject(object_type="tag", name=tag_name, properties=_describe_object("tag", tag_name, space_name=space_name))
+            )
     for value in _column_values(edges_res, ["Name", "name", "Edge"]):
         edge_name = str(vw(value) or "").strip()
         if edge_name:
             edges.append(
-                SchemaObject(object_type="edge_type", name=edge_name, properties=_describe_object("edge_type", edge_name))
+                SchemaObject(
+                    object_type="edge_type",
+                    name=edge_name,
+                    properties=_describe_object("edge_type", edge_name, space_name=space_name),
+                )
             )
     return {
         "tags": [item.model_dump() for item in sorted(tags, key=lambda item: item.name)],
@@ -124,23 +131,44 @@ def build_schema_plan(
     *,
     schema: dict[str, list[dict[str, Any]]],
     mapping: list[ImportTargetConfig],
-    all_columns: list[str],
+    sources_by_id: dict[str, DraftSource] | None = None,
+    all_columns: list[str] | None = None,
     schema_options: SchemaOptions,
 ) -> tuple[list[SchemaObjectPlan], list[str], list[str]]:
     plans: list[SchemaObjectPlan] = []
     warnings: list[str] = []
     integration_warnings: list[str] = []
+    effective_sources_by_id = dict(sources_by_id or {})
+    if not effective_sources_by_id and all_columns is not None:
+        for index, target in enumerate(mapping):
+            source_id = target.source_id or f"compat_source_{index}"
+            effective_sources_by_id[source_id] = DraftSource(
+                source_id=source_id,
+                file_id="",
+                filename="",
+                columns=list(all_columns),
+                sample_rows=[],
+                header_hash="",
+                inferred_kind="unknown",
+            )
     for target in mapping:
+        source_key = target.source_id or next(iter(effective_sources_by_id.keys()), "")
+        source = effective_sources_by_id.get(source_key)
+        if source is None:
+            warnings.append(f"target `{target.object_name}` references missing source `{target.source_id}`")
+            continue
         existing = _object_lookup(schema, target.object_type, target.object_name)
         exists = existing is not None
         if not exists and not schema_options.allow_create_object:
             warnings.append(f"{target.object_type} `{target.object_name}` does not exist and create is disabled")
-        existing_props = {str(item.get("name") or ""): item for item in (existing or {}).get("properties", [])}
-        mapped_columns = {item.source_column for item in target.field_mappings}
+        existing_props = {str(item.get('name') or ''): item for item in (existing or {}).get("properties", [])}
+        mapped_columns = set(target.identity_mapping.mapped_columns()) | {
+            item.source_column for item in target.property_mappings if item.source_column
+        }
         add_properties: list[SchemaPropertyPlan] = []
-        for item in target.field_mappings:
+        for item in target.property_mappings:
             prop_name = item.target_field
-            if prop_name in {"ID", "srcVID", "dstVID", "rank"}:
+            if not prop_name:
                 continue
             prop_exists = prop_name in existing_props
             if exists and not prop_exists and not schema_options.allow_add_properties:
@@ -165,9 +193,11 @@ def build_schema_plan(
             object_type=target.object_type, object_name=target.object_name, object_exists=exists
         )
         integration_warnings.extend(object_integration_warnings)
-        ignored_columns = [column for column in all_columns if column not in mapped_columns]
+        ignored_columns = [column for column in source.columns if column not in mapped_columns]
         plans.append(
             SchemaObjectPlan(
+                target_id=target.target_id,
+                source_id=target.source_id,
                 object_type=target.object_type,
                 object_name=target.object_name,
                 object_exists=exists,
@@ -180,23 +210,27 @@ def build_schema_plan(
     return plans, warnings, integration_warnings
 
 
-def apply_schema_plan(schema_plan: list[SchemaObjectPlan]) -> None:
+def apply_schema_plan(schema_plan: list[SchemaObjectPlan], *, space_name: str | None = None) -> None:
     for object_plan in schema_plan:
         target = f"`{object_plan.object_name}`"
         if object_plan.add_object:
             if object_plan.object_type == "tag":
                 props = ", ".join(f"`{item.name}` {item.type}" for item in object_plan.add_properties)
-                execute_ngql_safe(f"CREATE TAG IF NOT EXISTS {target}({props});" if props else f"CREATE TAG IF NOT EXISTS {target}();")
+                execute_ngql_safe(
+                    f"CREATE TAG IF NOT EXISTS {target}({props});" if props else f"CREATE TAG IF NOT EXISTS {target}();",
+                    space_name=space_name,
+                )
             else:
                 props = ", ".join(f"`{item.name}` {item.type}" for item in object_plan.add_properties)
                 execute_ngql_safe(
-                    f"CREATE EDGE IF NOT EXISTS {target}({props});" if props else f"CREATE EDGE IF NOT EXISTS {target}();"
+                    f"CREATE EDGE IF NOT EXISTS {target}({props});" if props else f"CREATE EDGE IF NOT EXISTS {target}();",
+                    space_name=space_name,
                 )
             continue
         if not object_plan.add_properties:
             continue
         props = ", ".join(f"`{item.name}` {item.type}" for item in object_plan.add_properties)
         if object_plan.object_type == "tag":
-            execute_ngql_safe(f"ALTER TAG {target} ADD ({props});")
+            execute_ngql_safe(f"ALTER TAG {target} ADD ({props});", space_name=space_name)
         else:
-            execute_ngql_safe(f"ALTER EDGE {target} ADD ({props});")
+            execute_ngql_safe(f"ALTER EDGE {target} ADD ({props});", space_name=space_name)

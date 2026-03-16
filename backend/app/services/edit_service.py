@@ -6,6 +6,7 @@ from fastapi import HTTPException
 
 from app.core import config, field_policy
 from app.core.audit_logger import write_audit_record
+from app.core.space_context import get_current_space
 from app.core.escape import (
     escape_ngql_string,
     raise_validation_error,
@@ -84,7 +85,7 @@ def _audit(
         {
             "ts": int(time.time()),
             "actor": actor,
-            "space": config.SPACE,
+            "space": get_current_space(),
             "object_type": object_type,
             "identity": identity,
             "expected_version": expected_version,

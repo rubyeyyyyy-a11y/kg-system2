@@ -15,12 +15,21 @@ class NebulaExecutionError(RuntimeError):
         self.code = code
 
 
-def execute_ngql_safe(ngql: str, retries: int = 0, sleep_sec: float = 0.05) -> Any:
+def execute_ngql_safe(
+    ngql: str,
+    retries: int = 0,
+    sleep_sec: float = 0.05,
+    *,
+    space_name: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    use_space: bool = True,
+) -> Any:
     last_error: NebulaExecutionError | None = None
     attempts = max(1, retries + 1)
     for attempt in range(1, attempts + 1):
         try:
-            res = execute_ngql(ngql)
+            res = execute_ngql(ngql, space_name=space_name, user=user, password=password, use_space=use_space)
         except Exception as exc:
             last_error = NebulaExecutionError(str(exc), ngql=ngql, code="NEBULA_SESSION_ERROR")
             if attempt < attempts:

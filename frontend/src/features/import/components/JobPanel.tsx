@@ -6,6 +6,7 @@ type JobPanelProps = {
   onSelect: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onDownloadFailedRows: (jobId: string) => void;
+  onDownloadArtifact: (jobId: string, artifactName: string) => void;
 };
 
 const STATUS_COLOR: Record<ImportJobResp["status"], string> = {
@@ -13,28 +14,24 @@ const STATUS_COLOR: Record<ImportJobResp["status"], string> = {
   running: "#2563eb",
   post_metadata_refresh: "#7c3aed",
   post_es_sync: "#9333ea",
+  post_verify_index: "#7e22ce",
   succeeded: "#15803d",
   failed_import: "#b91c1c",
   failed_postprocess: "#c2410c",
   cancelled: "#6b7280",
 };
 
-function integrationText(job: ImportJobResp) {
-  if (job.status !== "succeeded") return "";
-  if (job.integration_level === "fully_integrated") return "imported successfully | fully integrated";
-  if (job.integration_level === "partially_integrated") return "imported successfully | partially integrated";
-  return "imported successfully | import-only";
+function displayStatus(job: ImportJobResp) {
+  if (job.status === "queued") return "queued";
+  if (job.status === "running") return "importing_per_target";
+  if (job.status === "post_metadata_refresh") return "refreshing_metadata";
+  if (job.status === "post_es_sync") return "syncing_search_index";
+  if (job.status === "post_verify_index") return "verifying_searchable_completion";
+  if (job.status === "succeeded") return "done";
+  return job.status;
 }
 
-function phaseHint(job: ImportJobResp) {
-  if (job.cancel_requested && job.status === "running") return "cancel pending, effective at next batch boundary";
-  if (job.status === "post_metadata_refresh") return "postprocess: refreshing metadata from DB";
-  if (job.status === "post_es_sync") return "postprocess: syncing entity ES incrementally";
-  if (job.status === "cancelled" && job.cancel_effective_at_batch) return "cancelled at batch boundary";
-  return "";
-}
-
-export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFailedRows }: JobPanelProps) {
+export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFailedRows, onDownloadArtifact }: JobPanelProps) {
   const selectedJob = jobs.find((job) => job.job_id === selectedJobId) || jobs[0] || null;
 
   return (
@@ -65,11 +62,12 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
               }}
             >
               <strong>{job.job_id}</strong>
-              <span style={{ fontSize: 12, color: STATUS_COLOR[job.status] }}>{job.status}</span>
+              <span style={{ fontSize: 12, color: STATUS_COLOR[job.status] }}>{displayStatus(job)}</span>
+              <span style={{ fontSize: 12, color: "#7d6b57" }}>space={job.space_name}</span>
               <span style={{ fontSize: 12, color: "#7d6b57" }}>
                 processed={job.processed_rows}/{job.total_rows} success={job.success_rows} failed={job.failed_rows}
               </span>
-              {job.failed_rows > 0 ? <span style={{ fontSize: 12, color: "#a61d24" }}>failed rows available</span> : null}
+              <span style={{ fontSize: 12, color: "#7d6b57" }}>targets={job.targets.length} artifacts={job.artifacts.length}</span>
             </button>
           ))
         )}
@@ -77,11 +75,11 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
 
       <div style={{ border: "1px solid rgba(76, 56, 36, 0.14)", borderRadius: 18, padding: 16, background: "#fffdf8" }}>
         {selectedJob ? (
-          <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
               <strong>{selectedJob.job_id}</strong>
-              <span style={{ fontSize: 12, color: STATUS_COLOR[selectedJob.status] }}>{selectedJob.status}</span>
-              <span style={{ fontSize: 12, color: "#7d6b57" }}>mode={selectedJob.mode}</span>
+              <span style={{ fontSize: 12, color: STATUS_COLOR[selectedJob.status] }}>{displayStatus(selectedJob)}</span>
+              <span style={{ fontSize: 12, color: "#7d6b57" }}>workspace={selectedJob.workspace_mode}</span>
               {selectedJob.status === "queued" || selectedJob.status === "running" ? (
                 <button onClick={() => onCancel(selectedJob.job_id)} style={{ marginLeft: "auto" }}>
                   取消
@@ -89,54 +87,47 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
               ) : null}
               {selectedJob.failed_rows > 0 ? (
                 <button onClick={() => onDownloadFailedRows(selectedJob.job_id)} style={{ background: "#fff1f0", borderColor: "#ffccc7" }}>
-                  下载 failed rows
+                  下载默认 failed rows
                 </button>
               ) : null}
             </div>
-            {integrationText(selectedJob) ? (
-              <div style={{ padding: 12, borderRadius: 12, background: "#eefbf1", color: "#166534", fontSize: 13 }}>
-                {integrationText(selectedJob)}
-              </div>
-            ) : null}
-            {phaseHint(selectedJob) ? (
-              <div style={{ padding: 12, borderRadius: 12, background: "#fffbe6", color: "#ad6800", fontSize: 13 }}>
-                {phaseHint(selectedJob)}
-              </div>
-            ) : null}
+
             <div style={{ fontSize: 13, color: "#5b4b38" }}>
               draft={selectedJob.draft_id} | plan={selectedJob.plan_id} | actor={selectedJob.created_by}
             </div>
             <div style={{ fontSize: 13, color: "#5b4b38" }}>
-              metadata={selectedJob.metadata_refreshed ? "done" : "pending"} | es=
-              {selectedJob.es_sync_skipped ? "skipped" : selectedJob.affected_entity_vids.length > 0 ? "entity_sync" : "pending"}
+              sources={selectedJob.sources.map((item) => `${item.filename}:${item.inferred_kind}`).join(" | ") || "-"}
             </div>
-            <div style={{ fontSize: 13, color: "#5b4b38" }}>integration={selectedJob.integration_level}</div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <strong style={{ fontSize: 14 }}>Per-Target Artifacts</strong>
+              {selectedJob.targets.map((target) => {
+                const targetArtifacts = selectedJob.artifacts.filter((item) => item.target_id === target.target_id);
+                return (
+                  <div key={target.target_id} style={{ padding: 12, borderRadius: 12, background: "#f7f0e4", display: "grid", gap: 8 }}>
+                    <div style={{ fontWeight: 700 }}>{`${target.object_type} "${target.object_name}" <- ${target.source_filename}`}</div>
+                    <div style={{ fontSize: 13, color: "#5b4b38" }}>
+                      source_id={target.source_id} | target_id={target.target_id} | columns={target.source_columns.join(", ")}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {targetArtifacts.map((artifact) => (
+                        <button
+                          key={artifact.filename}
+                          onClick={() => onDownloadArtifact(selectedJob.job_id, artifact.filename)}
+                          style={{ background: artifact.kind === "failed_rows" ? "#fff1f0" : "#eef4ff" }}
+                        >
+                          {artifact.filename}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
             {selectedJob.error_message ? (
               <div style={{ padding: 12, borderRadius: 12, background: "#fff1f0", color: "#a61d24", fontSize: 13 }}>
                 {selectedJob.error_message}
-              </div>
-            ) : null}
-            {selectedJob.warnings.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                {selectedJob.warnings.map((warning, index) => (
-                  <div key={`${warning}-${index}`} style={{ padding: 10, borderRadius: 10, background: "#fffbe6", color: "#ad6800" }}>
-                    {warning}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {selectedJob.integration_warnings.length > 0 ? (
-              <div style={{ display: "grid", gap: 6 }}>
-                {selectedJob.integration_warnings.map((warning, index) => (
-                  <div key={`${warning}-${index}`} style={{ padding: 10, borderRadius: 10, background: "#fff7e6", color: "#ad6800" }}>
-                    {warning}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-            {selectedJob.failed_rows_truncated ? (
-              <div style={{ padding: 10, borderRadius: 10, background: "#fff1f0", color: "#a61d24", fontSize: 13 }}>
-                failed_rows.csv reached truncation limit; only the earliest failure rows were persisted.
               </div>
             ) : null}
           </div>

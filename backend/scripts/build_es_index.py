@@ -12,13 +12,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.config import settings
 from app.clients.es_client import ElasticsearchClient
-from app.clients.nebula_client import NebulaClient
-from app.services.common import normalize_raw_id, vw
+from app.services.search_v2 import indexing_service
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build/refresh ES index from Nebula Entity nodes")
+    parser.add_argument("--space", type=str, default=settings.nebula_space)
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--max", type=int, default=0, help="0 means no limit")
     parser.add_argument("--since", type=int, default=None, help="start from vid > since")
@@ -44,124 +45,22 @@ def read_state(path: Path) -> int:
         return 0
     try:
         data = json.loads(path.read_text())
-        return int(data.get("last_vid") or 0)
+        return int(data.get("cursor") or data.get("last_vid") or 0)
     except Exception:
         return 0
 
 
-def write_state(path: Path, last_vid: int, indexed: int) -> None:
+def write_state(path: Path, cursor: int, indexed: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
-        "last_vid": int(last_vid),
+        "cursor": int(cursor),
         "indexed_total": int(indexed),
         "updated_at": int(time.time()),
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
-def build_doc(
-    *,
-    vid: int,
-    entity_name: object,
-    description: object,
-    entity_raw_id: object,
-    entity_type: object,
-    source: object,
-) -> Dict[str, object]:
-    raw_id = str(entity_raw_id or "")
-    raw_id_norm = normalize_raw_id(raw_id)
-    entity_type_str = str(entity_type or "")
-    return {
-        "vid": int(vid),
-        "entity_name": str(entity_name or ""),
-        "description": str(description or ""),
-        "entity_raw_id": raw_id,
-        "entity_raw_id_text": raw_id,
-        "raw_id_norm": raw_id_norm,
-        "raw_id_norm_text": raw_id_norm,
-        "entity_type": entity_type_str,
-        "entity_type_text": entity_type_str,
-        "source": str(source or ""),
-    }
-
-
-def fetch_batch(nebula: NebulaClient, last_vid: int, batch_size: int) -> List[Dict[str, object]]:
-    ngql = f"""
-MATCH (v:`Entity`)
-WHERE id(v) > {int(last_vid)}
-RETURN id(v) AS vid,
-       v.`Entity`.`entity_name` AS entity_name,
-       v.`Entity`.`description` AS description,
-       v.`Entity`.`entity_raw_id` AS entity_raw_id,
-       v.`Entity`.`entity_type` AS entity_type,
-       v.`Entity`.`source` AS source
-ORDER BY vid ASC
-LIMIT {int(batch_size)};
-"""
-    res, _ = nebula.execute(ngql)
-
-    vids = res.column_values("vid")
-    names = res.column_values("entity_name")
-    descriptions = res.column_values("description")
-    raw_ids = res.column_values("entity_raw_id")
-    types = res.column_values("entity_type")
-    sources = res.column_values("source")
-
-    out: List[Dict[str, object]] = []
-    for i in range(len(vids)):
-        out.append(
-            build_doc(
-                vid=int(vw(vids[i])),
-                entity_name=vw(names[i]),
-                description=vw(descriptions[i]),
-                entity_raw_id=vw(raw_ids[i]),
-                entity_type=vw(types[i]),
-                source=vw(sources[i]),
-            )
-        )
-    return out
-
-
-def fetch_by_vids(nebula: NebulaClient, vids: List[int]) -> List[Dict[str, object]]:
-    ids = sorted({int(v) for v in vids})
-    if not ids:
-        return []
-    id_list = ",".join(str(v) for v in ids)
-    ngql = f"""
-MATCH (v:`Entity`)
-WHERE id(v) IN [{id_list}]
-RETURN id(v) AS vid,
-       v.`Entity`.`entity_name` AS entity_name,
-       v.`Entity`.`description` AS description,
-       v.`Entity`.`entity_raw_id` AS entity_raw_id,
-       v.`Entity`.`entity_type` AS entity_type,
-       v.`Entity`.`source` AS source;
-"""
-    res, _ = nebula.execute(ngql)
-
-    vids_col = res.column_values("vid")
-    names = res.column_values("entity_name")
-    descriptions = res.column_values("description")
-    raw_ids = res.column_values("entity_raw_id")
-    types = res.column_values("entity_type")
-    sources = res.column_values("source")
-
-    out: List[Dict[str, object]] = []
-    for i in range(len(vids_col)):
-        out.append(
-            build_doc(
-                vid=int(vw(vids_col[i])),
-                entity_name=vw(names[i]),
-                description=vw(descriptions[i]),
-                entity_raw_id=vw(raw_ids[i]),
-                entity_type=vw(types[i]),
-                source=vw(sources[i]),
-            )
-        )
-    return out
-
-
-def iter_csv_batches(vertices_glob: str, since: int, batch_size: int) -> Iterator[List[Dict[str, object]]]:
+def iter_csv_batches(vertices_glob: str, since: int, batch_size: int, *, space_name: str) -> Iterator[List[Dict[str, object]]]:
     pattern = str(vertices_glob or "").strip()
     if not pattern:
         return
@@ -171,6 +70,7 @@ def iter_csv_batches(vertices_glob: str, since: int, batch_size: int) -> Iterato
         raise RuntimeError(f"no vertex shard files matched: {pattern}")
 
     batch: List[Dict[str, object]] = []
+    skipped = 0
     for path in matches:
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -178,17 +78,21 @@ def iter_csv_batches(vertices_glob: str, since: int, batch_size: int) -> Iterato
                 raw_vid = row.get("ID") or row.get("vid") or row.get("Vid") or ""
                 if not raw_vid:
                     continue
-                vid = int(raw_vid)
-                if vid <= since:
+                if skipped < since:
+                    skipped += 1
                     continue
+                vid = int(raw_vid)
                 batch.append(
-                    build_doc(
-                        vid=vid,
-                        entity_name=row.get("entity_name"),
-                        description=row.get("description"),
-                        entity_raw_id=row.get("entity_raw_id"),
-                        entity_type=row.get("entity_type"),
-                        source=row.get("source"),
+                    indexing_service.build_entity_doc(
+                        {
+                            "vid": vid,
+                            "label": row.get("entity_name"),
+                            "description": row.get("description"),
+                            "raw_id": row.get("entity_raw_id"),
+                            "entity_type": row.get("entity_type"),
+                            "source": row.get("source"),
+                        },
+                        space_name=space_name,
                     )
                 )
                 if len(batch) >= batch_size:
@@ -198,14 +102,26 @@ def iter_csv_batches(vertices_glob: str, since: int, batch_size: int) -> Iterato
         yield batch
 
 
+def _bulk_upsert(es: ElasticsearchClient, *, space_name: str, docs: List[Dict[str, object]], index_name: str | None) -> tuple[int, int, float]:
+    result = indexing_service.bulk_upsert(
+        space_name,
+        docs,
+        es_client=es,
+        index_name=index_name,
+        ensure_index=False,
+    )
+    return int(result["ok_count"]), int(result["fail_count"]), float(result["bulk_ms"])
+
+
 def main() -> int:
     args = parse_args()
+    space_name = str(args.space or "").strip() or settings.nebula_space
     batch_size = max(10, int(args.batch_size))
     max_docs = max(0, int(args.max))
 
     state_path = Path(args.state_file)
     resume_vid = read_state(state_path)
-    last_vid = int(args.since) if args.since is not None else resume_vid
+    cursor = int(args.since) if args.since is not None else resume_vid
     seed_vids = [int(x.strip()) for x in str(args.seed_vids or "").split(",") if x.strip()]
     vertices_glob = str(args.vertices_glob or "").strip()
 
@@ -213,7 +129,6 @@ def main() -> int:
         print("[indexer] error: --seed-vids cannot be combined with --vertices-glob")
         return 2
 
-    nebula = NebulaClient()
     es = ElasticsearchClient(index=args.es_index)
 
     ok, reason = es.ensure_index(index_name=args.es_index)
@@ -222,48 +137,49 @@ def main() -> int:
         return 2
 
     print(
-        f"[indexer] start batch_size={batch_size} max={max_docs} since={last_vid} index={es.index} seed_count={len(seed_vids)} vertices_glob={vertices_glob or '-'}"
+        f"[indexer] start space={space_name} batch_size={batch_size} max={max_docs} cursor={cursor} index={es.index} seed_count={len(seed_vids)} vertices_glob={vertices_glob or '-'}"
     )
     total = 0
     loop = 0
     started = time.perf_counter()
 
     if seed_vids:
-        docs = fetch_by_vids(nebula, seed_vids)
+        rows = indexing_service.fetch_entity_rows(space_name, vids=seed_vids)
+        docs = [indexing_service.build_entity_doc(row, space_name=space_name) for row in rows]
         if max_docs > 0:
             docs = docs[:max_docs]
-        ok_count, fail_count, bulk_ms = es.bulk_upsert(docs, index_name=args.es_index)
+        ok_count, fail_count, bulk_ms = _bulk_upsert(es, space_name=space_name, docs=docs, index_name=args.es_index)
         total += ok_count
         if docs:
-            last_vid = max(int(doc["vid"]) for doc in docs)
-            write_state(state_path, last_vid=last_vid, indexed=total)
+            cursor += len(docs)
+            write_state(state_path, cursor=cursor, indexed=total)
         elapsed = time.perf_counter() - started
         rate = (total / elapsed) if elapsed > 0 else 0.0
         print(
             f"[indexer] seed-mode batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
         )
-        print(f"[indexer] done total={total} last_vid={last_vid} elapsed_s={elapsed:.2f}")
+        print(f"[indexer] done total={total} cursor={cursor} elapsed_s={elapsed:.2f}")
         return 0
 
     if vertices_glob:
-        for docs in iter_csv_batches(vertices_glob, since=last_vid, batch_size=batch_size):
+        for docs in iter_csv_batches(vertices_glob, since=cursor, batch_size=batch_size, space_name=space_name):
             loop += 1
 
             if max_docs > 0 and total + len(docs) > max_docs:
                 docs = docs[: max_docs - total]
 
-            ok_count, fail_count, bulk_ms = es.bulk_upsert(docs, index_name=args.es_index)
+            ok_count, fail_count, bulk_ms = _bulk_upsert(es, space_name=space_name, docs=docs, index_name=args.es_index)
             total += ok_count
 
             if docs:
-                last_vid = int(docs[-1]["vid"])
-                write_state(state_path, last_vid=last_vid, indexed=total)
+                cursor += len(docs)
+                write_state(state_path, cursor=cursor, indexed=total)
 
             if total % 1000 == 0 or loop == 1 or fail_count > 0:
                 elapsed = time.perf_counter() - started
                 rate = (total / elapsed) if elapsed > 0 else 0.0
                 print(
-                    f"[indexer] loop={loop} last_vid={last_vid} batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
+                    f"[indexer] loop={loop} cursor={cursor} batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
                 )
 
             if fail_count > 0:
@@ -274,30 +190,31 @@ def main() -> int:
                 break
 
         elapsed = time.perf_counter() - started
-        print(f"[indexer] done total={total} last_vid={last_vid} elapsed_s={elapsed:.2f}")
+        print(f"[indexer] done total={total} cursor={cursor} elapsed_s={elapsed:.2f}")
         return 0
 
     while True:
         loop += 1
-        docs = fetch_batch(nebula, last_vid=last_vid, batch_size=batch_size)
+        rows = indexing_service.fetch_entity_rows(space_name, cursor=cursor, batch_size=batch_size)
+        docs = [indexing_service.build_entity_doc(row, space_name=space_name) for row in rows]
         if not docs:
             break
 
         if max_docs > 0 and total + len(docs) > max_docs:
             docs = docs[: max_docs - total]
 
-        ok_count, fail_count, bulk_ms = es.bulk_upsert(docs, index_name=args.es_index)
+        ok_count, fail_count, bulk_ms = _bulk_upsert(es, space_name=space_name, docs=docs, index_name=args.es_index)
         total += ok_count
 
         if docs:
-            last_vid = int(docs[-1]["vid"])
-            write_state(state_path, last_vid=last_vid, indexed=total)
+            cursor += len(docs)
+            write_state(state_path, cursor=cursor, indexed=total)
 
         if total % 1000 == 0 or loop == 1 or fail_count > 0:
             elapsed = time.perf_counter() - started
             rate = (total / elapsed) if elapsed > 0 else 0.0
             print(
-                f"[indexer] loop={loop} last_vid={last_vid} batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
+                f"[indexer] loop={loop} cursor={cursor} batch={len(docs)} ok={ok_count} fail={fail_count} total={total} bulk_ms={bulk_ms:.1f} rate={rate:.1f}/s"
             )
 
         if fail_count > 0:
@@ -307,7 +224,7 @@ def main() -> int:
             break
 
     elapsed = time.perf_counter() - started
-    print(f"[indexer] done total={total} last_vid={last_vid} elapsed_s={elapsed:.2f}")
+    print(f"[indexer] done total={total} cursor={cursor} elapsed_s={elapsed:.2f}")
     return 0
 
 

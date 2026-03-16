@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { entityTypes as entityTypesApi } from "../api/kg";
 import { FALLBACK_ENTITY_TYPES } from "../constants/entityTypes";
 import type { EntityTypeItem } from "../types/kg";
@@ -13,20 +13,40 @@ type UseEntityTypeOptionsResult = {
 
 type UseEntityTypeOptionsParams = {
   deferMs?: number;
+  scopeKey?: string;
+  enabled?: boolean;
+  spaceName?: string;
 };
 
 export function useEntityTypeOptions(params: UseEntityTypeOptionsParams = {}): UseEntityTypeOptionsResult {
   const deferMs = Number.isFinite(params.deferMs) ? Math.max(0, Number(params.deferMs)) : 0;
+  const scopeKey = String(params.scopeKey || "").trim();
+  const enabled = params.enabled !== false;
+  const spaceName = params.spaceName;
   const [options, setOptions] = useState<EntityTypeItem[]>(FALLBACK_ENTITY_TYPES);
   const [usedFallback, setUsedFallback] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const scopeRef = useRef(scopeKey);
+
+  useEffect(() => {
+    scopeRef.current = scopeKey;
+  }, [scopeKey]);
+
+  useEffect(() => {
+    setOptions(FALLBACK_ENTITY_TYPES);
+    setUsedFallback(false);
+    setLoading(false);
+    setLoaded(false);
+  }, [scopeKey, enabled]);
 
   async function loadEntityTypesOnce() {
     if (loading || loaded) return;
+    const requestScope = scopeKey;
     setLoading(true);
     try {
-      const list = await entityTypesApi();
+      const list = await entityTypesApi({ spaceName });
+      if (scopeRef.current !== requestScope) return;
       const next = Array.isArray(list)
         ? list
             .filter((x) => x && typeof x.entity_type === "string" && x.entity_type.trim())
@@ -43,16 +63,21 @@ export function useEntityTypeOptions(params: UseEntityTypeOptionsParams = {}): U
         setUsedFallback(true);
       }
     } catch (e: unknown) {
-      console.warn("entity_types fetch failed:", e instanceof Error ? e.message : String(e));
-      setOptions(FALLBACK_ENTITY_TYPES);
-      setUsedFallback(true);
+      if (scopeRef.current === requestScope) {
+        console.warn("entity_types fetch failed:", e instanceof Error ? e.message : String(e));
+        setOptions(FALLBACK_ENTITY_TYPES);
+        setUsedFallback(true);
+      }
     } finally {
-      setLoading(false);
-      setLoaded(true);
+      if (scopeRef.current === requestScope) {
+        setLoading(false);
+        setLoaded(true);
+      }
     }
   }
 
   useEffect(() => {
+    if (!enabled) return;
     let cancelled = false;
     const timer = window.setTimeout(() => {
       if (cancelled) return;
@@ -63,7 +88,7 @@ export function useEntityTypeOptions(params: UseEntityTypeOptionsParams = {}): U
       window.clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [deferMs]);
+  }, [deferMs, enabled, scopeKey, spaceName]);
 
   return {
     options,

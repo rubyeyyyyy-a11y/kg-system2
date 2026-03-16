@@ -2,6 +2,23 @@
 
 本文档冻结 `/api/import/*` 子系统的一期工程契约。目标是让当前实现具备稳定交接、稳定维护、稳定演进的基线，而不是继续扩功能。
 
+当前稳态目标：
+
+- 单文件 CSV 最大支持 `100MB`
+- 单 draft 总大小最大支持 `200MB`
+- preview 只展示样本，不做高成本全量统计
+- validate 只做格式 / mapping / 规则层检查，不保证最终写入成功
+- 仍保留总行数保护，避免窄行超长 CSV 把 job 时长拉到不可控
+
+本轮默认预算：
+
+- `IMPORT_MAX_UPLOAD_BYTES=104857600`
+- `IMPORT_MAX_DRAFT_TOTAL_BYTES=209715200`
+- `IMPORT_MAX_DRAFT_FILES=5`
+- `IMPORT_MAX_SAMPLE_ROWS=300`
+- `IMPORT_MAX_JOB_ROWS=300000`
+- `IMPORT_MAX_FAILED_ROWS_WRITTEN=3000`
+
 ## 1. 子系统目录结构
 
 后端：
@@ -62,16 +79,25 @@ Job 生命周期：
 
 - Draft 真相来源：
   `.run/import-drafts/<draft_id>.json`
+- Draft 不是真正在跑的执行输入；它只是可编辑定义的持久化真相来源。
 - Job 真相来源：
   `.run/import-jobs/<job_id>/state.json`
 - Plan 真相来源：
   `.run/import-jobs/<job_id>/compiled_plan.json`
+- 这里的 `compiled_plan.json` 是 submit 时冻结进 job snapshot 的执行真相来源。
 - Job 事件来源：
   `.run/import-jobs/<job_id>/events.jsonl`
 - 失败复盘来源：
   `.run/import-jobs/<job_id>/failed_rows.csv`
 
 UI 只是展示层，不是真相来源。
+
+space 绑定补充：
+
+- Draft 的 `space_name` 只来自当前 request-level current space。
+- Job 的 `space_name` 只来自 draft / submit 时冻结的 current space。
+- Job 执行器只认 job snapshot 中冻结下来的 `space_name` 与 `compiled_plan.json`。
+- imports v1 不通过 body 散落传 `target_space` 作为主机制。
 
 ## 5. 持久化格式契约
 
@@ -101,7 +127,9 @@ UI 只是展示层，不是真相来源。
 
 - `format_version=imports-v1` 是 v1 设计锚点。
 - v1 不删字段，非必要不改字段名。
+- `space_name` 是 draft 所属 space 的冻结字段，不允许 UI 自己再维护并行真相。
 - `validation.compiled_plan` 只是最近一次 validate 产物；job 提交后真正执行依据是 job snapshot 下的 `compiled_plan.json`。
+- `ImportFileRecord.row_count` 允许延迟补全；upload 结束时可以是 `0` 且 `row_count_pending=true`，后续在 preview / validate / submit 相关扫描中补齐。
 
 ### 5.2 Compiled Import Plan
 
@@ -113,6 +141,9 @@ UI 只是展示层，不是真相来源。
 
 - `format_version`
 - `plan_id`
+- `space_name`
+- `template_type`
+- `integration_scope`
 - `mode`
 - `file_ids`
 - `discriminator_column`
@@ -194,6 +225,7 @@ UI 只是展示层，不是真相来源。
 
 说明：
 
+- `space_name` / `template_type` / `integration_scope` 让 compiled plan 在交接与审计场景下可以脱离 UI 独立理解。
 - `status` 是 job 主状态机唯一真相来源。
 - `interrupted=true` 表示启动修正判死，不表示续跑。
 - `failed_rows_truncated=true` 表示失败行文件只保留前 N 条。
@@ -264,9 +296,9 @@ mixed 模式：
 ### 6.1 成功响应
 
 - `POST /api/import/files`
-  返回上传元数据，不返回服务端存储路径。
+  返回上传元数据，不返回服务端存储路径；upload 阶段只做流式落盘和轻量 metadata 探测，不做全量 decode / row_count / validate。
 - `POST /api/import/preview`
-  返回 `columns`, `sample_rows`, `inferred_mode_candidates`, `warnings`
+  返回 `columns`, `sample_rows`, `inferred_mode_candidates`, `warnings`；preview 默认是 sample-only 语义。
 - `GET /api/import/schema`
   返回当前可见 tag / edge type / property
 - `POST /api/import/schema/plan`
@@ -312,6 +344,7 @@ imports 子系统内部尽量统一为：
 - download failed rows
 - draft/job not found
 - file type / row limit / file count limit
+- draft total size limit
 
 说明：
 
@@ -329,6 +362,16 @@ imports 子系统内部尽量统一为：
 
 - 后端 validate 响应通过 `semantic_notes` 返回
 - 前端 validate 区域固定展示
+- validate 采用逐文件、逐行流式扫描，只保留有限错误样本，并返回 `scanned_rows`, `error_rows`, `errors_truncated`
+
+### 7.1.1 Preview 固定语义
+
+固定含义：
+
+- preview 只展示样本行，不代表全量文件一定可 validate / import 成功
+- 后端最多返回 `IMPORT_MAX_SAMPLE_ROWS`
+- 前端默认请求前 `200` 行
+- warning 中必须明确表达 `sample_rows capped` 与 `preview is sample-only`
 
 ### 7.2 Integration Warning 固定含义
 

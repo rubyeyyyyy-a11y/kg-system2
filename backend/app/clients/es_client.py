@@ -1,5 +1,6 @@
 import json
 import logging
+import socket
 import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -7,15 +8,37 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.config import settings
+from app.core.space_context import get_current_space
 
 logger = logging.getLogger(__name__)
 
 
 class ElasticsearchClient:
-    def __init__(self, base_url: str | None = None, index: str | None = None, timeout_ms: int | None = None) -> None:
+    def __init__(
+        self,
+        base_url: str | None = None,
+        index: str | None = None,
+        timeout_ms: int | None = None,
+        bulk_timeout_ms: int | None = None,
+        bulk_max_actions: int | None = None,
+        bulk_max_bytes: int | None = None,
+    ) -> None:
         self.base_url = (base_url or settings.es_url).rstrip("/")
         self.index = index or settings.es_index
         self.timeout_s = max(0.1, float(timeout_ms or settings.es_timeout_ms) / 1000.0)
+        self.bulk_timeout_s = max(self.timeout_s, float(bulk_timeout_ms or settings.es_bulk_timeout_ms) / 1000.0)
+        self.bulk_max_actions = max(1, int(bulk_max_actions or settings.es_bulk_upsert_batch_size))
+        self.bulk_max_bytes = max(16 * 1024, int(bulk_max_bytes or settings.es_bulk_upsert_max_bytes))
+
+    @staticmethod
+    def document_id(space_name: str, vid: int) -> str:
+        # Shared-index phase-1 isolation relies on a composite _id so one space
+        # cannot overwrite another space's document for the same Nebula VID.
+        return f"{space_name}:{int(vid)}"
+
+    @staticmethod
+    def _resolved_space(space_name: Optional[str]) -> str:
+        return str(space_name or get_current_space())
 
     def _request_json(
         self,
@@ -25,6 +48,7 @@ class ElasticsearchClient:
         query: Optional[Dict[str, Any]] = None,
         raw_body: Optional[bytes] = None,
         content_type: str = "application/json",
+        timeout_s: float | None = None,
     ) -> Tuple[Dict[str, Any], float]:
         url = f"{self.base_url}{path}"
         if query:
@@ -41,11 +65,14 @@ class ElasticsearchClient:
         req = Request(url=url, data=data, headers=headers, method=method)
         start = time.perf_counter()
         try:
-            with urlopen(req, timeout=self.timeout_s) as resp:
+            with urlopen(req, timeout=timeout_s or self.timeout_s) as resp:
                 body = resp.read().decode("utf-8")
         except HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             raise RuntimeError(f"ES HTTP {exc.code}: {detail}") from exc
+        except (TimeoutError, socket.timeout) as exc:
+            resolved_timeout_s = timeout_s or self.timeout_s
+            raise RuntimeError(f"ES request timed out after {resolved_timeout_s:.3f}s") from exc
         except URLError as exc:
             raise RuntimeError(f"ES URL error: {exc}") from exc
 
@@ -80,6 +107,7 @@ class ElasticsearchClient:
         *,
         limit: int,
         offset: int = 0,
+        space_name: Optional[str] = None,
         search_in_name: bool,
         search_in_description: bool,
         search_in_type: bool,
@@ -100,10 +128,21 @@ class ElasticsearchClient:
             should.append({"match": {"entity_name": {"query": q}}})
 
         filters: List[Dict[str, Any]] = []
+        filters.append({"term": {"space_name": self._resolved_space(space_name)}})
         if entity_type and entity_type.strip():
             filters.append({"term": {"entity_type": entity_type.strip()}})
         if source and source.strip():
             filters.append({"term": {"source": source.strip()}})
+        resolved_space = self._resolved_space(space_name)
+        logger.warning(
+            "es_search_entities index=%s space=%s limit=%d offset=%d entity_type=%s source=%s",
+            self.index,
+            resolved_space,
+            max(1, min(int(limit), 500)),
+            max(0, int(offset)),
+            str(entity_type or "").strip() or "-",
+            str(source or "").strip() or "-",
+        )
 
         body: Dict[str, Any] = {
             "size": max(1, min(int(limit), 500)),
@@ -139,6 +178,7 @@ class ElasticsearchClient:
         mode: str,
         limit: int,
         offset: int = 0,
+        space_name: Optional[str] = None,
         entity_type: Optional[str],
         source: Optional[str],
     ) -> Tuple[List[Tuple[int, float]], float]:
@@ -147,10 +187,22 @@ class ElasticsearchClient:
             mode_norm = "contains"
 
         filters: List[Dict[str, Any]] = []
+        filters.append({"term": {"space_name": self._resolved_space(space_name)}})
         if entity_type and entity_type.strip():
             filters.append({"term": {"entity_type": entity_type.strip()}})
         if source and source.strip():
             filters.append({"term": {"source": source.strip()}})
+        resolved_space = self._resolved_space(space_name)
+        logger.warning(
+            "es_search_raw_id index=%s space=%s mode=%s limit=%d offset=%d entity_type=%s source=%s",
+            self.index,
+            resolved_space,
+            mode_norm,
+            max(1, min(int(limit), 500)),
+            max(0, int(offset)),
+            str(entity_type or "").strip() or "-",
+            str(source or "").strip() or "-",
+        )
 
         if mode_norm == "exact":
             should: List[Dict[str, Any]] = [
@@ -200,14 +252,24 @@ class ElasticsearchClient:
         q: str,
         *,
         limit: int,
+        space_name: Optional[str] = None,
         entity_type: Optional[str],
         source: Optional[str],
     ) -> Tuple[List[Dict[str, Any]], float]:
         filters: List[Dict[str, Any]] = []
+        filters.append({"term": {"space_name": self._resolved_space(space_name)}})
         if entity_type and entity_type.strip():
             filters.append({"term": {"entity_type": entity_type.strip()}})
         if source and source.strip():
             filters.append({"term": {"source": source.strip()}})
+        logger.warning(
+            "es_suggest_name index=%s space=%s limit=%d entity_type=%s source=%s",
+            self.index,
+            self._resolved_space(space_name),
+            max(1, min(int(limit), 100)),
+            str(entity_type or "").strip() or "-",
+            str(source or "").strip() or "-",
+        )
 
         body: Dict[str, Any] = {
             "size": max(1, min(int(limit), 100)),
@@ -246,14 +308,24 @@ class ElasticsearchClient:
         *,
         raw_id_original_prefix: str,
         limit: int,
+        space_name: Optional[str] = None,
         entity_type: Optional[str],
         source: Optional[str],
     ) -> Tuple[List[Dict[str, Any]], float]:
         filters: List[Dict[str, Any]] = []
+        filters.append({"term": {"space_name": self._resolved_space(space_name)}})
         if entity_type and entity_type.strip():
             filters.append({"term": {"entity_type": entity_type.strip()}})
         if source and source.strip():
             filters.append({"term": {"source": source.strip()}})
+        logger.warning(
+            "es_suggest_raw_id index=%s space=%s limit=%d entity_type=%s source=%s",
+            self.index,
+            self._resolved_space(space_name),
+            max(1, min(int(limit), 100)),
+            str(entity_type or "").strip() or "-",
+            str(source or "").strip() or "-",
+        )
 
         body: Dict[str, Any] = {
             "size": max(1, min(int(limit), 100)),
@@ -294,6 +366,178 @@ class ElasticsearchClient:
             )
         return out, took_ms
 
+    def count_documents_for_space(
+        self,
+        space_name: str,
+        *,
+        index_name: Optional[str] = None,
+    ) -> Tuple[int, float]:
+        resolved_space = self._resolved_space(space_name)
+        body: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"space_name": resolved_space}},
+                    ]
+                }
+            }
+        }
+        data, took_ms = self._request_json("POST", f"/{index_name or self.index}/_count", payload=body)
+        return int(data.get("count") or 0), took_ms
+
+    def count_documents_missing_space(
+        self,
+        *,
+        index_name: Optional[str] = None,
+    ) -> Tuple[int, float]:
+        body: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must_not": [
+                        {"exists": {"field": "space_name"}},
+                    ]
+                }
+            }
+        }
+        data, took_ms = self._request_json("POST", f"/{index_name or self.index}/_count", payload=body)
+        return int(data.get("count") or 0), took_ms
+
+    def fetch_documents_for_space(
+        self,
+        space_name: str,
+        *,
+        limit: int = 10,
+        index_name: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        resolved_space = self._resolved_space(space_name)
+        body: Dict[str, Any] = {
+            "size": max(1, min(int(limit), 100)),
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"space_name": resolved_space}},
+                    ]
+                }
+            },
+            "sort": [{"vid": {"order": "asc"}}],
+            "_source": [
+                "vid",
+                "space_name",
+                "entity_name",
+                "entity_raw_id",
+                "raw_id_norm",
+                "entity_type",
+                "source",
+            ],
+        }
+        data, took_ms = self._request_json("POST", f"/{index_name or self.index}/_search", payload=body)
+        hits = (data.get("hits") or {}).get("hits") or []
+        out: List[Dict[str, Any]] = []
+        for hit in hits:
+            out.append(
+                {
+                    "_id": str(hit.get("_id") or ""),
+                    "_source": dict(hit.get("_source") or {}),
+                }
+            )
+        return out, took_ms
+
+    def fetch_documents_by_ids(
+        self,
+        space_name: str,
+        vids: List[int],
+        *,
+        index_name: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        resolved_space = self._resolved_space(space_name)
+        unique_vids = sorted({int(vid) for vid in vids if int(vid) > 0})
+        if not unique_vids:
+            return [], 0.0
+        body = {"ids": [self.document_id(resolved_space, vid) for vid in unique_vids]}
+        data, took_ms = self._request_json("POST", f"/{index_name or self.index}/_mget", payload=body)
+        docs = data.get("docs") or []
+        out: List[Dict[str, Any]] = []
+        for doc in docs:
+            out.append(
+                {
+                    "_id": str(doc.get("_id") or ""),
+                    "found": bool(doc.get("found")),
+                    "_source": dict(doc.get("_source") or {}),
+                }
+            )
+        return out, took_ms
+
+    def fetch_documents_missing_space(
+        self,
+        *,
+        limit: int = 500,
+        after_vid: int | None = None,
+        index_name: Optional[str] = None,
+    ) -> Tuple[List[Dict[str, Any]], float]:
+        body: Dict[str, Any] = {
+            "size": max(1, min(int(limit), 5000)),
+            "query": {
+                "bool": {
+                    "must_not": [
+                        {"exists": {"field": "space_name"}},
+                    ]
+                }
+            },
+            "sort": [{"vid": {"order": "asc"}}],
+            "_source": [
+                "vid",
+                "entity_name",
+                "description",
+                "entity_raw_id",
+                "raw_id_norm",
+                "entity_type",
+                "source",
+            ],
+        }
+        if after_vid is not None and int(after_vid) > 0:
+            body["search_after"] = [int(after_vid)]
+        data, took_ms = self._request_json("POST", f"/{index_name or self.index}/_search", payload=body)
+        hits = (data.get("hits") or {}).get("hits") or []
+        out: List[Dict[str, Any]] = []
+        for hit in hits:
+            out.append(
+                {
+                    "_id": str(hit.get("_id") or ""),
+                    "_source": dict(hit.get("_source") or {}),
+                }
+            )
+        return out, took_ms
+
+    def delete_documents_missing_space(
+        self,
+        *,
+        index_name: Optional[str] = None,
+        refresh: str = "true",
+        wait_for_completion: bool = True,
+        conflicts: str = "proceed",
+        slices: str = "auto",
+    ) -> Tuple[Dict[str, Any], float]:
+        body: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must_not": [
+                        {"exists": {"field": "space_name"}},
+                    ]
+                }
+            }
+        }
+        return self._request_json(
+            "POST",
+            f"/{index_name or self.index}/_delete_by_query",
+            payload=body,
+            query={
+                "refresh": refresh,
+                "wait_for_completion": str(bool(wait_for_completion)).lower(),
+                "conflicts": conflicts,
+                "slices": slices,
+            },
+        )
+
     def ensure_index(self, index_name: Optional[str] = None) -> Tuple[bool, str]:
         idx = index_name or self.index
         try:
@@ -314,39 +558,85 @@ class ElasticsearchClient:
         except Exception as exc:
             return False, str(exc)
 
-    def bulk_upsert(self, docs: List[Dict[str, Any]], index_name: Optional[str] = None) -> Tuple[int, int, float]:
+    def bulk_upsert(
+        self,
+        docs: List[Dict[str, Any]],
+        index_name: Optional[str] = None,
+        *,
+        refresh: str = "false",
+    ) -> Tuple[int, int, float]:
         if not docs:
             return 0, 0, 0.0
         idx = index_name or self.index
-        lines: List[str] = []
-        for doc in docs:
-            vid = int(doc["vid"])
-            lines.append(json.dumps({"index": {"_index": idx, "_id": str(vid)}}, ensure_ascii=False))
-            lines.append(json.dumps(doc, ensure_ascii=False))
-        payload = ("\n".join(lines) + "\n").encode("utf-8")
-        data, took_ms = self._request_json(
-            "POST",
-            "/_bulk",
-            raw_body=payload,
-            query={"refresh": "false"},
-            content_type="application/x-ndjson",
-        )
-
-        items = data.get("items") or []
+        spaces = sorted({self._resolved_space(str(doc.get("space_name") or "")) for doc in docs})
+        logger.warning("es_bulk_upsert index=%s spaces=%s docs=%d", idx, ",".join(spaces), len(docs))
         ok = 0
         fail = 0
-        for item in items:
-            op = item.get("index") or {}
-            if 200 <= int(op.get("status") or 0) < 300:
-                ok += 1
-            else:
-                fail += 1
+        took_ms = 0.0
+        payloads = self._build_bulk_payloads(docs, index_name=idx)
+        for batch_index, payload in enumerate(payloads):
+            batch_refresh = str(refresh or "false") if batch_index == len(payloads) - 1 else "false"
+            data, batch_took_ms = self._request_json(
+                "POST",
+                "/_bulk",
+                raw_body=payload,
+                query={"refresh": batch_refresh},
+                content_type="application/x-ndjson",
+                timeout_s=self.bulk_timeout_s,
+            )
+            items = data.get("items") or []
+            for item in items:
+                op = item.get("index") or {}
+                if 200 <= int(op.get("status") or 0) < 300:
+                    ok += 1
+                else:
+                    fail += 1
+            took_ms += float(batch_took_ms)
         return ok, fail, took_ms
+
+    def _build_bulk_payloads(self, docs: List[Dict[str, Any]], *, index_name: str) -> List[bytes]:
+        payloads: List[bytes] = []
+        current_parts: List[bytes] = []
+        current_bytes = 0
+        current_actions = 0
+
+        for doc in docs:
+            vid = int(doc["vid"])
+            space_name = self._resolved_space(str(doc.get("space_name") or ""))
+            action_line = json.dumps(
+                {"index": {"_index": index_name, "_id": self.document_id(space_name, vid)}},
+                ensure_ascii=False,
+            ).encode("utf-8") + b"\n"
+            doc_line = json.dumps(doc, ensure_ascii=False).encode("utf-8") + b"\n"
+            entry_parts = [action_line, doc_line]
+            entry_bytes = len(action_line) + len(doc_line)
+
+            if entry_bytes > self.bulk_max_bytes:
+                raise RuntimeError(
+                    f"ES bulk document exceeds configured request budget: vid={vid} bytes={entry_bytes} max={self.bulk_max_bytes}"
+                )
+
+            if current_parts and (
+                current_actions >= self.bulk_max_actions or current_bytes + entry_bytes > self.bulk_max_bytes
+            ):
+                payloads.append(b"".join(current_parts))
+                current_parts = []
+                current_bytes = 0
+                current_actions = 0
+
+            current_parts.extend(entry_parts)
+            current_bytes += entry_bytes
+            current_actions += 1
+
+        if current_parts:
+            payloads.append(b"".join(current_parts))
+        return payloads
 
     @staticmethod
     def _mapping_properties() -> Dict[str, Any]:
         return {
             "vid": {"type": "long"},
+            "space_name": {"type": "keyword"},
             "entity_name": {"type": "text"},
             "description": {"type": "text"},
             "entity_raw_id": {"type": "keyword"},

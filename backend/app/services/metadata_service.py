@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from app.core.space_context import get_current_space
 from app.db.nebula_client import NebulaExecutionError, execute_ngql_safe
 from app.services.common import esc, vw
 from app.services.metadata_ids import metadata_stat_vid
@@ -11,19 +12,27 @@ logger = logging.getLogger(__name__)
 ENTITY_STAT_TAG = "EntityTypeStat"
 RELATION_STAT_TAG = "RelationTypeStat"
 _CACHE_TTL_SEC = 300.0
-_ENTITY_CACHE: Dict[str, Any] = {"ts": 0.0, "data": []}
-_RELATION_CACHE: Dict[str, Any] = {"ts": 0.0, "data": []}
+_ENTITY_CACHE_BY_SPACE: Dict[str, Dict[str, Any]] = {}
+_RELATION_CACHE_BY_SPACE: Dict[str, Dict[str, Any]] = {}
 
 
 def _normalize_key(raw: Optional[str]) -> str:
     return str(raw or "").strip().lower()
 
 
-def invalidate_metadata_cache() -> None:
-    _ENTITY_CACHE["ts"] = 0.0
-    _ENTITY_CACHE["data"] = []
-    _RELATION_CACHE["ts"] = 0.0
-    _RELATION_CACHE["data"] = []
+def _bucket(cache: Dict[str, Dict[str, Any]], space_name: str) -> Dict[str, Any]:
+    # Metadata caches are partitioned by space_name so refresh/reads do not
+    # leak entity or relation type stats across managed spaces.
+    return cache.setdefault(space_name, {"ts": 0.0, "data": []})
+
+
+def invalidate_metadata_cache(space_name: Optional[str] = None) -> None:
+    if space_name is None:
+        _ENTITY_CACHE_BY_SPACE.clear()
+        _RELATION_CACHE_BY_SPACE.clear()
+        return
+    _bucket(_ENTITY_CACHE_BY_SPACE, space_name).update({"ts": 0.0, "data": []})
+    _bucket(_RELATION_CACHE_BY_SPACE, space_name).update({"ts": 0.0, "data": []})
 
 
 def _actor_text(actor: Optional[str]) -> str:
@@ -33,10 +42,12 @@ def _actor_text(actor: Optional[str]) -> str:
     return text[:64]
 
 
-def list_entity_types(limit: int = 200) -> List[Dict[str, Any]]:
+def list_entity_types(limit: int = 200, *, space_name: Optional[str] = None) -> List[Dict[str, Any]]:
+    resolved_space = str(space_name or get_current_space())
+    entity_cache = _bucket(_ENTITY_CACHE_BY_SPACE, resolved_space)
     now = time.time()
-    if _ENTITY_CACHE["data"] and (now - float(_ENTITY_CACHE["ts"])) < _CACHE_TTL_SEC:
-        return [dict(x) for x in _ENTITY_CACHE["data"]]
+    if entity_cache["data"] and (now - float(entity_cache["ts"])) < _CACHE_TTL_SEC:
+        return [dict(x) for x in entity_cache["data"]]
 
     ngql = f"""
     MATCH (m:`{ENTITY_STAT_TAG}`)
@@ -46,7 +57,7 @@ def list_entity_types(limit: int = 200) -> List[Dict[str, Any]]:
     ORDER BY cnt DESC, entity_type ASC
     LIMIT {max(1, int(limit))};
     """
-    res = execute_ngql_safe(ngql)
+    res = execute_ngql_safe(ngql, space_name=resolved_space)
 
     types = res.column_values("entity_type")
     counts = res.column_values("cnt")
@@ -60,15 +71,17 @@ def list_entity_types(limit: int = 200) -> List[Dict[str, Any]]:
             continue
         items.append({"entity_type": key, "count": cnt})
 
-    _ENTITY_CACHE["ts"] = now
-    _ENTITY_CACHE["data"] = [dict(x) for x in items]
+    entity_cache["ts"] = now
+    entity_cache["data"] = [dict(x) for x in items]
     return items
 
 
-def list_relation_type_stats() -> List[Dict[str, int | str]]:
+def list_relation_type_stats(*, space_name: Optional[str] = None) -> List[Dict[str, int | str]]:
+    resolved_space = str(space_name or get_current_space())
+    relation_cache = _bucket(_RELATION_CACHE_BY_SPACE, resolved_space)
     now = time.time()
-    if _RELATION_CACHE["data"] and (now - float(_RELATION_CACHE["ts"])) < _CACHE_TTL_SEC:
-        return [dict(x) for x in _RELATION_CACHE["data"]]
+    if relation_cache["data"] and (now - float(relation_cache["ts"])) < _CACHE_TTL_SEC:
+        return [dict(x) for x in relation_cache["data"]]
 
     ngql = f"""
     MATCH (m:`{RELATION_STAT_TAG}`)
@@ -77,7 +90,7 @@ def list_relation_type_stats() -> List[Dict[str, int | str]]:
            coalesce(m.`{RELATION_STAT_TAG}`.`count`, 0) AS cnt
     ORDER BY cnt DESC, relation_type ASC;
     """
-    res = execute_ngql_safe(ngql)
+    res = execute_ngql_safe(ngql, space_name=resolved_space)
     rels: List[Dict[str, int | str]] = []
     rel_values = res.column_values("relation_type")
     count_values = res.column_values("cnt")
@@ -86,13 +99,13 @@ def list_relation_type_stats() -> List[Dict[str, int | str]]:
         if rel:
             rels.append({"relation_type": rel, "count": int(vw(count_values[i]) or 0)})
 
-    _RELATION_CACHE["ts"] = now
-    _RELATION_CACHE["data"] = [dict(x) for x in rels]
+    relation_cache["ts"] = now
+    relation_cache["data"] = [dict(x) for x in rels]
     return [dict(x) for x in rels]
 
 
-def list_relation_types(limit: int = 5000) -> List[str]:
-    items = list_relation_type_stats()
+def list_relation_types(limit: int = 5000, *, space_name: Optional[str] = None) -> List[str]:
+    items = list_relation_type_stats(space_name=space_name)
     safe_limit = max(1, int(limit))
     return [str(x["relation_type"]) for x in items[:safe_limit]]
 
@@ -102,12 +115,13 @@ def query_relation_types(
     q: str = "",
     limit: int = 100,
     offset: int = 0,
+    space_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     safe_limit = max(1, min(int(limit or 100), 200))
     safe_offset = max(0, int(offset or 0))
     needle = _normalize_key(q)
 
-    items = list_relation_type_stats()
+    items = list_relation_type_stats(space_name=space_name)
     if needle:
         filtered = [dict(x) for x in items if needle in str(x.get("relation_type") or "")]
     else:
@@ -134,6 +148,7 @@ def _find_stat_vertex(
     tag: str,
     norm_field: str,
     key_norm: str,
+    space_name: Optional[str] = None,
 ) -> Optional[Dict[str, int]]:
     ngql = f"""
     MATCH (m:`{tag}`)
@@ -141,7 +156,7 @@ def _find_stat_vertex(
     RETURN id(m) AS vid, coalesce(m.`{tag}`.`count`, 0) AS cnt
     LIMIT 1;
     """
-    res = execute_ngql_safe(ngql)
+    res = execute_ngql_safe(ngql, space_name=space_name)
     if len(res.rows()) == 0:
         return None
     return {
@@ -160,6 +175,7 @@ def _update_stat_vertex(
     key_norm: str,
     count: int,
     actor: str,
+    space_name: Optional[str] = None,
 ) -> None:
     now_sec = int(time.time())
     ngql = f"""
@@ -171,7 +187,7 @@ def _update_stat_vertex(
         `{tag}`.`updated_by` = "{esc(actor)}"
     ;
     """
-    execute_ngql_safe(ngql)
+    execute_ngql_safe(ngql, space_name=space_name)
 
 
 def _insert_stat_vertex(
@@ -184,6 +200,7 @@ def _insert_stat_vertex(
     key_norm: str,
     count: int,
     actor: str,
+    space_name: Optional[str] = None,
 ) -> None:
     now_sec = int(time.time())
     for salt in range(0, 8):
@@ -193,10 +210,10 @@ def _insert_stat_vertex(
         VALUES {int(vid)}:("{esc(label)}", "{esc(key_norm)}", {max(0, int(count))}, {now_sec}, "{esc(actor)}");
         """
         try:
-            execute_ngql_safe(ngql)
+            execute_ngql_safe(ngql, space_name=space_name)
             return
         except NebulaExecutionError:
-            existing = _find_stat_vertex(tag=tag, norm_field=norm_field, key_norm=key_norm)
+            existing = _find_stat_vertex(tag=tag, norm_field=norm_field, key_norm=key_norm, space_name=space_name)
             if existing is not None:
                 _update_stat_vertex(
                     tag=tag,
@@ -207,6 +224,7 @@ def _insert_stat_vertex(
                     key_norm=key_norm,
                     count=int(existing["count"]) + max(0, int(count)),
                     actor=actor,
+                    space_name=space_name,
                 )
                 return
             if salt >= 7:
@@ -222,12 +240,13 @@ def _apply_delta(
     raw_label: str,
     delta: int,
     actor: str,
+    space_name: Optional[str] = None,
 ) -> None:
     key_norm = _normalize_key(raw_label)
     if not key_norm:
         return
 
-    found = _find_stat_vertex(tag=tag, norm_field=norm_field, key_norm=key_norm)
+    found = _find_stat_vertex(tag=tag, norm_field=norm_field, key_norm=key_norm, space_name=space_name)
     if found is None:
         if int(delta) <= 0:
             return
@@ -240,6 +259,7 @@ def _apply_delta(
             key_norm=key_norm,
             count=int(delta),
             actor=actor,
+            space_name=space_name,
         )
         return
 
@@ -253,6 +273,7 @@ def _apply_delta(
         key_norm=key_norm,
         count=new_count,
         actor=actor,
+        space_name=space_name,
     )
 
 
@@ -263,6 +284,7 @@ def sync_entity_type_change(before_type: str, after_type: str, actor: Optional[s
         return
 
     actor_text = _actor_text(actor)
+    space_name = get_current_space()
     try:
         _apply_delta(
             kind="entity_type",
@@ -272,6 +294,7 @@ def sync_entity_type_change(before_type: str, after_type: str, actor: Optional[s
             raw_label=before_norm,
             delta=-1,
             actor=actor_text,
+            space_name=space_name,
         )
         _apply_delta(
             kind="entity_type",
@@ -281,8 +304,9 @@ def sync_entity_type_change(before_type: str, after_type: str, actor: Optional[s
             raw_label=after_norm,
             delta=1,
             actor=actor_text,
+            space_name=space_name,
         )
-        invalidate_metadata_cache()
+        invalidate_metadata_cache(space_name)
     except Exception as exc:
         logger.warning(
             "sync_entity_type_change failed before=%r after=%r actor=%r reason=%s",
@@ -300,6 +324,7 @@ def sync_relation_type_change(before_relation: str, after_relation: str, actor: 
         return
 
     actor_text = _actor_text(actor)
+    space_name = get_current_space()
     try:
         _apply_delta(
             kind="relation_type",
@@ -309,6 +334,7 @@ def sync_relation_type_change(before_relation: str, after_relation: str, actor: 
             raw_label=before_norm,
             delta=-1,
             actor=actor_text,
+            space_name=space_name,
         )
         _apply_delta(
             kind="relation_type",
@@ -318,8 +344,9 @@ def sync_relation_type_change(before_relation: str, after_relation: str, actor: 
             raw_label=after_norm,
             delta=1,
             actor=actor_text,
+            space_name=space_name,
         )
-        invalidate_metadata_cache()
+        invalidate_metadata_cache(space_name)
     except Exception as exc:
         logger.warning(
             "sync_relation_type_change failed before=%r after=%r actor=%r reason=%s",

@@ -25,6 +25,8 @@ class Settings:
     nebula_port: int
     nebula_user: str
     nebula_password: str
+    nebula_admin_user: str
+    nebula_admin_password: str
     nebula_space: str
     nebula_timeout_ms: int
 
@@ -40,6 +42,9 @@ class Settings:
     es_url: str
     es_index: str
     es_timeout_ms: int
+    es_bulk_timeout_ms: int
+    es_bulk_upsert_batch_size: int
+    es_bulk_upsert_max_bytes: int
     es_topk: int
 
     dev_instance_trace: bool
@@ -50,6 +55,8 @@ settings = Settings(
     nebula_port=_env_int("NEBULA_PORT", 9669),
     nebula_user=os.getenv("NEBULA_USER", "root"),
     nebula_password=os.getenv("NEBULA_PASSWORD", "nebula"),
+    nebula_admin_user=os.getenv("NEBULA_ADMIN_USER", os.getenv("NEBULA_USER", "root")),
+    nebula_admin_password=os.getenv("NEBULA_ADMIN_PASSWORD", os.getenv("NEBULA_PASSWORD", "nebula")),
     nebula_space=os.getenv("NEBULA_SPACE", "demo_kg"),
     nebula_timeout_ms=_env_int("NEBULA_TIMEOUT_MS", 5000),
     edge_type=os.getenv("EDGE_TYPE", "REL2").strip() or "REL2",
@@ -61,7 +68,10 @@ settings = Settings(
     es_enabled=_env_bool("ES_ENABLED", True),
     es_url=os.getenv("ES_URL", "http://127.0.0.1:9200").rstrip("/"),
     es_index=os.getenv("ES_INDEX", "kg_entity"),
-    es_timeout_ms=max(100, _env_int("ES_TIMEOUT_MS", 1200)),
+    es_timeout_ms=max(100, _env_int("ES_TIMEOUT_MS", 5000)),
+    es_bulk_timeout_ms=max(100, _env_int("ES_BULK_TIMEOUT_MS", 12000)),
+    es_bulk_upsert_batch_size=max(1, _env_int("ES_BULK_UPSERT_BATCH_SIZE", 250)),
+    es_bulk_upsert_max_bytes=max(16 * 1024, _env_int("ES_BULK_UPSERT_MAX_BYTES", 2 * 1024 * 1024)),
     es_topk=max(1, min(_env_int("ES_TOPK", _env_int("TOPK", 100)), 500)),
     dev_instance_trace=_env_bool("DEV_INSTANCE_TRACE", True),
 )

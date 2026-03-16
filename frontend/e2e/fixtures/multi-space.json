@@ -1,0 +1,44 @@
+{
+  "generated_at": "2026-03-13",
+  "source_priority": [
+    "docs/MULTI_SPACE_CANONICAL_SEARCH_ACCEPTANCE_BASELINE.md",
+    ".run/space-registry/spaces.json",
+    "live acceptance samples"
+  ],
+  "spaces": {
+    "demo": {
+      "spaceName": "demo_kg",
+      "searchTerm": "allergic respiratory disease",
+      "suggestTerm": "allergic respiratory disease",
+      "rawIdTerm": "MONDO:0000771",
+      "expected": {
+        "label": "allergic respiratory disease",
+        "vid": 771,
+        "rawId": "MONDO:0000771"
+      },
+      "readiness": {
+        "registryStatus": "ready",
+        "graphStatus": "ready",
+        "searchStatus": "full",
+        "indexStatus": "verified_nonempty"
+      }
+    },
+    "small": {
+      "spaceName": "it_space_218354",
+      "searchTerm": "Codex Import Entity Final 1773375224",
+      "suggestTerm": "Codex Import Entity Final",
+      "rawIdTerm": "CODEX:FINAL:1773375224",
+      "expected": {
+        "label": "Codex Import Entity Final 1773375224",
+        "vid": 3375224,
+        "rawId": "CODEX:FINAL:1773375224"
+      },
+      "readiness": {
+        "registryStatus": "ready",
+        "graphStatus": "ready",
+        "searchStatus": "full",
+        "indexStatus": "verified_nonempty"
+      }
+    }
+  }
+}

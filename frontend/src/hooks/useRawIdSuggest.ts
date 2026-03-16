@@ -8,6 +8,8 @@ type UseRawIdSuggestParams = {
   q: string;
   entityType: string;
   source: string;
+  spaceName?: string;
+  scopeKey?: string;
   onSelect: (item: RawIdSuggestItem) => void;
   onQueryChange: (value: string) => void;
   onSearch: () => void;
@@ -31,6 +33,8 @@ export function useRawIdSuggest({
   q,
   entityType,
   source,
+  spaceName,
+  scopeKey,
   onSelect,
   onQueryChange,
   onSearch,
@@ -92,6 +96,7 @@ export function useRawIdSuggest({
         entity_type: entityType,
         source,
         signal: controller.signal,
+        spaceName,
       });
 
       if (reqId !== suggestReqIdRef.current) return;
@@ -179,7 +184,7 @@ export function useRawIdSuggest({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [q, entityType, source, suggestOpen]);
+  }, [q, entityType, source, spaceName, suggestOpen]);
 
   useEffect(() => {
     if (!suggestOpen) return;
@@ -198,6 +203,10 @@ export function useRawIdSuggest({
       invalidateSuggestRequest();
     };
   }, []);
+
+  useEffect(() => {
+    closeSuggestPanel();
+  }, [scopeKey]);
 
   return {
     suggestOpen,

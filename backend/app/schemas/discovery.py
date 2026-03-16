@@ -1,7 +1,9 @@
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from .spaces import SpaceMetaResp
 
 from .common import GraphEdge, GraphNode
 
@@ -34,7 +36,8 @@ class DiscoveryEntityCandidatesResp(BaseModel):
     returned: int
     has_more: bool
     next_page: Optional[int] = None
-    meta: Dict[str, Any] = {}
+    meta: Dict[str, Any] = Field(default_factory=dict)
+    space_meta: SpaceMetaResp
 
 
 class GraphDiscoveryRequest(BaseModel):
@@ -208,6 +211,9 @@ class GraphDiscoveryExpandResp(BaseModel):
     has_more_candidates_before_budget: bool = False
     has_more_candidates_after_filters: bool = False
     terminal: bool = True
+    request_space: str = ""
+    space_meta: SpaceMetaResp
+    warnings: List[str] = []
     stats: GraphDiscoveryExpandStats = GraphDiscoveryExpandStats()
 
 
@@ -216,5 +222,8 @@ class GraphDiscoveryResp(BaseModel):
     edges: List[GraphDiscoveryEdge]
     facets: GraphDiscoveryFacets
     stats: GraphDiscoveryStats
+    request_space: str = ""
+    space_meta: SpaceMetaResp
+    warnings: List[str] = []
     dropped_candidates: List[GraphDiscoveryDroppedCandidate] = []
     node_capabilities: List[GraphDiscoveryNodeCapability] = []

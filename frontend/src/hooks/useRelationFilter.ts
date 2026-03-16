@@ -10,6 +10,7 @@ export type RelPreset = {
 };
 
 type UseRelationFilterParams = {
+  scopeKey?: string;
   appliedRelations: string[];
   graphNodes: NodeBrief[];
   graphEdges: EdgeBrief[];
@@ -50,10 +51,15 @@ const ACTIVE_PRESET_KEY = "kg:relPresetActiveId";
 const SYSTEM_PRESET_ID_ALL = "__all__";
 const SYSTEM_PRESET_UPDATED_AT = 0;
 
-function readPresetsFromStorage(): RelPreset[] {
+function scopedStorageKey(baseKey: string, scopeKey: string) {
+  const suffix = String(scopeKey || "").trim() || "__default__";
+  return `${baseKey}:${suffix}`;
+}
+
+function readPresetsFromStorage(scopeKey: string): RelPreset[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(PRESETS_KEY);
+    const raw = window.localStorage.getItem(scopedStorageKey(PRESETS_KEY, scopeKey));
     if (!raw) return [];
     const parsed = JSON.parse(raw) as RelPreset[];
     if (!Array.isArray(parsed)) return [];
@@ -70,9 +76,9 @@ function readPresetsFromStorage(): RelPreset[] {
   }
 }
 
-function readPresetActiveId(): string {
+function readPresetActiveId(scopeKey: string): string {
   if (typeof window === "undefined") return SYSTEM_PRESET_ID_ALL;
-  return window.localStorage.getItem(ACTIVE_PRESET_KEY) || SYSTEM_PRESET_ID_ALL;
+  return window.localStorage.getItem(scopedStorageKey(ACTIVE_PRESET_KEY, scopeKey)) || SYSTEM_PRESET_ID_ALL;
 }
 
 function makePresetId(): string {
@@ -80,30 +86,41 @@ function makePresetId(): string {
 }
 
 export function useRelationFilter({
+  scopeKey,
   appliedRelations,
   graphNodes,
   graphEdges,
   rootVid,
 }: UseRelationFilterParams): UseRelationFilterResult {
+  const resolvedScopeKey = String(scopeKey || "").trim() || "__default__";
   const [open, setOpen] = useState(false);
   const [draftRelations, setDraftRelationsState] = useState<string[]>(() => uniqueStrings(appliedRelations));
 
   const [previewActive, setPreviewActive] = useState(false);
   const [previewRelations, setPreviewRelations] = useState<string[]>([]);
 
-  const [customPresets, setCustomPresets] = useState<RelPreset[]>(() => readPresetsFromStorage());
-  const [activePresetId, setActivePresetId] = useState<string>(() => readPresetActiveId());
+  const [customPresets, setCustomPresets] = useState<RelPreset[]>(() => readPresetsFromStorage(resolvedScopeKey));
+  const [activePresetId, setActivePresetId] = useState<string>(() => readPresetActiveId(resolvedScopeKey));
   const appliedState = useMemo(() => uniqueStrings(appliedRelations), [appliedRelations]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(PRESETS_KEY, JSON.stringify(customPresets));
-  }, [customPresets]);
+    window.localStorage.setItem(scopedStorageKey(PRESETS_KEY, resolvedScopeKey), JSON.stringify(customPresets));
+  }, [customPresets, resolvedScopeKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    window.localStorage.setItem(ACTIVE_PRESET_KEY, activePresetId);
-  }, [activePresetId]);
+    window.localStorage.setItem(scopedStorageKey(ACTIVE_PRESET_KEY, resolvedScopeKey), activePresetId);
+  }, [activePresetId, resolvedScopeKey]);
+
+  useEffect(() => {
+    setOpen(false);
+    setPreviewActive(false);
+    setPreviewRelations([]);
+    setDraftRelationsState(uniqueStrings(appliedRelations));
+    setCustomPresets(readPresetsFromStorage(resolvedScopeKey));
+    setActivePresetId(readPresetActiveId(resolvedScopeKey));
+  }, [appliedRelations, resolvedScopeKey]);
 
   const presets = useMemo(() => {
     const systemPreset: RelPreset = {

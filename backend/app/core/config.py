@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
 
-SPACE = "demo_kg"
+from app.config import settings
+
+SPACE = settings.nebula_space
 EDGE_TYPE = os.getenv("EDGE_TYPE", "REL2").strip() or "REL2"
 UPDATED_AT_UNIT = "seconds"
 

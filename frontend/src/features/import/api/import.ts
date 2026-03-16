@@ -10,12 +10,15 @@ import type {
   ImportPreviewResp,
   ImportSchemaOptions,
   ImportSchemaResp,
+  ImportSource,
   ImportTargetMapping,
   ImportUpdateStrategy,
 } from "../types/import";
 
+const IMPORT_UPLOAD_TIMEOUT_MS = 10 * 60 * 1000;
+
 export async function uploadImportFile(file: File): Promise<ImportFileUploadResp> {
-  return uploadFile<ImportFileUploadResp>("/api/import/files", file);
+  return uploadFile<ImportFileUploadResp>("/api/import/files", file, "file", { timeoutMs: IMPORT_UPLOAD_TIMEOUT_MS });
 }
 
 export async function previewImport(body: {
@@ -32,8 +35,10 @@ export async function fetchImportSchema(): Promise<ImportSchemaResp> {
 
 export async function fetchImportSchemaPlan(body: {
   file_ids: string[];
+  sources: ImportSource[];
   mapping: ImportTargetMapping[];
   schema_options: ImportSchemaOptions;
+  workspace_mode?: ImportMode;
 }): Promise<{
   schema_create_plan: NonNullable<ImportDraftValidationResp["compiled_plan"]>["schema_create_plan"];
   warnings: string[];
@@ -44,9 +49,9 @@ export async function fetchImportSchemaPlan(body: {
 
 export async function upsertImportDraft(body: {
   draft_id?: string;
-  mode: ImportMode;
+  workspace_mode: ImportMode;
   file_ids: string[];
-  discriminator_column?: string | null;
+  sources: ImportSource[];
   mapping: ImportTargetMapping[];
   update_strategy: ImportUpdateStrategy;
   schema_options: ImportSchemaOptions;
@@ -85,4 +90,8 @@ export async function cancelImportJob(jobId: string): Promise<ImportJobResp> {
 
 export async function downloadFailedRows(jobId: string): Promise<Blob> {
   return downloadBlob(`/api/import/jobs/${jobId}/failed_rows`);
+}
+
+export async function downloadImportArtifact(jobId: string, artifactName: string): Promise<Blob> {
+  return downloadBlob(`/api/import/jobs/${jobId}/artifacts/${artifactName}`);
 }

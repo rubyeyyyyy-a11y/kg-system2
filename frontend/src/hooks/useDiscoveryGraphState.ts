@@ -52,6 +52,8 @@ type ToggleExpandResult =
 type TagMap = Record<string, DiscoveryGraphSourceTag[]>;
 
 type UseDiscoveryGraphStateParams = {
+  spaceName?: string;
+  scopeKey?: string;
   graphNodes: NodeBrief[];
   graphEdges: EdgeBrief[];
   maxNodes: number;
@@ -156,6 +158,8 @@ function areSetsEqual<T>(a: Set<T>, b: Set<T>) {
 }
 
 export function useDiscoveryGraphState({
+  spaceName,
+  scopeKey,
   graphNodes,
   graphEdges,
   maxNodes,
@@ -181,6 +185,16 @@ export function useDiscoveryGraphState({
   );
   const previousAvailableEntityTypeSetRef = useRef<Set<string>>(new Set());
   const previousAvailableRelationTypeSetRef = useRef<Set<string>>(new Set());
+  const scopeVersionRef = useRef(0);
+  const expandAbortRef = useRef<AbortController | null>(null);
+  const probeAbortRef = useRef<AbortController | null>(null);
+
+  function abortDiscoveryRequests() {
+    expandAbortRef.current?.abort();
+    expandAbortRef.current = null;
+    probeAbortRef.current?.abort();
+    probeAbortRef.current = null;
+  }
 
   function commitRenderMutation(
     reason: GraphRenderMutation["reason"],
@@ -366,6 +380,7 @@ export function useDiscoveryGraphState({
   }
 
   function resetState() {
+    abortDiscoveryRequests();
     clearNodePositionCache();
     setNodeSourceTagMap({});
     setEdgeSourceTagMap({});
@@ -557,6 +572,7 @@ export function useDiscoveryGraphState({
     expandMaxNewEdges: number;
     expandTopKPerType: number;
   }): Promise<ToggleExpandResult> {
+    const requestScopeVersion = scopeVersionRef.current;
     const requestFingerprint = buildExpandFingerprint(params.allowedEntityTypes, params.allowedRelationTypes);
     const existingSession = expandSessionMap[String(params.targetNodeId)];
     if (existingSession?.isExpanded) {
@@ -573,6 +589,9 @@ export function useDiscoveryGraphState({
       next.add(params.targetNodeId);
       return next;
     });
+    expandAbortRef.current?.abort();
+    const controller = new AbortController();
+    expandAbortRef.current = controller;
 
     try {
       const rawResp = await graphDiscoveryExpand({
@@ -585,7 +604,12 @@ export function useDiscoveryGraphState({
         expand_max_new_edges: params.expandMaxNewEdges,
         expand_top_k_per_type: params.expandTopKPerType,
         expand_max_hop: 1,
+        signal: controller.signal,
+        spaceName,
       });
+      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) {
+        throw new DOMException("discovery expand aborted", "AbortError");
+      }
 
       const sourceTag = expandSourceTag(params.targetNodeId);
       const incidentEdgePool = mergeUniqueEdges(
@@ -667,6 +691,9 @@ export function useDiscoveryGraphState({
         response: validResp,
       };
     } finally {
+      if (expandAbortRef.current === controller) {
+        expandAbortRef.current = null;
+      }
       setExpandingNodeIds((prev) => {
         const next = new Set(prev);
         next.delete(params.targetNodeId);
@@ -681,6 +708,10 @@ export function useDiscoveryGraphState({
     allowedRelationTypes: string[];
     expandTopKPerType: number;
   }) {
+    const requestScopeVersion = scopeVersionRef.current;
+    probeAbortRef.current?.abort();
+    const controller = new AbortController();
+    probeAbortRef.current = controller;
     const resp = await graphDiscoveryExpand({
       target_node_id: params.targetNodeId,
       rendered_node_ids: Array.from(renderedNodeIds),
@@ -691,7 +722,10 @@ export function useDiscoveryGraphState({
       expand_max_new_edges: 0,
       expand_top_k_per_type: params.expandTopKPerType,
       expand_max_hop: 1,
+      signal: controller.signal,
+      spaceName,
     });
+    if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return resp;
 
     setNodeCapabilityMap((prev) => ({
       ...prev,
@@ -700,8 +734,16 @@ export function useDiscoveryGraphState({
         terminal: Boolean(resp.terminal),
       },
     }));
+    if (probeAbortRef.current === controller) {
+      probeAbortRef.current = null;
+    }
     return resp;
   }
+
+  useEffect(() => {
+    scopeVersionRef.current += 1;
+    resetState();
+  }, [scopeKey]);
 
   const renderedNodes = useMemo(
     () =>

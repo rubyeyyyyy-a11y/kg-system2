@@ -3,14 +3,14 @@ from typing import Optional
 from fastapi import APIRouter
 
 from app.schemas.edge import EdgeSearchRequest, EdgeSearchResp, EdgeSuggestResp
-from app.schemas.search import EntityTypeItem, RawIdSuggestResp, SearchRequest, SuggestResp
+from app.schemas.search import EntityTypeItem, RawIdSuggestResp, SearchRequest, SearchResp, SuggestResp
 from app.services import edge_search_service, search_service
 from app.services.search_v2 import service as search_v2_service
 
 router = APIRouter(prefix="/api")
 
 
-@router.post("/search")
+@router.post("/search", response_model=SearchResp)
 def search(req: SearchRequest):
     return search_v2_service.search(req)
 
