@@ -2,17 +2,67 @@ import time
 
 from app.core.space_context import get_current_space
 from app.core.escape import validate_updated_by
-from app.services.imports import audit_service, draft_service, file_store
+from app.services.imports import audit_service, draft_service, file_store, source_service
 from app.services.imports.errors import raise_import_http_error
-from app.services.imports.models import ImportJobState, JobArtifact, JobEvent
+from app.services.imports.models import CompiledImportPlan, DraftSource, ImportJobState, JobArtifact, JobEvent
 
 
 INTERRUPTED_IMPORT_STATUSES = {"queued", "running"}
 INTERRUPTED_POSTPROCESS_STATUSES = {"post_metadata_refresh", "post_es_sync", "post_verify_index"}
 
 
+def _effective_sources(*, draft, fallback_draft) -> list[DraftSource]:
+    sources = list(draft.sources or fallback_draft.sources)
+    if sources:
+        return sources
+    file_ids = list(draft.file_ids or fallback_draft.file_ids)
+    if not file_ids:
+        return []
+    return source_service.build_sources(file_ids, sample_rows=20)
+
+
+def _hydrate_compiled_plan(
+    compiled_plan: CompiledImportPlan,
+    *,
+    sources: list[DraftSource],
+    space_name: str,
+) -> CompiledImportPlan:
+    hydrated_sources = list(compiled_plan.sources or sources)
+    source_by_id = {source.source_id: source for source in hydrated_sources}
+    default_source = hydrated_sources[0] if len(hydrated_sources) == 1 else None
+    hydrated_targets = []
+    for target in compiled_plan.targets:
+        source = source_by_id.get(target.source_id) or default_source
+        if source is None:
+            hydrated_targets.append(target)
+            continue
+        hydrated_targets.append(
+            target.model_copy(
+                update={
+                    "source_id": target.source_id or source.source_id,
+                    "source_file_id": target.source_file_id or source.file_id,
+                    "source_filename": target.source_filename or source.filename,
+                    "source_columns": target.source_columns or list(source.columns),
+                    "inferred_source_kind": (
+                        target.inferred_source_kind
+                        if str(target.inferred_source_kind or "").strip() and target.inferred_source_kind != "unknown"
+                        else source.inferred_kind
+                    ),
+                }
+            )
+        )
+    return compiled_plan.model_copy(
+        update={
+            "space_name": compiled_plan.space_name or space_name,
+            "file_ids": compiled_plan.file_ids or [source.file_id for source in hydrated_sources],
+            "sources": hydrated_sources,
+            "targets": hydrated_targets,
+        }
+    )
+
+
 def create_job(*, draft_id: str, created_by: str) -> ImportJobState:
-    draft = draft_service.get_draft(draft_id)
+    frozen_draft = draft_service.get_draft(draft_id)
     draft = draft_service.validate_and_persist(draft_id)
     if not draft.validation or not draft.validation.passed or not draft.validation.compiled_plan:
         raise_import_http_error(
@@ -22,12 +72,19 @@ def create_job(*, draft_id: str, created_by: str) -> ImportJobState:
             field="draft_id",
         )
     actor = validate_updated_by(created_by)
-    compiled_plan = draft.validation.compiled_plan
+    sources = _effective_sources(draft=draft, fallback_draft=frozen_draft)
+    effective_space_name = draft.space_name or frozen_draft.space_name or get_current_space()
+    compiled_plan = _hydrate_compiled_plan(draft.validation.compiled_plan, sources=sources, space_name=effective_space_name)
+    draft_snapshot = draft.model_dump()
+    if sources:
+        draft_snapshot["sources"] = [source.model_dump() for source in sources]
+        draft_snapshot["file_ids"] = [source.file_id for source in sources]
+    draft_snapshot["space_name"] = effective_space_name
     job_id = file_store.new_id("job")
     file_store.copy_inputs_to_job(
         job_id,
-        [source.file_id for source in draft.sources],
-        draft.model_dump(),
+        [source.file_id for source in sources] or list(draft.file_ids or frozen_draft.file_ids),
+        draft_snapshot,
         compiled_plan.model_dump(),
     )
     artifacts: list[JobArtifact] = []
@@ -62,14 +119,14 @@ def create_job(*, draft_id: str, created_by: str) -> ImportJobState:
     state = ImportJobState(
         job_id=job_id,
         draft_id=draft_id,
-        space_name=draft.space_name or get_current_space(),
+        space_name=effective_space_name,
         template_type=compiled_plan.template_type,
         status="queued",
         created_by=actor,
         workspace_mode=draft.workspace_mode,
         plan_id=compiled_plan.plan_id,
-        file_ids=[source.file_id for source in draft.sources],
-        sources=draft.sources,
+        file_ids=[source.file_id for source in sources] or list(draft.file_ids or frozen_draft.file_ids),
+        sources=sources,
         targets=compiled_plan.targets,
         compiled_plan_path=str(file_store.job_compiled_plan_path(job_id)),
         artifacts=artifacts,

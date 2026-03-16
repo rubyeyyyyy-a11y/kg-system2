@@ -13,6 +13,7 @@ export function SpaceSwitcher({ currentSpace, spaces, loading, switching = false
     <label style={{ display: "grid", gap: 6 }}>
       <span style={{ fontSize: 12, letterSpacing: "0.08em", textTransform: "uppercase", color: "#7b6652" }}>Switch Space</span>
       <select
+        data-testid="import-space-selector"
         value={currentSpace}
         onChange={(event) => onSelect(event.target.value)}
         disabled={loading || switching || spaces.length === 0}

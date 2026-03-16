@@ -39,8 +39,8 @@ type UseGraphDataResult = {
   panelGroupCollapsed: Record<string, boolean>;
   setPanelGroupCollapsed: Dispatch<SetStateAction<Record<string, boolean>>>;
   expandProbeByVid: Record<number, ExpandProbeState>;
-  loadSubgraphWithParams: (nextRoot: number, nextHop: number, nextRelations: string[]) => Promise<void>;
-  loadSubgraph: (nextRoot: number) => Promise<void>;
+  loadSubgraphWithParams: (nextRoot: number, nextHop: number, nextRelations: string[]) => Promise<boolean>;
+  loadSubgraph: (nextRoot: number) => Promise<boolean>;
   expand1hop: (fromVid: number) => Promise<void>;
   reroot1hop: (vid: number) => Promise<void>;
   revealNode: (vid: number, autoSelect?: boolean) => void;
@@ -301,7 +301,7 @@ export function useGraphData({
         signal: controller.signal,
         spaceName,
       });
-      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
+      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return false;
 
       setHop(nextHop);
       setRelations(nextRelations);
@@ -320,10 +320,12 @@ export function useGraphData({
       onClearSelection();
       const budgetMsg = summarizeGraphBudgetStats(json.stats as Record<string, unknown>);
       if (budgetMsg) notify("warn", budgetMsg);
+      return true;
     } catch (e: unknown) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return false;
       const parsed = parseApiError(e);
       notify("error", `子图加载失败：${parsed.message}`);
+      return false;
     } finally {
       if (subgraphAbortRef.current === controller) {
         subgraphAbortRef.current = null;
@@ -333,7 +335,7 @@ export function useGraphData({
   }
 
   async function loadSubgraph(nextRoot: number) {
-    await loadSubgraphWithParams(nextRoot, hop, relations);
+    return await loadSubgraphWithParams(nextRoot, hop, relations);
   }
 
   async function expand1hop(fromVid: number) {

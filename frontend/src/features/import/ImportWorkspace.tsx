@@ -597,6 +597,7 @@ export function ImportWorkspace({
                 <span style={{ fontSize: 12, color: "#7d6b57" }}>target space={effectiveCurrentSpace || "-"}</span>
                 <span style={{ fontSize: 12, color: "#7d6b57" }}>status={currentSpaceStatus}</span>
                 <input
+                  data-testid="import-file-input"
                   type="file"
                   accept=".csv,text/csv"
                   disabled={!canRunImportFlow}
@@ -605,7 +606,7 @@ export function ImportWorkspace({
                     event.target.value = "";
                   }}
                 />
-                <button onClick={() => void handlePreview()} disabled={busy === "preview" || !canRunImportFlow}>
+                <button data-testid="import-preview-button" onClick={() => void handlePreview()} disabled={busy === "preview" || !canRunImportFlow}>
                   生成 Sources 预览
                 </button>
                 <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -718,16 +719,16 @@ export function ImportWorkspace({
                 >
                   新增 Target
                 </button>
-                <button onClick={() => void handleSaveDraft()} disabled={!canRunImportFlow || sources.length === 0}>
+                <button data-testid="import-save-draft-button" onClick={() => void handleSaveDraft()} disabled={!canRunImportFlow || sources.length === 0}>
                   保存 draft
                 </button>
-                <button onClick={() => void handleValidate()} disabled={!canRunImportFlow || sources.length === 0}>
+                <button data-testid="import-validate-button" onClick={() => void handleValidate()} disabled={!canRunImportFlow || sources.length === 0}>
                   运行 Validate
                 </button>
                 <button onClick={() => void handleSchemaPlan()} disabled={!canRunImportFlow || sources.length === 0}>
                   生成 Plan
                 </button>
-                <button onClick={() => void handleSubmitJob()} disabled={(!draft?.validation?.passed && !compiledPlan) || !canRunImportFlow}>
+                <button data-testid="import-submit-job-button" onClick={() => void handleSubmitJob()} disabled={(!draft?.validation?.passed && !compiledPlan) || !canRunImportFlow}>
                   提交 Job
                 </button>
                 <label style={{ display: "flex", alignItems: "center", gap: 8 }}>

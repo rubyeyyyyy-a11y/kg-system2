@@ -26,6 +26,17 @@ from app.services.imports.models import (
 )
 
 
+def _batch_result(*, successes=None, failures=None, used_fallback=False):
+    success_items = list(successes or [])
+    failure_items = list(failures or [])
+    return import_ngql_service.BatchImportResult(
+        successes=success_items,
+        failures=failure_items,
+        batch_statement_count=max(1, len(success_items) + len(failure_items)) if (success_items or failure_items) else 0,
+        used_fallback=used_fallback,
+    )
+
+
 class ImportServiceTest(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="import-tests-")
@@ -256,16 +267,21 @@ class ImportServiceTest(unittest.TestCase):
         file_store.save_job_state(state)
         call_count = {"n": 0}
 
-        def import_side_effect(_target, _row, **_kwargs):
+        def batch_side_effect(_target, rows, **_kwargs):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 job_service.cancel_job(job_id)
-            return {"kind": "vertex", "vid": call_count["n"]}
+            return _batch_result(
+                successes=[
+                    {"kind": "vertex", "vid": index + 1, "row_index": item.row_index}
+                    for index, item in enumerate(rows)
+                ]
+            )
 
         with (
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
             mock.patch("app.services.imports.executor_service._BATCH_SIZE", 2),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", side_effect=import_side_effect),
+            mock.patch("app.services.imports.executor_service.import_ngql_service.import_batch", side_effect=batch_side_effect),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch(
                 "app.services.imports.executor_service.es_postprocess_service.sync_entities",
@@ -474,7 +490,10 @@ class ImportServiceTest(unittest.TestCase):
 
         with (
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", return_value={"kind": "edge"}),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(successes=[{"kind": "edge", "src": 1, "dst": 2, "rank": 0, "row_index": 1}]),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch("app.services.imports.executor_service.es_postprocess_service.sync_entities") as es_sync_mock,
             mock.patch(
@@ -523,14 +542,21 @@ class ImportServiceTest(unittest.TestCase):
         )
         file_store.save_job_state(state)
 
-        def import_side_effect(_target, row, **_kwargs):
-            if row["ID"] == "2":
-                raise RuntimeError("bad row")
-            return {"kind": "vertex", "vid": 1}
-
         with (
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", side_effect=import_side_effect),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(
+                    successes=[{"kind": "vertex", "vid": 1, "row_index": 1}],
+                    failures=[
+                        (
+                            import_ngql_service.BatchRowItem(row_index=2, row={"ID": "2", "entity_name": "Beta"}),
+                            RuntimeError("bad row"),
+                        )
+                    ],
+                    used_fallback=True,
+                ),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch(
                 "app.services.imports.executor_service.es_postprocess_service.sync_entities",
@@ -613,7 +639,17 @@ class ImportServiceTest(unittest.TestCase):
         with (
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
             mock.patch("app.services.imports.executor_service._MAX_FAILED_ROWS_WRITTEN", 1),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", side_effect=RuntimeError("bad row")),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(
+                    failures=[
+                        (import_ngql_service.BatchRowItem(row_index=1, row={"ID": "1", "entity_name": "Alpha"}), RuntimeError("bad row")),
+                        (import_ngql_service.BatchRowItem(row_index=2, row={"ID": "2", "entity_name": "Beta"}), RuntimeError("bad row")),
+                        (import_ngql_service.BatchRowItem(row_index=3, row={"ID": "3", "entity_name": "Gamma"}), RuntimeError("bad row")),
+                    ],
+                    used_fallback=True,
+                ),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch(
                 "app.services.imports.executor_service.es_postprocess_service.sync_entities",
@@ -663,7 +699,10 @@ class ImportServiceTest(unittest.TestCase):
         with (
             mock.patch("app.services.imports.executor_service._update_state", side_effect=tracking_update),
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", return_value={"kind": "vertex", "vid": 101}),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(successes=[{"kind": "vertex", "vid": 101, "row_index": 1}]),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch(
                 "app.services.imports.executor_service.es_postprocess_service.sync_entities",

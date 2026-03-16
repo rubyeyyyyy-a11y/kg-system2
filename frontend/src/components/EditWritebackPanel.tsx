@@ -78,6 +78,7 @@ function FormField({
       </span>
       {spec.multiline ? (
         <textarea
+          data-testid={`edit-field-${spec.name}`}
           value={value}
           disabled={disabled}
           rows={4}
@@ -87,6 +88,7 @@ function FormField({
         />
       ) : (
         <input
+          data-testid={`edit-field-${spec.name}`}
           value={value}
           disabled={disabled}
           maxLength={spec.maxLen}
@@ -362,11 +364,21 @@ export function EditWritebackPanel({
       <div style={{ fontWeight: 600, fontSize: 13 }}>操作者（updated_by）</div>
       <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
         <span>全局默认（localStorage: {UPDATED_BY_KEY}）</span>
-        <input value={defaultUpdatedBy} onChange={(e) => setDefaultUpdatedBy(e.target.value)} style={{ padding: 8 }} />
+        <input
+          data-testid="edit-default-updated-by-input"
+          value={defaultUpdatedBy}
+          onChange={(e) => setDefaultUpdatedBy(e.target.value)}
+          style={{ padding: 8 }}
+        />
       </label>
       <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
         <span>本次保存（可临时覆盖）</span>
-        <input value={saveUpdatedBy} onChange={(e) => setSaveUpdatedBy(e.target.value)} style={{ padding: 8 }} />
+        <input
+          data-testid="edit-save-updated-by-input"
+          value={saveUpdatedBy}
+          onChange={(e) => setSaveUpdatedBy(e.target.value)}
+          style={{ padding: 8 }}
+        />
       </label>
       {actorError ? <div style={{ fontSize: 12, color: "#d4380d" }}>{actorError}</div> : null}
       <label style={{ fontSize: 12 }}>
@@ -397,10 +409,20 @@ export function EditWritebackPanel({
             />
           ))}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => void onReloadNodeDetail(sel.vid)} disabled={detailLoading} style={{ padding: "6px 10px" }}>
+            <button
+              data-testid="selected-node-reload-button"
+              onClick={() => void onReloadNodeDetail(sel.vid)}
+              disabled={detailLoading}
+              style={{ padding: "6px 10px" }}
+            >
               重新加载详情
             </button>
-            <button onClick={() => void saveSelectedNode()} disabled={!canSave} style={{ padding: "6px 10px" }}>
+            <button
+              data-testid="selected-node-save-button"
+              onClick={() => void saveSelectedNode()}
+              disabled={!canSave}
+              style={{ padding: "6px 10px" }}
+            >
               {saveLoading ? "保存中…" : "保存节点"}
             </button>
           </div>
@@ -431,10 +453,20 @@ export function EditWritebackPanel({
           />
         ))}
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => void onReloadEdgeDetail(identity)} disabled={detailLoading} style={{ padding: "6px 10px" }}>
+          <button
+            data-testid="selected-edge-reload-button"
+            onClick={() => void onReloadEdgeDetail(identity)}
+            disabled={detailLoading}
+            style={{ padding: "6px 10px" }}
+          >
             重新加载详情
           </button>
-          <button onClick={() => void saveSelectedEdge()} disabled={!canSave} style={{ padding: "6px 10px" }}>
+          <button
+            data-testid="selected-edge-save-button"
+            onClick={() => void saveSelectedEdge()}
+            disabled={!canSave}
+            style={{ padding: "6px 10px" }}
+          >
             {saveLoading ? "保存中…" : "保存边"}
           </button>
         </div>
@@ -466,8 +498,14 @@ export function EditWritebackPanel({
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, display: "grid", gap: 8 }}>
         <div style={{ fontWeight: 600 }}>直接编辑 Node</div>
         <div style={{ display: "flex", gap: 8 }}>
-          <input value={directNodeVid} onChange={(e) => setDirectNodeVid(e.target.value)} placeholder="vid" style={{ padding: 8, flex: 1 }} />
-          <button onClick={() => void loadDirectNode()} disabled={directNodeLoading} style={{ padding: "8px 12px" }}>
+          <input
+            data-testid="direct-node-vid-input"
+            value={directNodeVid}
+            onChange={(e) => setDirectNodeVid(e.target.value)}
+            placeholder="vid"
+            style={{ padding: 8, flex: 1 }}
+          />
+          <button data-testid="direct-node-load-button" onClick={() => void loadDirectNode()} disabled={directNodeLoading} style={{ padding: "8px 12px" }}>
             {directNodeLoading ? "加载中…" : "加载"}
           </button>
         </div>
@@ -482,7 +520,7 @@ export function EditWritebackPanel({
                 onChange={(next) => setDirectNodeSet((prev) => ({ ...prev, [spec.name]: next }))}
               />
             ))}
-            <button onClick={() => void saveDirectNode()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
+            <button data-testid="direct-node-save-button" onClick={() => void saveDirectNode()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
               {saveLoading ? "保存中…" : "保存节点"}
             </button>
           </div>
@@ -492,10 +530,10 @@ export function EditWritebackPanel({
       <div style={{ border: "1px solid #eee", borderRadius: 8, padding: 10, display: "grid", gap: 8 }}>
         <div style={{ fontWeight: 600 }}>直接编辑 Edge</div>
         <div style={{ display: "grid", gap: 8 }}>
-          <input value={directEdgeSrc} onChange={(e) => setDirectEdgeSrc(e.target.value)} placeholder="src" style={{ padding: 8 }} />
-          <input value={directEdgeDst} onChange={(e) => setDirectEdgeDst(e.target.value)} placeholder="dst" style={{ padding: 8 }} />
-          <input value={directEdgeRank} onChange={(e) => setDirectEdgeRank(e.target.value)} placeholder="rank" style={{ padding: 8 }} />
-          <button onClick={() => void loadDirectEdge()} disabled={directEdgeLoading} style={{ padding: "8px 12px" }}>
+          <input data-testid="direct-edge-src-input" value={directEdgeSrc} onChange={(e) => setDirectEdgeSrc(e.target.value)} placeholder="src" style={{ padding: 8 }} />
+          <input data-testid="direct-edge-dst-input" value={directEdgeDst} onChange={(e) => setDirectEdgeDst(e.target.value)} placeholder="dst" style={{ padding: 8 }} />
+          <input data-testid="direct-edge-rank-input" value={directEdgeRank} onChange={(e) => setDirectEdgeRank(e.target.value)} placeholder="rank" style={{ padding: 8 }} />
+          <button data-testid="direct-edge-load-button" onClick={() => void loadDirectEdge()} disabled={directEdgeLoading} style={{ padding: "8px 12px" }}>
             {directEdgeLoading ? "加载中…" : "加载"}
           </button>
         </div>
@@ -510,7 +548,7 @@ export function EditWritebackPanel({
                 onChange={(next) => setDirectEdgeSet((prev) => ({ ...prev, [spec.name]: next }))}
               />
             ))}
-            <button onClick={() => void saveDirectEdge()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
+            <button data-testid="direct-edge-save-button" onClick={() => void saveDirectEdge()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
               {saveLoading ? "保存中…" : "保存边"}
             </button>
           </div>

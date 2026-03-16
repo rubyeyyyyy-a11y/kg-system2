@@ -273,6 +273,7 @@ function ManagedNodeList({
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button
+                  data-testid={`managed-node-primary-${node.id}`}
                   onClick={() => onPrimaryAction(node.id)}
                   disabled={Boolean(isPrimaryDisabled?.(node))}
                   style={{ padding: "6px 8px", fontSize: 12 }}
@@ -281,6 +282,7 @@ function ManagedNodeList({
                 </button>
               {onLocate ? (
                 <button
+                  data-testid={`managed-node-locate-${node.id}`}
                   onClick={() => onLocate(node.id)}
                   disabled={locateDisabled}
                   style={{ padding: "6px 8px", fontSize: 12 }}
@@ -288,7 +290,11 @@ function ManagedNodeList({
                   定位到图中
                 </button>
               ) : null}
-              <button onClick={() => onViewDetail(node.id)} style={{ padding: "6px 8px", fontSize: 12 }}>
+              <button
+                data-testid={`managed-node-view-detail-${node.id}`}
+                onClick={() => onViewDetail(node.id)}
+                style={{ padding: "6px 8px", fontSize: 12 }}
+              >
                 查看详情
               </button>
             </div>
@@ -1102,7 +1108,11 @@ export function DiscoveryPanel({
           <button data-testid="discovery-search-submit" onClick={onSubmitSearch} disabled={candidateResult.loading} style={{ padding: "8px 12px", width: "100%" }}>
             {candidateResult.loading ? "搜索中…" : "搜索候选"}
           </button>
-          <button onClick={onToggleSearchAdvanced} style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}>
+          <button
+            data-testid="discovery-search-advanced-toggle"
+            onClick={onToggleSearchAdvanced}
+            style={{ padding: "8px 12px", fontSize: 12, width: "100%" }}
+          >
             {searchAdvancedOpen ? "收起高级筛选" : "展开高级筛选"}
           </button>
         </div>
@@ -1125,6 +1135,7 @@ export function DiscoveryPanel({
               <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
                 <span>entity_type</span>
                 <select
+                  data-testid="discovery-search-advanced-entity-type"
                   value={searchQuery.entityType}
                   onChange={(e) => onUpdateSearchQuery({ entityType: e.target.value })}
                   style={{ padding: 8 }}

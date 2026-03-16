@@ -9,6 +9,7 @@ from app import config as app_config
 from app.clients import ElasticsearchClient
 from app.clients.nebula_client import NebulaClient, NebulaConnectionError, NebulaQueryError, NebulaTimeoutError
 from app.models import CandidateNode, SearchDiagnostics, SearchResultBundle
+from app.platform.metadata import entity_catalog_service
 from app.schemas.search import SearchRequest
 from app.services.fallback_search import FallbackSearchEngine
 from app.services import metadata_service
@@ -23,21 +24,7 @@ fallback_engine = FallbackSearchEngine(nebula_client)
 _ES_HEALTH_CACHE: Dict[str, Any] = {"ok": False, "reason": "cold", "at": 0.0, "ms": 0.0}
 _ES_HEALTH_TTL_SEC = 3.0
 
-FALLBACK_ENTITY_TYPES: List[Dict[str, Any]] = [
-    {"entity_type": "disease", "count": 201562},
-    {"entity_type": "gene", "count": 164321},
-    {"entity_type": "drug", "count": 108734},
-    {"entity_type": "phenotype", "count": 78412},
-    {"entity_type": "pathway", "count": 52386},
-    {"entity_type": "protein", "count": 45190},
-    {"entity_type": "anatomy", "count": 38741},
-    {"entity_type": "symptom", "count": 30987},
-    {"entity_type": "compound", "count": 28453},
-    {"entity_type": "target", "count": 21765},
-    {"entity_type": "cell_type", "count": 19674},
-    {"entity_type": "microbe", "count": 15290},
-    {"entity_type": "side_effect", "count": 9462},
-]
+FALLBACK_ENTITY_TYPES = entity_catalog_service.FALLBACK_ENTITY_TYPES
 
 
 def _request_id() -> str:
@@ -265,14 +252,11 @@ def search(req: SearchRequest) -> Dict[str, Any]:
 
 
 def entity_types() -> List[Dict[str, Any]]:
-    try:
-        items = metadata_service.list_entity_types(limit=200)
-        if items:
-            return items
-        return [dict(x) for x in FALLBACK_ENTITY_TYPES]
-    except Exception as exc:
-        logger.warning("entity_types fallback due to error: %s", exc)
-        return [dict(x) for x in FALLBACK_ENTITY_TYPES]
+    return entity_catalog_service.list_entity_types(
+        list_entity_types_fn=metadata_service.list_entity_types,
+        fallback_items=FALLBACK_ENTITY_TYPES,
+        logger_instance=logger,
+    )
 
 
 def suggest(

@@ -3,6 +3,7 @@ from typing import Any, Dict, Iterable, List, Set, Tuple
 
 from fastapi import HTTPException
 
+from app.platform.graph.traversal_service import _fetch_entity_nodes, _go_edges_from
 from app.schemas.discovery import (
     DiscoveryDroppedReason,
     GraphDiscoveryExpandRequest,
@@ -10,11 +11,9 @@ from app.schemas.discovery import (
 from app.services.graph_budget import graph_budget
 from app.services.graph_discovery_service import (
     _edge_role_for_nodes,
-    _fetch_entity_nodes,
     _normalize_filter,
     _normalize_key,
 )
-from app.services.graph_service import _go_edges_from
 
 _EDGE_KEY_SEP = "**"
 

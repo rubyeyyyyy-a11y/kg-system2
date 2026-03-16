@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import traceback
+import csv
 from threading import Lock, Thread
 
 from app.core.space_context import use_space
@@ -14,7 +15,7 @@ from app.services.imports import (
     metadata_postprocess_service,
     schema_service,
 )
-from app.services.imports.models import CompiledImportPlan, ImportCompletionSummary, ImportJobState, JobEvent
+from app.services.imports.models import CompiledImportPlan, DraftSource, ImportCompletionSummary, ImportJobState, JobEvent
 from app.services.spaces.models import SpaceIndexStatus
 
 logger = logging.getLogger(__name__)
@@ -48,8 +49,71 @@ def _failure_stage_from_error(error_message: str, *, current_status: str) -> str
     return None
 
 
-def _compiled_plan(job_id: str) -> CompiledImportPlan:
-    return CompiledImportPlan.model_validate(file_store.read_compiled_plan_copy(job_id))
+def _load_job_input_source(job_id: str, file_id: str, source_id: str) -> DraftSource:
+    meta = file_store.read_json(file_store.job_input_dir(job_id) / file_id / "meta.json")
+    path = file_store.job_input_dir(job_id) / file_id / "source.csv"
+    with path.open("r", encoding=str(meta.get("detected_encoding") or "utf-8"), errors="replace", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=str(meta.get("detected_delimiter") or ","))
+        columns = list(reader.fieldnames or [])
+    return DraftSource(
+        source_id=source_id,
+        file_id=file_id,
+        filename=str(meta.get("original_name") or f"{file_id}.csv"),
+        columns=columns,
+        sample_rows=[],
+        header_hash="",
+        inferred_kind="unknown",
+        warnings=[],
+        alias_hints=[],
+        recommended_object_type=None,
+    )
+
+
+def _compiled_plan(state: ImportJobState) -> CompiledImportPlan:
+    plan = CompiledImportPlan.model_validate(file_store.read_compiled_plan_copy(state.job_id))
+    sources = list(plan.sources or state.sources)
+    if not sources:
+        file_ids = list(plan.file_ids or state.file_ids)
+        known_target_source_ids = [target.source_id for target in plan.targets if target.source_id]
+        sources = [
+            _load_job_input_source(
+                state.job_id,
+                file_id,
+                known_target_source_ids[index] if index < len(known_target_source_ids) else f"compat_source_{index + 1}",
+            )
+            for index, file_id in enumerate(file_ids)
+        ]
+    source_by_id = {source.source_id: source for source in sources}
+    default_source = sources[0] if len(sources) == 1 else None
+    targets = []
+    for target in plan.targets:
+        source = source_by_id.get(target.source_id) or default_source
+        if source is None:
+            targets.append(target)
+            continue
+        targets.append(
+            target.model_copy(
+                update={
+                    "source_id": target.source_id or source.source_id,
+                    "source_file_id": target.source_file_id or source.file_id,
+                    "source_filename": target.source_filename or source.filename,
+                    "source_columns": target.source_columns or list(source.columns),
+                    "inferred_source_kind": (
+                        target.inferred_source_kind
+                        if str(target.inferred_source_kind or "").strip() and target.inferred_source_kind != "unknown"
+                        else source.inferred_kind
+                    ),
+                }
+            )
+        )
+    return plan.model_copy(
+        update={
+            "space_name": plan.space_name or state.space_name,
+            "file_ids": plan.file_ids or state.file_ids,
+            "sources": sources,
+            "targets": targets,
+        }
+    )
 
 
 def _iter_job_csv_rows(job_id: str, file_id: str):
@@ -92,6 +156,21 @@ def _write_target_summary(summary_path, summary: dict) -> None:
     file_store.write_json(summary_path, summary)
 
 
+def _sync_fail_count(sync_summary: object) -> int:
+    if not isinstance(sync_summary, dict):
+        return 0
+    raw = sync_summary.get("fail_count", 0)
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.lstrip("-").isdigit():
+            return int(text)
+    return 0
+
+
 def _finalize_cancelled(
     state: ImportJobState,
     *,
@@ -118,7 +197,7 @@ def _finalize_cancelled(
 def run_job(job_id: str) -> ImportJobState:
     state = file_store.load_job_state(job_id)
     with use_space(state.space_name):
-        plan = _compiled_plan(job_id)
+        plan = _compiled_plan(state)
         sources_by_id = {source.source_id: source for source in plan.sources}
         if state.cancel_requested:
             return _update_state(state, status="cancelled", failure_stage="cancelled", finished_at=int(time.time()))
@@ -139,6 +218,15 @@ def run_job(job_id: str) -> ImportJobState:
         success_rows = 0
         failed_rows = 0
         failed_rows_truncated = False
+        aggregate_source_columns: list[str] = []
+        for source in plan.sources:
+            for column in source.columns:
+                if column not in aggregate_source_columns:
+                    aggregate_source_columns.append(column)
+        aggregate_normalized_headers = _headers_for_normalized_rows(aggregate_source_columns)
+        aggregate_failed_headers = _headers_for_failed_rows(aggregate_source_columns)
+        file_store.touch_job_csv(file_store.job_normalized_rows_path(job_id), aggregate_normalized_headers)
+        file_store.touch_job_csv(file_store.job_failed_rows_path(job_id), aggregate_failed_headers)
         try:
             schema_service.apply_schema_plan(plan.schema_create_plan, space_name=state.space_name)
             for target in plan.targets:
@@ -241,6 +329,11 @@ def run_job(job_id: str) -> ImportJobState:
                         if success.get("kind") == "vertex" and target.object_name == "Entity":
                             affected_entity_vids.add(int(success["vid"]))
                     file_store.append_csv_rows(normalized_path, normalized_headers, normalized_rows_payload)
+                    file_store.append_csv_rows(
+                        file_store.job_normalized_rows_path(job_id),
+                        aggregate_normalized_headers,
+                        normalized_rows_payload,
+                    )
 
                     failed_rows_payload: list[dict[str, str]] = []
                     for failed_item, exc in batch_result.failures:
@@ -270,6 +363,11 @@ def run_job(job_id: str) -> ImportJobState:
                             target_failed_written += 1
                             failed_rows_truncated = True
                     file_store.append_csv_rows(failed_path, failed_headers, failed_rows_payload)
+                    file_store.append_csv_rows(
+                        file_store.job_failed_rows_path(job_id),
+                        aggregate_failed_headers,
+                        failed_rows_payload,
+                    )
 
                     batch_count = len(batch_items)
                     total_rows += batch_count
@@ -391,7 +489,7 @@ def run_job(job_id: str) -> ImportJobState:
                     sync_summary = es_postprocess_service.sync_entities(sorted(affected_entity_vids), space_name=state.space_name)
                 except Exception as exc:
                     raise RuntimeError(f"es_sync_failed: {exc}") from exc
-                if int(sync_summary.get("fail_count") or 0) > 0:
+                if _sync_fail_count(sync_summary) > 0:
                     raise RuntimeError(f"es_sync_failed: fail_count={sync_summary['fail_count']}")
             else:
                 state = _update_state(state, es_sync_skipped=True)

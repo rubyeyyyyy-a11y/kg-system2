@@ -35,6 +35,21 @@ def _generated_rank(src: int, dst: int, row_index: int) -> int:
     return abs(hash(f"{src}:{dst}:{row_index}")) % 2147483647
 
 
+def _fetch_edge_exists(
+    edge_type: str,
+    src: int,
+    dst: int,
+    rank: int,
+    *,
+    space_name: str | None = None,
+) -> bool:
+    result = execute_ngql_safe(
+        f"FETCH PROP ON `{edge_type}` {int(src)}->{int(dst)}@{int(rank)} YIELD src(edge) AS src;",
+        space_name=space_name,
+    )
+    return bool(result.rows())
+
+
 def _vertex_payload(target: CompiledTargetPlan, row: dict[str, str], actor: str) -> tuple[int, dict[str, str]]:
     if not target.identity_mapping.id_column:
         raise HTTPException(status_code=422, detail="vertex mapping requires identity_mapping.id_column")

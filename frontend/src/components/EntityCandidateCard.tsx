@@ -96,12 +96,14 @@ export function EntityCandidateCard({
           }}
         >
           <button
+            data-testid={`discovery-candidate-view-detail-${candidateId}`}
             onClick={() => onViewDetail(item)}
             style={{ padding: "5px 8px", fontSize: 12, flex: "0 1 auto" }}
           >
             查看详情
           </button>
           <button
+            data-testid={`discovery-candidate-add-seed-${candidateId}`}
             onClick={() => onAddSeed(item)}
             disabled={seeded}
             style={{ padding: "5px 8px", fontSize: 12, flex: "0 1 auto" }}
@@ -109,6 +111,7 @@ export function EntityCandidateCard({
             {seeded ? "已加入 Seeds" : "加入 Seeds"}
           </button>
           <button
+            data-testid={`discovery-candidate-load-subgraph-${candidateId}`}
             onClick={() => onLoadSubgraph(item)}
             style={{ padding: "5px 8px", fontSize: 12, flex: "0 1 auto" }}
           >

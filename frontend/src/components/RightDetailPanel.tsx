@@ -494,13 +494,13 @@ export function RightDetailPanel({
 
       <hr style={{ margin: "12px 0" }} />
       <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-        <button onClick={() => setEditorTab("detail")} style={{ padding: "6px 10px", fontSize: 12 }}>
+        <button data-testid="detail-panel-tab-detail" onClick={() => setEditorTab("detail")} style={{ padding: "6px 10px", fontSize: 12 }}>
           详情
         </button>
-        <button onClick={() => setEditorTab("edit")} style={{ padding: "6px 10px", fontSize: 12 }}>
+        <button data-testid="detail-panel-tab-edit" onClick={() => setEditorTab("edit")} style={{ padding: "6px 10px", fontSize: 12 }}>
           编辑
         </button>
-        <button onClick={() => setEditorTab("direct")} style={{ padding: "6px 10px", fontSize: 12 }}>
+        <button data-testid="detail-panel-tab-direct" onClick={() => setEditorTab("direct")} style={{ padding: "6px 10px", fontSize: 12 }}>
           直接编辑
         </button>
       </div>
@@ -509,7 +509,7 @@ export function RightDetailPanel({
         sel.kind === "none" ? (
         <div style={{ color: "#666", fontSize: 13 }}>未选择节点/边</div>
       ) : sel.kind === "node" ? (
-        <div style={{ display: "grid", gap: 10 }}>
+        <div data-testid="selected-node-detail" style={{ display: "grid", gap: 10 }}>
           <div style={{ fontWeight: 700 }}>{selectedNodeBrief?.label || `Node ${sel.vid}`}</div>
 
           <div
@@ -549,6 +549,7 @@ export function RightDetailPanel({
             <>
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                 <button
+                  data-testid="discovery-expand-button"
                   onClick={() => onExpandDiscoveryNode?.(sel.vid)}
                   disabled={expandButtonDisabled}
                   style={{ padding: "8px 12px" }}
@@ -558,6 +559,7 @@ export function RightDetailPanel({
 
                 {!selectedNodeIsSeed ? (
                   <button
+                    data-testid="discovery-hide-button"
                     onClick={() => onHideDiscoveryNode?.(sel.vid)}
                     disabled={!selectedNodeIsVisible}
                     style={{ padding: "8px 12px" }}
@@ -725,7 +727,7 @@ export function RightDetailPanel({
           ) : null}
         </div>
       ) : (
-        <div style={{ display: "grid", gap: 10 }}>
+        <div data-testid="selected-edge-detail" style={{ display: "grid", gap: 10 }}>
           <div style={{ fontWeight: 700 }}>Edge</div>
           <div style={{ fontSize: 12, color: "#666" }}>
             src={sel.src} → dst={sel.dst}

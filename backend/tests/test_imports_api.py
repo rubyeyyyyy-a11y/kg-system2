@@ -7,7 +7,7 @@ from unittest import mock
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.services.imports import executor_service, file_store
+from app.services.imports import executor_service, file_store, import_ngql_service
 from app.services.imports.models import ImportJobState
 from app.services.spaces import registry_service
 from app.services.spaces.models import SpaceSummary
@@ -34,6 +34,17 @@ SCHEMA_FIXTURE = {
         }
     ],
 }
+
+
+def _batch_result(*, successes=None, failures=None, used_fallback=False):
+    success_items = list(successes or [])
+    failure_items = list(failures or [])
+    return import_ngql_service.BatchImportResult(
+        successes=success_items,
+        failures=failure_items,
+        batch_statement_count=max(1, len(success_items) + len(failure_items)) if (success_items or failure_items) else 0,
+        used_fallback=used_fallback,
+    )
 
 
 class ImportApiTest(unittest.TestCase):
@@ -163,9 +174,29 @@ class ImportApiTest(unittest.TestCase):
         with (
             mock.patch("app.services.imports.schema_service.introspect_schema", return_value=SCHEMA_FIXTURE),
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", return_value={"kind": "vertex", "vid": 101}),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(successes=[{"kind": "vertex", "vid": 101, "row_index": 1}]),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
-            mock.patch("app.services.imports.executor_service.es_postprocess_service.sync_entities") as es_sync_mock,
+            mock.patch(
+                "app.services.imports.executor_service.es_postprocess_service.sync_entities",
+                return_value={"space_name": "demo_kg", "docs": 1, "ok_count": 1, "fail_count": 0},
+            ) as es_sync_mock,
+            mock.patch(
+                "app.services.imports.executor_service.es_postprocess_service.post_verify_index",
+                return_value={
+                    "completion_summary": {
+                        "nebula_write_success": True,
+                        "post_es_sync_success": True,
+                        "verify_success": True,
+                        "registry_index_status_written": True,
+                        "imported_docs_visible": True,
+                        "searchable": True,
+                    },
+                    "index_status_snapshot": {"status": "verified_nonempty", "doc_count": 1},
+                },
+            ),
             mock.patch("app.services.imports.executor_service.ensure_worker_running", side_effect=executor_service.drain_queue),
             self._client() as client,
         ):
@@ -182,9 +213,26 @@ class ImportApiTest(unittest.TestCase):
         with (
             mock.patch("app.services.imports.schema_service.introspect_schema", return_value=SCHEMA_FIXTURE),
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", return_value={"kind": "edge"}),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(successes=[{"kind": "edge", "src": 1, "dst": 2, "rank": 0, "row_index": 1}]),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch("app.services.imports.executor_service.es_postprocess_service.sync_entities") as es_sync_mock,
+            mock.patch(
+                "app.services.imports.executor_service.es_postprocess_service.post_verify_index",
+                return_value={
+                    "completion_summary": {
+                        "nebula_write_success": True,
+                        "post_es_sync_success": True,
+                        "verify_success": True,
+                        "registry_index_status_written": True,
+                        "imported_docs_visible": True,
+                        "searchable": True,
+                    },
+                    "index_status_snapshot": {"status": "verified_empty", "doc_count": 0},
+                },
+            ),
             mock.patch("app.services.imports.executor_service.ensure_worker_running", side_effect=executor_service.drain_queue),
             self._client() as client,
         ):
@@ -334,15 +382,22 @@ class ImportApiTest(unittest.TestCase):
         self.assertEqual(payload["detail"]["reason"], "provisioning")
 
     def test_failed_rows_download_endpoint(self):
-        def import_side_effect(_target, row, **_kwargs):
-            if row["ID"] == "2":
-                raise RuntimeError("bad row")
-            return {"kind": "vertex", "vid": 1}
-
         with (
             mock.patch("app.services.imports.schema_service.introspect_schema", return_value=SCHEMA_FIXTURE),
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
-            mock.patch("app.services.imports.executor_service.import_ngql_service.import_row", side_effect=import_side_effect),
+            mock.patch(
+                "app.services.imports.executor_service.import_ngql_service.import_batch",
+                return_value=_batch_result(
+                    successes=[{"kind": "vertex", "vid": 1, "row_index": 1}],
+                    failures=[
+                        (
+                            import_ngql_service.BatchRowItem(row_index=2, row={"ID": "2", "entity_name": "Beta", "entity_type": "Disease", "source": "manual"}),
+                            RuntimeError("bad row"),
+                        )
+                    ],
+                    used_fallback=True,
+                ),
+            ),
             mock.patch("app.services.imports.executor_service.metadata_postprocess_service.refresh_from_db"),
             mock.patch("app.services.imports.executor_service.es_postprocess_service.sync_entities"),
             mock.patch("app.services.imports.executor_service.ensure_worker_running", side_effect=executor_service.drain_queue),

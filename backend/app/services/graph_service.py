@@ -5,6 +5,12 @@ from fastapi import HTTPException
 
 from app.core import config
 from app.db.nebula import EDGE_TAG, execute_ngql
+from app.platform.graph.traversal_service import (
+    _fetch_entity_nodes as _platform_fetch_entity_nodes,
+    _find_shortest_path_candidates_bfs as _platform_find_shortest_path_candidates_bfs,
+    _go_edges_from as _platform_go_edges_from,
+)
+from app.platform.metadata import relation_catalog_service
 from app.schemas.graph import (
     ExpandRequest,
     MultiEntityGraphApplyPathsRequest,
@@ -67,50 +73,11 @@ def _normalize_rel_filter(relations: List[str], max_count: int) -> Tuple[Set[str
 
 
 def _fetch_entity_nodes(node_ids: List[int]) -> Dict[int, Dict[str, Any]]:
-    ids = sorted(set(int(v) for v in node_ids))
-    if not ids:
-        return {}
-
-    vid_list = ",".join(str(x) for x in ids)
-    fetch_ngql = f"""
-    MATCH (v:`Entity`)
-    WHERE id(v) IN [{vid_list}]
-    RETURN id(v) AS vid,
-           v.`Entity`.`entity_name` AS name,
-           v.`Entity`.`entity_type` AS type,
-           v.`Entity`.`entity_raw_id` AS raw_id,
-           v.`Entity`.`source` AS source,
-           v.`Entity`.`description` AS descr
-LIMIT {len(ids)};
-    """
-    fres = execute_ngql(fetch_ngql)
-    if not fres.is_succeeded():
-        raise HTTPException(status_code=500, detail=fres.error_msg())
-
-    vids = fres.column_values("vid")
-    names = fres.column_values("name")
-    types = fres.column_values("type")
-    raw_ids = fres.column_values("raw_id")
-    sources = fres.column_values("source")
-    descs = fres.column_values("descr")
-
-    node_map: Dict[int, Dict[str, Any]] = {}
-    for i in range(len(vids)):
-        vid = int(vw(vids[i]))
-        name = str(vw(names[i]) or "")
-        typ = str(vw(types[i]) or "")
-        rid = str(vw(raw_ids[i]) or "")
-        src = str(vw(sources[i]) or "")
-        dsc = str(vw(descs[i]) or "")
-        node_map[vid] = {
-            "id": vid,
-            "label": name,
-            "entity_type": typ,
-            "raw_id": rid,
-            "source": src,
-            "snippet": (dsc[:160] + "…") if dsc and len(dsc) > 160 else (dsc or ""),
-        }
-    return node_map
+    return _platform_fetch_entity_nodes(
+        node_ids,
+        execute_ngql_fn=execute_ngql,
+        value_wrapper=vw,
+    )
 
 
 def _go_edges_from(
@@ -120,86 +87,18 @@ def _go_edges_from(
     per_root_neighbor_cap: int,
     ignore_direction: bool = True,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    if not frontier:
-        return [], {
-            "scanned_rows": 0,
-            "dropped_by_relation": 0,
-            "dropped_by_neighbor_cap": 0,
-        }
-
-    frontier_unique = sorted(set(int(x) for x in frontier))
-    frontier_set = set(frontier_unique)
-    id_list = ",".join(str(x) for x in frontier_unique)
-    direction_kw = " BIDIRECT" if ignore_direction else ""
-    ngql = f"""
-    GO FROM {id_list} OVER {EDGE_TAG}{direction_kw}
-    YIELD src(edge) AS src, dst(edge) AS dst,
-          rank(edge) AS rank,
-          properties(edge).relation AS relation,
-          properties(edge).source AS esource
-    | LIMIT {int(query_scan_limit)};
-    """
-    res = execute_ngql(ngql)
-    if not res.is_succeeded():
-        raise HTTPException(status_code=500, detail=res.error_msg())
-
-    srcs = res.column_values("src")
-    dsts = res.column_values("dst")
-    ranks = res.column_values("rank")
-    rels = res.column_values("relation")
-    esources = res.column_values("esource")
-
-    # Super-node protection: each root vertex gets capped neighbor budget.
-    root_neighbor_count: Dict[int, int] = {int(v): 0 for v in frontier_unique}
-    dropped_by_neighbor_cap = 0
-    dropped_by_relation = 0
-    out: List[Dict[str, Any]] = []
-    for i in range(len(srcs)):
-        src = int(vw(srcs[i]))
-        dst = int(vw(dsts[i]))
-        rank = int(vw(ranks[i]) or 0)
-        rel = str(vw(rels[i]) or "")
-        esrc = str(vw(esources[i]) or "")
-
-        if rel_filter and rel not in rel_filter:
-            dropped_by_relation += 1
-            continue
-
-        anchors: List[int] = []
-        if src in frontier_set:
-            anchors.append(src)
-        if ignore_direction and dst in frontier_set and dst != src:
-            anchors.append(dst)
-
-        if not anchors:
-            continue
-
-        accepted = False
-        for anchor in anchors:
-            if int(root_neighbor_count.get(anchor) or 0) >= int(per_root_neighbor_cap):
-                continue
-            root_neighbor_count[anchor] = int(root_neighbor_count.get(anchor) or 0) + 1
-            accepted = True
-        if not accepted:
-            dropped_by_neighbor_cap += 1
-            continue
-
-        out.append(
-            {
-                "source": src,
-                "target": dst,
-                "rank": str(rank),
-                "edge_type": config.EDGE_TYPE,
-                "relation": rel,
-                "source_db": esrc,
-            }
-        )
-
-    return uniq_edges(out), {
-        "scanned_rows": len(srcs),
-        "dropped_by_relation": dropped_by_relation,
-        "dropped_by_neighbor_cap": dropped_by_neighbor_cap,
-    }
+    return _platform_go_edges_from(
+        frontier,
+        rel_filter=rel_filter,
+        query_scan_limit=query_scan_limit,
+        per_root_neighbor_cap=per_root_neighbor_cap,
+        ignore_direction=ignore_direction,
+        execute_ngql_fn=execute_ngql,
+        edge_tag=EDGE_TAG,
+        edge_type=config.EDGE_TYPE,
+        value_wrapper=vw,
+        uniq_edges_fn=uniq_edges,
+    )
 
 
 def _apply_edge_hard_cap(edges: List[Dict[str, Any]], max_edges: int) -> Tuple[List[Dict[str, Any]], int]:
@@ -246,123 +145,27 @@ def _find_shortest_path_candidates_bfs(
     ignore_direction: bool,
     candidate_limit: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    if int(src) == int(dst):
-        return [{"nodes": [int(src)], "edges": []}], {
-            "scanned_rows": 0,
-            "dropped_by_relation": 0,
-            "dropped_by_neighbor_cap": 0,
-        }
-
-    source = int(src)
-    target = int(dst)
-    visited_depth: Dict[int, int] = {source: 0}
-    frontier = [source]
-    parents: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
-    shortest_depth: Optional[int] = None
-    meta = {
-        "scanned_rows": 0,
-        "dropped_by_relation": 0,
-        "dropped_by_neighbor_cap": 0,
-    }
-
-    for depth in range(1, int(max_hop) + 1):
-        if not frontier:
-            break
-
-        frontier_set = set(frontier)
-        batch_edges, batch_meta = _go_edges_from(
-            frontier,
-            rel_filter=rel_filter,
-            query_scan_limit=query_scan_limit,
-            per_root_neighbor_cap=per_root_neighbor_cap,
-            ignore_direction=ignore_direction,
-        )
-        meta["scanned_rows"] += int(batch_meta["scanned_rows"])
-        meta["dropped_by_relation"] += int(batch_meta["dropped_by_relation"])
-        meta["dropped_by_neighbor_cap"] += int(batch_meta["dropped_by_neighbor_cap"])
-        next_frontier: Set[int] = set()
-
-        for edge in batch_edges:
-            u = int(edge["source"])
-            v = int(edge["target"])
-
-            steps: List[Tuple[int, int]] = []
-            if u in frontier_set:
-                steps.append((u, v))
-            if ignore_direction and v in frontier_set:
-                steps.append((v, u))
-
-            for parent, child in steps:
-                prev_depth = visited_depth.get(child)
-                if prev_depth is None:
-                    visited_depth[child] = depth
-                    parents[child] = [(parent, edge)]
-                    next_frontier.add(child)
-                elif prev_depth == depth:
-                    parent_items = parents.setdefault(child, [])
-                    already = False
-                    for existing_parent, existing_edge in parent_items:
-                        if existing_parent == parent and _edge_key(existing_edge) == _edge_key(edge):
-                            already = True
-                            break
-                    if not already and len(parent_items) < _PAIR_PARENT_FANIN_LIMIT:
-                        parent_items.append((parent, edge))
-
-        if visited_depth.get(target) == depth:
-            shortest_depth = depth
-            break
-        frontier = list(next_frontier)
-
-    if shortest_depth is None:
-        return [], meta
-
-    paths: List[Dict[str, Any]] = []
-    seen_path_keys: Set[Tuple[Tuple[int, ...], Tuple[Tuple[int, int, int], ...]]] = set()
-    stack: List[Tuple[int, List[int], List[Dict[str, Any]]]] = [(target, [target], [])]
-
-    while stack and len(paths) < int(candidate_limit):
-        cur, nodes_rev, edges_rev = stack.pop()
-        if cur == source:
-            nodes = list(reversed(nodes_rev))
-            edges = list(reversed(edges_rev))
-            edge_seq = tuple(_edge_key(e) for e in edges)
-            uniq_key = (tuple(nodes), edge_seq)
-            if uniq_key not in seen_path_keys:
-                seen_path_keys.add(uniq_key)
-                paths.append({"nodes": nodes, "edges": edges})
-            continue
-
-        for parent, edge in parents.get(cur, []):
-            if visited_depth.get(parent) != visited_depth.get(cur, 0) - 1:
-                continue
-            stack.append((parent, nodes_rev + [parent], edges_rev + [edge]))
-
-    paths.sort(
-        key=lambda p: (
-            len(p.get("edges") or []),
-            tuple(int(x) for x in (p.get("nodes") or [])),
-            tuple(_edge_key(e) for e in (p.get("edges") or [])),
-        )
+    return _platform_find_shortest_path_candidates_bfs(
+        src=src,
+        dst=dst,
+        max_hop=max_hop,
+        rel_filter=rel_filter,
+        query_scan_limit=query_scan_limit,
+        per_root_neighbor_cap=per_root_neighbor_cap,
+        ignore_direction=ignore_direction,
+        candidate_limit=candidate_limit,
+        go_edges_from_fn=_go_edges_from,
     )
-    return paths[: int(candidate_limit)], meta
 
 
 def relation_types(*, q: str = "", limit: int = 100, offset: int = 0) -> Dict[str, Any]:
-    try:
-        return metadata_service.query_relation_types(q=q, limit=limit, offset=offset)
-    except Exception as exc:
-        logger.warning("relation_types metadata fallback: %s", exc)
-        safe_limit = max(1, min(int(limit or 100), 200))
-        safe_offset = max(0, int(offset or 0))
-        return {
-            "items": [],
-            "q": str(q or "").strip().lower(),
-            "limit": safe_limit,
-            "offset": safe_offset,
-            "next_offset": None,
-            "has_more": False,
-            "matched_total": 0,
-        }
+    return relation_catalog_service.query_relation_types(
+        q=q,
+        limit=limit,
+        offset=offset,
+        query_relation_types_fn=metadata_service.query_relation_types,
+        logger_instance=logger,
+    )
 
 
 def subgraph(req: SubgraphRequest) -> Dict[str, Any]:

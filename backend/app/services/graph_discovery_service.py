@@ -6,10 +6,14 @@ from fastapi import HTTPException
 
 from app.core import config
 from app.db.nebula import EDGE_TAG, execute_ngql
+from app.platform.graph.traversal_service import (
+    _fetch_entity_nodes as _platform_fetch_entity_nodes,
+    _find_shortest_path_candidates_bfs,
+    _go_edges_from as _platform_go_edges_from,
+)
 from app.schemas.discovery import DiscoveryDroppedReason, GraphDiscoveryRequest
 from app.services.common import truncate_by_degree, uniq_edges, vw
 from app.services.graph_budget import graph_budget
-from app.services.graph_service import _find_shortest_path_candidates_bfs
 
 logger = logging.getLogger(__name__)
 
@@ -263,50 +267,11 @@ def _score_candidate_layered(
 
 
 def _fetch_entity_nodes(node_ids: Iterable[int]) -> Dict[int, Dict[str, Any]]:
-    ids = sorted(set(int(v) for v in node_ids))
-    if not ids:
-        return {}
-
-    vid_list = ",".join(str(x) for x in ids)
-    fetch_ngql = f"""
-    MATCH (v:`Entity`)
-    WHERE id(v) IN [{vid_list}]
-    RETURN id(v) AS vid,
-           v.`Entity`.`entity_name` AS name,
-           v.`Entity`.`entity_type` AS type,
-           v.`Entity`.`entity_raw_id` AS raw_id,
-           v.`Entity`.`source` AS source,
-           v.`Entity`.`description` AS descr
-LIMIT {len(ids)};
-    """
-    fres = execute_ngql(fetch_ngql)
-    if not fres.is_succeeded():
-        raise HTTPException(status_code=500, detail=fres.error_msg())
-
-    vids = fres.column_values("vid")
-    names = fres.column_values("name")
-    types = fres.column_values("type")
-    raw_ids = fres.column_values("raw_id")
-    sources = fres.column_values("source")
-    descs = fres.column_values("descr")
-
-    node_map: Dict[int, Dict[str, Any]] = {}
-    for i in range(len(vids)):
-        vid = int(vw(vids[i]))
-        name = str(vw(names[i]) or "")
-        typ = str(vw(types[i]) or "")
-        raw_id = str(vw(raw_ids[i]) or "")
-        source = str(vw(sources[i]) or "")
-        descr = str(vw(descs[i]) or "")
-        node_map[vid] = {
-            "id": vid,
-            "label": name,
-            "entity_type": typ,
-            "raw_id": raw_id,
-            "source": source,
-            "snippet": (descr[:160] + "…") if descr and len(descr) > 160 else (descr or ""),
-        }
-    return node_map
+    return _platform_fetch_entity_nodes(
+        node_ids,
+        execute_ngql_fn=execute_ngql,
+        value_wrapper=vw,
+    )
 
 
 def _build_dropped_candidate_payload(
@@ -350,86 +315,19 @@ def _go_edges_from(
     query_scan_limit: int,
     per_root_neighbor_cap: int,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    frontier_unique = sorted(set(int(x) for x in frontier))
-    if not frontier_unique:
-        return [], {
-            "scanned_rows": 0,
-            "dropped_by_relation": 0,
-            "dropped_by_neighbor_cap": 0,
-        }
-
-    frontier_set = set(frontier_unique)
-    id_list = ",".join(str(x) for x in frontier_unique)
-    ngql = f"""
-    GO FROM {id_list} OVER {EDGE_TAG} BIDIRECT
-    YIELD src(edge) AS src,
-          dst(edge) AS dst,
-          rank(edge) AS rank,
-          properties(edge).relation AS relation,
-          properties(edge).source AS esource
-    | LIMIT {int(query_scan_limit)};
-    """
-    res = execute_ngql(ngql)
-    if not res.is_succeeded():
-        raise HTTPException(status_code=500, detail=res.error_msg())
-
-    srcs = res.column_values("src")
-    dsts = res.column_values("dst")
-    ranks = res.column_values("rank")
-    rels = res.column_values("relation")
-    esources = res.column_values("esource")
-
-    root_neighbor_count: Dict[int, int] = {int(v): 0 for v in frontier_unique}
-    dropped_by_neighbor_cap = 0
-    dropped_by_relation = 0
-    out: List[Dict[str, Any]] = []
-
-    for i in range(len(srcs)):
-        src = int(vw(srcs[i]))
-        dst = int(vw(dsts[i]))
-        rank = int(vw(ranks[i]) or 0)
-        relation = str(vw(rels[i]) or "")
-        source_db = str(vw(esources[i]) or "")
-        relation_norm = _normalize_key(relation)
-
-        if rel_filter and relation_norm not in rel_filter:
-            dropped_by_relation += 1
-            continue
-
-        anchors: List[int] = []
-        if src in frontier_set:
-            anchors.append(src)
-        if dst in frontier_set and dst != src:
-            anchors.append(dst)
-        if not anchors:
-            continue
-
-        accepted = False
-        for anchor in anchors:
-            if int(root_neighbor_count.get(anchor) or 0) >= int(per_root_neighbor_cap):
-                continue
-            root_neighbor_count[anchor] = int(root_neighbor_count.get(anchor) or 0) + 1
-            accepted = True
-        if not accepted:
-            dropped_by_neighbor_cap += 1
-            continue
-
-        out.append(
-            {
-                "source": src,
-                "target": dst,
-                "rank": str(rank),
-                "edge_type": config.EDGE_TYPE,
-                "relation": relation,
-                "source_db": source_db,
-            }
-        )
-
-    return uniq_edges(out), {
-        "scanned_rows": len(srcs),
-        "dropped_by_relation": dropped_by_relation,
-        "dropped_by_neighbor_cap": dropped_by_neighbor_cap,
-    }
+    return _platform_go_edges_from(
+        frontier,
+        rel_filter=rel_filter,
+        query_scan_limit=query_scan_limit,
+        per_root_neighbor_cap=per_root_neighbor_cap,
+        ignore_direction=True,
+        execute_ngql_fn=execute_ngql,
+        edge_tag=EDGE_TAG,
+        edge_type=config.EDGE_TYPE,
+        value_wrapper=vw,
+        uniq_edges_fn=uniq_edges,
+        relation_key_fn=_normalize_key,
+    )
 
 
 def _edge_sort_key(edge: Dict[str, Any]) -> Tuple[Any, ...]:

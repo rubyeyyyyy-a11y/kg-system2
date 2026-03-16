@@ -98,6 +98,13 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
             <div style={{ fontSize: 13, color: "#5b4b38" }}>
               sources={selectedJob.sources.map((item) => `${item.filename}:${item.inferred_kind}`).join(" | ") || "-"}
             </div>
+            <div data-testid="import-job-closure-summary" style={{ fontSize: 13, color: "#5b4b38" }}>
+              searchable=
+              {selectedJob.completion_summary == null ? "-" : selectedJob.completion_summary.searchable ? "yes" : "no"} | search_status=
+              {selectedJob.completion_summary?.search_status || "-"} | index_status=
+              {selectedJob.index_status_snapshot?.status || selectedJob.completion_summary?.index_status || "-"} | canonical_docs=
+              {selectedJob.index_status_snapshot?.doc_count ?? 0}
+            </div>
 
             <div style={{ display: "grid", gap: 10 }}>
               <strong style={{ fontSize: 14 }}>Per-Target Artifacts</strong>
