@@ -28,6 +28,7 @@
 - 搜索主链路已切到 ES-first。
 - Nebula 不再承担默认全图扫描式检索，只负责 VID 详情与受限图查询。
 - 兼容入口保留在 `/api/search`、`/api/suggest`、`/api/suggest_raw_id`，后端由 v2 service 承接。
+- 2026-03-16 起，`fallback_search.py` 与旧 `search_service.search/suggest/suggest_raw_id` 已删除，不再保留旧检索兜底。
 
 关键文件：
 
@@ -35,7 +36,6 @@
 - `backend/app/routers/search_v2.py`
 - `backend/app/services/search_v2/service.py`
 - `backend/app/services/search_v2/budget.py`
-- `backend/app/services/fallback_search.py`
 
 ### 2.2 metadata 与 relation_types
 
@@ -44,7 +44,7 @@
 - `/api/relation_types` 当前契约为：
   - `GET /api/relation_types?q=&limit=100&offset=0`
   - 返回 `items / matched_total / next_offset / has_more`
-- 前端关系筛选已切为 searchable / incremental 模式，不再首屏阻塞拉全量列表。
+- 前端 discovery 主链继续消费 metadata；旧 relation filter 面板已删除。
 
 关键文件：
 
@@ -52,13 +52,13 @@
 - `backend/app/services/graph_service.py`
 - `backend/app/schemas/graph.py`
 - `frontend/src/api/kg.ts`
-- `frontend/src/components/RelationFilter/RelationFilterPanel.tsx`
-- `frontend/src/hooks/useRelationFilter.ts`
-- `frontend/src/App.tsx`
+- `frontend/src/components/DiscoveryPanel.tsx`
+- `frontend/src/app/AppShell.tsx`
 
 ### 2.3 图查询预算
 
-- `subgraph / expand / multi_entity_graph` 都已纳入统一预算控制。
+- `subgraph / expand / graph/discovery` 已纳入正式预算控制。
+- 旧 `multi_entity_graph*` 已删除，不再属于正式能力面。
 - 返回体中包含 `truncated / dropped_* / budget_applied`，前端已对裁剪和降级信息做 notice 呈现。
 
 关键文件：

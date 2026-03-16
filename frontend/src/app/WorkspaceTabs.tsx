@@ -1,4 +1,4 @@
-export type WorkspaceMode = "legacy" | "discovery" | "import";
+export type WorkspaceMode = "discovery" | "import";
 
 type WorkspaceTabsProps = {
   workspaceMode: WorkspaceMode;
@@ -19,13 +19,6 @@ function buttonStyle(active: boolean, activeBackground: string) {
 export function WorkspaceTabs({ workspaceMode, onSelectMode }: WorkspaceTabsProps) {
   return (
     <>
-      <button
-        data-testid="workspace-tab-legacy"
-        onClick={() => onSelectMode("legacy")}
-        style={buttonStyle(workspaceMode === "legacy", "#e6f4ff")}
-      >
-        旧模块
-      </button>
       <button
         data-testid="workspace-tab-discovery"
         onClick={() => onSelectMode("discovery")}

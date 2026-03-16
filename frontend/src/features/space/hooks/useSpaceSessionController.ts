@@ -6,12 +6,10 @@ import { useSpaces } from "./useSpaces";
 import { useSpaceSwitchCoordinator } from "./useSpaceSwitchCoordinator";
 
 export function useSpaceSessionController({
-  legacyResetRef,
   discoveryResetRef,
   pageResetRef,
   onSwitchNotice,
 }: {
-  legacyResetRef: MutableRefObject<(nextSpace: string) => void>;
   discoveryResetRef: MutableRefObject<(nextSpace: string) => void>;
   pageResetRef: MutableRefObject<(nextSpace: string) => void>;
   onSwitchNotice?: (notice: { level: "error" | "warn" | "info"; message: string } | null) => void;
@@ -32,12 +30,11 @@ export function useSpaceSessionController({
 
   const resetSpaceScopedState = useCallback(
     (nextSpace: string) => {
-      legacyResetRef.current(nextSpace);
       discoveryResetRef.current(nextSpace);
       pageResetRef.current(nextSpace);
       onSwitchNotice?.({ level: "info", message: `已切换到 ${nextSpace}，搜索与统一关系发现范围已同步到该 space。` });
     },
-    [discoveryResetRef, legacyResetRef, onSwitchNotice, pageResetRef]
+    [discoveryResetRef, onSwitchNotice, pageResetRef]
   );
 
   const spaceSwitchState = useSpaceSwitchCoordinator({

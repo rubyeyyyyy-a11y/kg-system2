@@ -167,8 +167,8 @@
 
 补充验证：
 - `POST /api/search` with `include_edges=true` -> `meta.include_edges_legacy_note` 存在，兼容提示生效。
-- `POST /api/expand`、`POST /api/multi_entity_graph` 返回 `stats.dropped_*` 与 `truncated`。
-- 高风险请求期聚合路径检查：`rg -n 'COUNT\\(|DISTINCT' backend/app/services/search_service.py backend/app/services/graph_service.py backend/app/routers -S` 返回空（未发现实时全图聚合字样）。
+- `POST /api/expand` 返回 `stats.dropped_*` 与 `truncated`；`/api/multi_entity_graph` 已于 2026-03-16 下线。
+- 高风险请求期聚合路径检查：`rg -n 'COUNT\\(|DISTINCT' backend/app/services/graph_service.py backend/app/routers backend/app/services/search_v2 -S` 返回空（未发现实时全图聚合字样）。
 - `scripts/smoke_api.sh` 已补 discovery 校验，后续标准 smoke 会覆盖新接口。
 
 ### 8.3 关键前端交互验证

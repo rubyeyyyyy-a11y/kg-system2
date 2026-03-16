@@ -3,9 +3,7 @@ import { expect, test } from "@playwright/test";
 import {
   expectDiscoveryPreviewContains,
   fillDiscoverySearch,
-  fillLegacySearch,
   goToDiscovery,
-  goToLegacy,
   gotoApp,
   multiSpaceFixture,
   switchSpace,
@@ -36,38 +34,6 @@ function discoveryCandidateResponse(spaceName: string, label: string, vid: numbe
     has_more: false,
     next_page: null,
     meta: { request_id: `req-${spaceName}` },
-    space_meta: {
-      space_name: spaceName,
-      graph_status: readiness.graphStatus,
-      search_status: readiness.searchStatus,
-      coverage_pct: 100,
-      index_status: {
-        status: readiness.indexStatus,
-        doc_count: 1,
-        coverage_pct: 100,
-      },
-    },
-  };
-}
-
-function legacySearchResponse(spaceName: string, label: string, vid: number) {
-  const readiness = spaceName === demoSpace.spaceName ? demoSpace.readiness : smallSpace.readiness;
-  return {
-    nodes: [
-      {
-        id: vid,
-        label,
-        entity_type: "disease",
-        raw_id: `${spaceName}:${vid}`,
-        source: "mock",
-        score: 77,
-        snippet: `${label} snippet`,
-      },
-    ],
-    edges: [],
-    total_candidates: 1,
-    truncated: false,
-    meta: { request_id: `legacy-${spaceName}` },
     space_meta: {
       space_name: spaceName,
       graph_status: readiness.graphStatus,
@@ -189,21 +155,13 @@ test("discovery candidate load subgraph enters formal drilldown without legacy f
   expect(subgraphRequest).toMatchObject({ root_vid: demoSpace.expected.vid });
 });
 
-test("space switch reset freezes legacy discovery and page scoped reset", async ({ page }) => {
+test("space switch reset clears discovery result and drilldown state per space", async ({ page }) => {
   await page.route("**/api/discovery/entity_candidates", async (route) => {
     const spaceName = String(route.request().headers()["x-kg-space"] || demoSpace.spaceName);
     const payload =
       spaceName === demoSpace.spaceName
         ? discoveryCandidateResponse(demoSpace.spaceName, demoSpace.expected.label, demoSpace.expected.vid, demoSpace.expected.rawId)
         : discoveryCandidateResponse(smallSpace.spaceName, smallSpace.expected.label, smallSpace.expected.vid, smallSpace.expected.rawId);
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
-  });
-  await page.route("**/api/search", async (route) => {
-    const spaceName = String(route.request().headers()["x-kg-space"] || demoSpace.spaceName);
-    const payload =
-      spaceName === demoSpace.spaceName
-        ? legacySearchResponse(demoSpace.spaceName, demoSpace.expected.label, demoSpace.expected.vid)
-        : legacySearchResponse(smallSpace.spaceName, smallSpace.expected.label, smallSpace.expected.vid);
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(payload) });
   });
   await page.route("**/api/subgraph", async (route) => {
@@ -259,12 +217,6 @@ test("space switch reset freezes legacy discovery and page scoped reset", async 
   await gotoApp(page);
   await switchSpace(page, demoSpace);
 
-  await goToLegacy(page);
-  await fillLegacySearch(page, demoSpace.searchTerm);
-  await page.getByTestId("legacy-search-submit").click();
-  await expect(page.locator(`[data-testid="legacy-search-result-item"][data-label="${demoSpace.expected.label}"]`)).toHaveCount(1);
-
-  await goToDiscovery(page);
   await fillDiscoverySearch(page, demoSpace.searchTerm);
   await page.getByTestId("discovery-search-submit").click();
   await expect(page.locator(`[data-testid="discovery-candidate-item"][data-label="${demoSpace.expected.label}"]`)).toHaveCount(1);
@@ -274,10 +226,6 @@ test("space switch reset freezes legacy discovery and page scoped reset", async 
 
   await switchSpace(page, smallSpace);
 
-  await goToLegacy(page);
-  await expect(page.locator(`[data-testid="legacy-search-result-item"][data-label="${demoSpace.expected.label}"]`)).toHaveCount(0);
-
-  await goToDiscovery(page);
   await expect(page.locator(`[data-testid="discovery-candidate-item"][data-label="${demoSpace.expected.label}"]`)).toHaveCount(0);
   await expect(page.locator(`[data-testid="discovery-preview-item"][data-label="${demoSpace.expected.label}"]`)).toHaveCount(0);
   await expect(page.getByTestId("discovery-result-anchor")).toHaveAttribute("data-state", "empty");

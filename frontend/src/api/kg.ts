@@ -4,12 +4,9 @@ import type {
   EdgePatchResp,
   EditableFieldsResp,
   EntityTypeItem,
-  EdgeSearchResp,
-  EdgeSuggestResp,
   DiscoveryEntityCandidatesResp,
   GraphDiscoveryExpandResp,
   GraphDiscoveryResp,
-  MultiEntityGraphResp,
   ExpandResp,
   NodeDetailResp,
   NodePatchResp,
@@ -67,51 +64,6 @@ type RawIdSuggestParams = {
   limit: number;
   entity_type?: string;
   source?: string;
-  signal?: AbortSignal;
-  spaceName?: string;
-};
-
-type EdgeSuggestParams = {
-  q: string;
-  limit: number;
-  relation?: string;
-  source_db?: string;
-  signal?: AbortSignal;
-  spaceName?: string;
-};
-
-type EdgeSearchParams = {
-  q: string;
-  search_in_relation: boolean;
-  search_in_props: boolean;
-  source_db: string | null;
-  relation: string | null;
-  limit: number;
-  signal?: AbortSignal;
-  spaceName?: string;
-};
-
-type MultiEntityGraphParams = {
-  vids: number[];
-  direct_only: boolean;
-  explain_paths: boolean;
-  k: number;
-  relations: string[];
-  max_nodes: number;
-  max_edges: number;
-  per_pair_path_limit: number;
-  ignore_direction: boolean;
-  signal?: AbortSignal;
-  spaceName?: string;
-};
-
-type MultiEntityGraphApplyPathsParams = {
-  base_request: MultiEntityGraphParams;
-  choices: Array<{
-    u: number;
-    v: number;
-    chosen_index: number;
-  }>;
   signal?: AbortSignal;
   spaceName?: string;
 };
@@ -271,38 +223,6 @@ export async function suggestRawId({
   if (source?.trim()) params.set("source", source.trim());
 
   return apiGet<RawIdSuggestResp>(`/api/suggest_raw_id?${params.toString()}`, { signal, spaceName });
-}
-
-export async function edgeSuggest({
-  q,
-  limit,
-  relation,
-  source_db,
-  signal,
-  spaceName,
-}: EdgeSuggestParams): Promise<EdgeSuggestResp> {
-  const params = new URLSearchParams();
-  params.set("q", q);
-  params.set("limit", String(limit));
-  if (relation?.trim()) params.set("relation", relation.trim());
-  if (source_db?.trim()) params.set("source_db", source_db.trim());
-
-  return apiGet<EdgeSuggestResp>(`/api/edge_suggest?${params.toString()}`, { signal, spaceName });
-}
-
-export async function edgeSearch(body: EdgeSearchParams): Promise<EdgeSearchResp> {
-  const { signal, spaceName, ...payload } = body;
-  return apiPost<EdgeSearchResp>("/api/edge_search", payload, { signal, spaceName });
-}
-
-export async function multiEntityGraph(body: MultiEntityGraphParams): Promise<MultiEntityGraphResp> {
-  const { signal, spaceName, ...payload } = body;
-  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph", payload, { signal, spaceName });
-}
-
-export async function multiEntityGraphApplyPaths(body: MultiEntityGraphApplyPathsParams): Promise<MultiEntityGraphResp> {
-  const { signal, spaceName, ...payload } = body;
-  return apiPost<MultiEntityGraphResp>("/api/multi_entity_graph_apply_paths", payload, { signal, spaceName });
 }
 
 export async function graphDiscovery(body: GraphDiscoveryParams): Promise<GraphDiscoveryResp> {

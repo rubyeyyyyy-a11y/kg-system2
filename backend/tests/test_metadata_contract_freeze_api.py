@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from app.core.space_context import get_current_space
 from app.main import app
-from app.services import metadata_service, search_service
+from app.platform.metadata import entity_catalog_service
+from app.services import metadata_service
 from app.services.spaces import registry_service
 from app.services.spaces.models import SpaceSummary
 
@@ -76,7 +77,7 @@ class MetadataApiContractFreezeTest(unittest.TestCase):
             raise RuntimeError(f"unexpected space {current_space}")
 
         with (
-            mock.patch("app.services.search_service.metadata_service.list_entity_types", side_effect=fake_list_entity_types),
+            mock.patch("app.routers.search.metadata_service.list_entity_types", side_effect=fake_list_entity_types),
             self._client() as client,
         ):
             demo_response = client.get("/api/entity_types")
@@ -91,17 +92,17 @@ class MetadataApiContractFreezeTest(unittest.TestCase):
             ],
         )
         self.assertEqual(empty_response.status_code, 200, empty_response.text)
-        self.assertEqual(empty_response.json(), search_service.FALLBACK_ENTITY_TYPES)
+        self.assertEqual(empty_response.json(), entity_catalog_service.FALLBACK_ENTITY_TYPES)
 
     def test_entity_types_contract_freeze_fallback_list_on_error(self):
         with (
-            mock.patch("app.services.search_service.metadata_service.list_entity_types", side_effect=RuntimeError("metadata down")),
+            mock.patch("app.routers.search.metadata_service.list_entity_types", side_effect=RuntimeError("metadata down")),
             self._client() as client,
         ):
             response = client.get("/api/entity_types")
 
         self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json(), search_service.FALLBACK_ENTITY_TYPES)
+        self.assertEqual(response.json(), entity_catalog_service.FALLBACK_ENTITY_TYPES)
 
     def test_relation_types_contract_freeze(self):
         with self._client() as client:

@@ -2,30 +2,16 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import {
   edgeDetail as edgeDetailApi,
-  edgeSearch as edgeSearchApi,
   graphDiscovery as graphDiscoveryApi,
   patchEdge as patchEdgeApi,
   patchNode as patchNodeApi,
-  multiEntityGraph as multiEntityGraphApi,
-  multiEntityGraphApplyPaths as multiEntityGraphApplyPathsApi,
   nodeDetail as nodeDetailApi,
-  relationTypes as relationTypesApi,
-  search as searchApi,
 } from "../api/kg";
 import { WorkspaceShell, type UiNotice } from "./WorkspaceShell";
 import { WorkspaceTabs, type WorkspaceMode } from "./WorkspaceTabs";
-import {
-  DiscoveryWorkspaceSidebar,
-  DiscoveryWorkspaceTopBar,
-} from "../features/discovery/DiscoveryWorkspace";
+import { DiscoveryWorkspaceSidebar, DiscoveryWorkspaceTopBar } from "../features/discovery/DiscoveryWorkspace";
 import { useDiscoverySessionController } from "../features/discovery/hooks/useDiscoverySessionController";
 import { ImportWorkspace } from "../features/import/ImportWorkspace";
-import {
-  LegacyWorkspaceRelationFilter,
-  LegacyWorkspaceSidebar,
-  LegacyWorkspaceTopBar,
-} from "../features/legacy/LegacyWorkspace";
-import { useLegacySearchSessionController } from "../features/legacy/hooks/useLegacySearchSessionController";
 import { useSpaceSessionController } from "../features/space/hooks/useSpaceSessionController";
 import { useDiscoveryEntityDetail } from "../hooks/useDiscoveryEntityDetail";
 import { useDiscoveryGraphState } from "../hooks/useDiscoveryGraphState";
@@ -35,49 +21,25 @@ import { useEntityTypeOptions } from "../hooks/useEntityTypeOptions";
 import { useGraphData } from "../hooks/useGraphData";
 import { useGraphViewModel } from "../hooks/useGraphViewModel";
 import { useGraphViewportController } from "../hooks/useGraphViewportController";
-import { useRelationFilter } from "../hooks/useRelationFilter";
 import { useVisibilityRanking } from "../hooks/useVisibilityRanking";
 import { parseApiError } from "../utils/httpError";
 import type {
   EdgeBrief,
   EdgeDetailResp,
   EdgePatchResp,
-  EdgeSearchItem,
   DiscoveryEntityCandidateItem,
   GraphDiscoveryResp,
-  MultiEntityGraphResp,
   NodeBrief,
   NodeDetailResp,
   NodePatchResp,
-  PairPathCandidate,
-  RelationTypeItem,
   Sel,
   SelectionSource,
   SuggestItem,
 } from "../types/kg";
-import { edgeKey, findEdgeIdByIdentity, isSameEdge, pairKey, relationDisplay } from "../utils/kg";
+import { edgeKey, relationDisplay } from "../utils/kg";
 import "../styles/layout.css";
 
-type MultiGraphParams = {
-  selectedEntities: SuggestItem[];
-  directOnly: boolean;
-  explainPaths: boolean;
-  k: 2 | 3;
-};
-
-type MultiGraphRequest = {
-  vids: number[];
-  direct_only: boolean;
-  explain_paths: boolean;
-  k: 2 | 3;
-  relations: string[];
-  max_nodes: number;
-  max_edges: number;
-  per_pair_path_limit: number;
-  ignore_direction: boolean;
-};
-
-type GraphSourceMode = "single" | "multi" | "discovery" | "drilldown";
+type GraphSourceMode = "discovery" | "drilldown";
 
 type DiscoveryRequest = {
   seed_vids: number[];
@@ -107,7 +69,6 @@ const SIDEBAR_MIN_WIDTH = 320;
 const SIDEBAR_MAX_WIDTH = 640;
 const SIDEBAR_DEFAULT_WIDTH = 420;
 const EDGE_TYPE_DEFAULT = "REL2";
-const RELATION_TYPES_PAGE_SIZE = 100;
 const EMPTY_GRAPH_NODES: NodeBrief[] = [];
 const EMPTY_GRAPH_EDGES: EdgeBrief[] = [];
 const DISCOVERY_NONE_ENTITY_TYPE = "__none_entity_type_selected__";
@@ -127,21 +88,6 @@ function loadSidebarWidth(key: string) {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed)) return SIDEBAR_DEFAULT_WIDTH;
   return clampSidebarWidth(parsed);
-}
-
-function mergeRelationTypeItems(prev: RelationTypeItem[], next: RelationTypeItem[]) {
-  const merged = new Map<string, RelationTypeItem>();
-  for (const item of prev) {
-    const key = String(item.relation_type || "").trim();
-    if (!key) continue;
-    merged.set(key, item);
-  }
-  for (const item of next) {
-    const key = String(item.relation_type || "").trim();
-    if (!key) continue;
-    merged.set(key, item);
-  }
-  return Array.from(merged.values());
 }
 
 function LoadingPanel({ message, style }: { message: string; style?: CSSProperties }) {
@@ -225,7 +171,6 @@ function requestSpaceOrFallback(result: { request_space?: string; space_meta?: {
 export default function AppShell() {
   const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>("import");
   const [uiNotice, setUiNotice] = useState<UiNotice | null>(null);
-  const legacyResetRef = useRef<(nextSpace: string) => void>(() => undefined);
   const discoveryResetRef = useRef<(nextSpace: string) => void>(() => undefined);
   const pageResetRef = useRef<(nextSpace: string) => void>(() => undefined);
 
@@ -250,7 +195,6 @@ export default function AppShell() {
     spaceSwitchPhaseLabel,
     guardSpaceScopedRequest,
   } = useSpaceSessionController({
-    legacyResetRef,
     discoveryResetRef,
     pageResetRef,
     onSwitchNotice: setUiNotice,
@@ -258,7 +202,6 @@ export default function AppShell() {
 
   const {
     options: entityTypeOptions,
-    usedFallback: entityTypeFallbackUsed,
     ensureLoaded: ensureEntityTypesLoaded,
   } = useEntityTypeOptions({
     deferMs: 1200,
@@ -266,119 +209,6 @@ export default function AppShell() {
     enabled: !currentSpaceStore.isSwitching,
     spaceName: effectiveCurrentSpace,
   });
-
-  const legacySession = useLegacySearchSessionController({
-    currentSpaceName: effectiveCurrentSpace,
-    spaceScopeKey: effectiveCurrentSpace,
-    onSearch: () => {
-      void runSearch();
-    },
-    onEdgeSearch: () => {
-      void runEdgeSearch();
-    },
-    onSelectNameSuggest: (item) => {
-      void runSearchWithParams(item.label, entityRawId);
-    },
-    onSelectRawIdSuggest: (item) => {
-      void runSearchWithParams(item.label || q, item.entity_raw_id);
-    },
-    onSelectEdgeSuggest: (item) => {
-      setEdgeQ(relationDisplay(item.relation) || item.relation);
-      void handleSelectEdgeCandidate(item);
-    },
-  });
-
-  const {
-    q,
-    searchName,
-    setSearchName,
-    searchDesc,
-    setSearchDesc,
-    entityType,
-    setEntityType,
-    entityRawId,
-    source,
-    setSource,
-    loadingSearch,
-    setLoadingSearch,
-    searchData,
-    setSearchData,
-    searchSelectedVid,
-    setSearchSelectedVid,
-    edgeQ,
-    setEdgeQ,
-    edgeSearchInRelation,
-    setEdgeSearchInRelation,
-    edgeSearchInProps,
-    setEdgeSearchInProps,
-    edgeSearchSourceDb,
-    setEdgeSearchSourceDb,
-    edgeSearchRelation,
-    setEdgeSearchRelation,
-    loadingEdgeSearch,
-    setLoadingEdgeSearch,
-    edgeSearchData,
-    setEdgeSearchData,
-    edgeSearchNotice,
-    setEdgeSearchNotice,
-    pendingEdgeLocate,
-    setPendingEdgeLocate,
-    loadingMultiGraph,
-    setLoadingMultiGraph,
-    loadingApplyPathChoice,
-    setLoadingApplyPathChoice,
-    legacyWorkspaceSession,
-    setLegacyWorkspaceSession,
-    lastMultiGraphParams,
-    setLastMultiGraphParams,
-    lastMultiGraphRequest,
-    setLastMultiGraphRequest,
-    pathCandidates,
-    setPathCandidates,
-    chosenPathByPair,
-    setChosenPathByPair,
-    appliedExtraPaths,
-    setAppliedExtraPaths,
-    searchAbortRef,
-    edgeSearchAbortRef,
-    multiGraphAbortRef,
-    applyPathAbortRef,
-    suggestOpen,
-    suggestItems,
-    suggestLoading,
-    suggestError,
-    suggestHighlightIndex,
-    suggestWrapRef,
-    onInputChange,
-    onKeyDown,
-    setSuggestHighlightIndex,
-    closeSuggestPanel,
-    selectSuggestCandidate,
-    rawIdSuggestOpen,
-    rawIdSuggestItems,
-    rawIdSuggestLoading,
-    rawIdSuggestError,
-    rawIdSuggestHighlightIndex,
-    rawIdSuggestWrapRef,
-    onRawIdInputChange,
-    onRawIdKeyDown,
-    setRawIdSuggestHighlightIndex,
-    closeRawIdSuggestPanel,
-    selectRawIdSuggestCandidate,
-    edgeSuggestOpen,
-    edgeSuggestItems,
-    edgeSuggestLoading,
-    edgeSuggestError,
-    edgeSuggestHighlightIndex,
-    edgeSuggestWrapRef,
-    onEdgeInputChange,
-    onEdgeKeyDown,
-    setEdgeSuggestHighlightIndex,
-    closeEdgeSuggestPanel,
-    selectEdgeSuggestCandidate,
-    abortSpaceScopedRequests,
-    resetForSpaceChange: resetLegacySearchSession,
-  } = legacySession;
 
   const discoverySession = useDiscoverySessionController({
     currentSpaceName: effectiveCurrentSpace,
@@ -410,7 +240,7 @@ export default function AppShell() {
     resetForSpaceChange: resetDiscoverySession,
   } = discoverySession;
 
-  const [graphSourceMode, setGraphSourceMode] = useState<GraphSourceMode>("single");
+  const [graphSourceMode, setGraphSourceMode] = useState<GraphSourceMode>("discovery");
 
   const [sel, setSel] = useState<Sel>({ kind: "none" });
   const [nodeDetail, setNodeDetail] = useState<NodeDetailResp | null>(null);
@@ -419,13 +249,6 @@ export default function AppShell() {
   const [selectedEdgeGraphId, setSelectedEdgeGraphId] = useState<string | null>(null);
   const [discoveryExpandProbeNodeId, setDiscoveryExpandProbeNodeId] = useState<number | null>(null);
   const discoveryExpandProbeTokenRef = useRef(0);
-
-  const [relationTypeCatalogItems, setRelationTypeCatalogItems] = useState<RelationTypeItem[]>([]);
-  const [relationTypeCatalogQuery, setRelationTypeCatalogQuery] = useState("");
-  const [relationTypeCatalogMatchedTotal, setRelationTypeCatalogMatchedTotal] = useState(0);
-  const [relationTypeCatalogNextOffset, setRelationTypeCatalogNextOffset] = useState<number | null>(0);
-  const [relationTypeCatalogHasMore, setRelationTypeCatalogHasMore] = useState(false);
-  const [relationTypeCatalogLoading, setRelationTypeCatalogLoading] = useState(false);
 
   const [renderNodeLabels, setRenderNodeLabels] = useState(true);
   const [renderEdgeLabels, setRenderEdgeLabels] = useState(false);
@@ -441,18 +264,13 @@ export default function AppShell() {
   const { viewportRequest, requestFocusNode, requestFitView } = useGraphViewportController();
 
   useEffect(() => {
-    legacyResetRef.current = resetLegacySearchSession;
-  }, [resetLegacySearchSession]);
-
-  useEffect(() => {
     discoveryResetRef.current = resetDiscoverySession;
   }, [resetDiscoverySession]);
 
   const abortAllSpaceScopedRequests = useCallback(() => {
-    abortSpaceScopedRequests();
     discoveryAbortRef.current?.abort();
     discoveryAbortRef.current = null;
-  }, [abortSpaceScopedRequests, discoveryAbortRef]);
+  }, [discoveryAbortRef]);
 
   const loadNodeDetail = useCallback(async (vid: number) => {
     const requestSpace = activeSpaceRef.current;
@@ -520,20 +338,6 @@ export default function AppShell() {
       source: resp.updated.source ?? undefined,
       snippet: resp.updated.description ?? undefined,
     });
-    setSearchData((prev) => ({
-      ...prev,
-      nodes: prev.nodes.map((n) =>
-        n.id === vid
-          ? {
-              ...n,
-              label: resp.updated.entity_name ?? n.label,
-              entity_type: resp.updated.entity_type ?? n.entity_type,
-              source: resp.updated.source ?? n.source,
-              snippet: resp.updated.description ?? n.snippet,
-            }
-          : n
-      ),
-    }));
     setNodeDetail((prev) => {
       if (!prev || prev.vid !== vid) return prev;
       return {
@@ -579,41 +383,6 @@ export default function AppShell() {
       source: resp.updated.source ?? undefined,
       snippet: resp.updated.description ?? undefined,
       description: resp.updated.description ?? undefined,
-    });
-    setLastMultiGraphParams((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        selectedEntities: prev.selectedEntities.map((item) =>
-          item.vid === vid
-            ? {
-                ...item,
-                label: resp.updated.entity_name ?? item.label,
-                entity_type: resp.updated.entity_type ?? item.entity_type,
-                source: resp.updated.source ?? item.source,
-              }
-            : item
-        ),
-      };
-    });
-    setLegacyWorkspaceSession((prev) => {
-      if (!prev || prev.kind !== "multi") return prev;
-      return {
-        ...prev,
-        params: {
-          ...prev.params,
-          selectedEntities: prev.params.selectedEntities.map((item) =>
-            item.vid === vid
-              ? {
-                  ...item,
-                  label: resp.updated.entity_name ?? item.label,
-                  entity_type: resp.updated.entity_type ?? item.entity_type,
-                  source: resp.updated.source ?? item.source,
-                }
-              : item
-          ),
-        },
-      };
     });
     return resp;
   }
@@ -665,22 +434,6 @@ export default function AppShell() {
         updated_by: resp.updated_by,
       };
     });
-    setEdgeSearchData((prev) => ({
-      ...prev,
-      edges: prev.edges.map((e) => {
-        const same =
-          Number(e.src) === Number(identity.src) &&
-          Number(e.dst) === Number(identity.dst) &&
-          String(e.rank) === String(identity.rank) &&
-          String(e.edge_type || EDGE_TYPE_DEFAULT) === String(identity.edge_type || EDGE_TYPE_DEFAULT);
-        if (!same) return e;
-        return {
-          ...e,
-          relation: resp.updated.relation ?? e.relation,
-          source_db: resp.updated.source ?? e.source_db,
-        };
-      }),
-    }));
     setDiscoveryResult((prev) => {
       if (!prev) return prev;
       return {
@@ -721,9 +474,7 @@ export default function AppShell() {
 
   const {
     rootVid,
-    hop,
     setHop,
-    relations,
     setRelations,
     loadingGraph,
     graphNodes,
@@ -738,7 +489,6 @@ export default function AppShell() {
     panelGroupCollapsed,
     setPanelGroupCollapsed,
     expandProbeByVid,
-    loadSubgraphWithParams,
     loadSubgraph,
     expand1hop,
     reroot1hop,
@@ -750,11 +500,8 @@ export default function AppShell() {
     replaceGraphData,
     updateNodeInGraph,
     updateEdgeInGraph,
-    budgetPresetLabel,
-    canLoadMoreEdges,
-    loadMoreEdges,
-    renderMutation: legacyRenderMutation,
-    requestRelayout: requestLegacyRelayout,
+    renderMutation: drilldownRenderMutation,
+    requestRelayout: requestDrilldownRelayout,
   } = useGraphData({
     spaceName: effectiveCurrentSpace,
     scopeKey: effectiveCurrentSpace,
@@ -764,7 +511,7 @@ export default function AppShell() {
     onNotice: (level, message) => setUiNotice({ level, message }),
   });
 
-  const graphBusy = loadingGraph || loadingMultiGraph || loadingDiscovery || loadingApplyPathChoice;
+  const graphBusy = loadingGraph || loadingDiscovery;
   const [leftW, setLeftW] = useState<number>(() => loadSidebarWidth(LEFT_WIDTH_KEY));
   const [rightW, setRightW] = useState<number>(() => loadSidebarWidth(RIGHT_WIDTH_KEY));
   const resizingSideRef = useRef<"left" | "right" | null>(null);
@@ -821,44 +568,6 @@ export default function AppShell() {
       }) as CSSProperties,
     [leftW, rightW]
   );
-
-  const relationFilter = useRelationFilter({
-    scopeKey: effectiveCurrentSpace,
-    appliedRelations: relations,
-    graphNodes,
-    graphEdges,
-    rootVid,
-  });
-
-  function clearMultiPathState() {
-    setLastMultiGraphRequest(null);
-    setPathCandidates([]);
-    setChosenPathByPair({});
-    setAppliedExtraPaths({});
-  }
-
-  function rememberSingleLegacySession(nextRoot: number, nextHop: number, nextRelations: string[]) {
-    setLegacyWorkspaceSession({
-      kind: "single",
-      rootVid: nextRoot,
-      hop: nextHop,
-      relations: [...nextRelations],
-    });
-  }
-
-  function rememberCurrentLegacySession() {
-    if (graphSourceMode === "multi" && lastMultiGraphParams) {
-      setLegacyWorkspaceSession({
-        kind: "multi",
-        params: { ...lastMultiGraphParams, selectedEntities: [...lastMultiGraphParams.selectedEntities] },
-        relations: [...relations],
-      });
-      return;
-    }
-    if (graphSourceMode === "single" && rootVid != null) {
-      rememberSingleLegacySession(rootVid, hop, relations);
-    }
-  }
 
   function applyDiscoveryPayload(
     json: GraphDiscoveryResp,
@@ -941,41 +650,12 @@ export default function AppShell() {
       });
     }
     setGraphSourceMode("discovery");
-    setLastMultiGraphParams(null);
-    clearMultiPathState();
     setRenderEdgeLabels(false);
-  }
-
-  async function restoreLegacyWorkspace() {
-    if (legacyWorkspaceSession?.kind === "multi") {
-      setRelations(legacyWorkspaceSession.relations);
-      await runMultiGraph(legacyWorkspaceSession.params, legacyWorkspaceSession.relations);
-      return;
-    }
-    if (legacyWorkspaceSession?.kind === "single") {
-      setGraphSourceMode("single");
-      setHop(legacyWorkspaceSession.hop);
-      setRelations(legacyWorkspaceSession.relations);
-      setLastMultiGraphParams(null);
-      clearMultiPathState();
-      await loadSubgraphWithParams(
-        legacyWorkspaceSession.rootVid,
-        legacyWorkspaceSession.hop,
-        legacyWorkspaceSession.relations
-      );
-      return;
-    }
-    setGraphSourceMode("single");
-    setLastMultiGraphParams(null);
-    clearMultiPathState();
-    clearGraphData();
   }
 
   function restoreDiscoveryWorkspace() {
     if (!discoveryResult || !lastDiscoveryRequest) {
       setGraphSourceMode("discovery");
-      setLastMultiGraphParams(null);
-      clearMultiPathState();
       clearGraphData();
       discoveryGraphState.resetState();
       return;
@@ -991,29 +671,10 @@ export default function AppShell() {
   async function switchWorkspaceMode(nextMode: WorkspaceMode) {
     if (nextMode === workspaceMode) return;
     setUiNotice(null);
-
-    if (nextMode === "import") {
-      setWorkspaceMode("import");
-      return;
-    }
-
+    setWorkspaceMode(nextMode);
     if (nextMode === "discovery") {
-      if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
-      setWorkspaceMode("discovery");
       void ensureEntityTypesLoaded();
-      restoreDiscoveryWorkspace();
-      return;
-    }
-
-    if (graphSourceMode === "drilldown") {
-      setGraphSourceMode("single");
-      setWorkspaceMode("legacy");
-      return;
-    }
-
-    setWorkspaceMode("legacy");
-    if (graphSourceMode === "discovery") {
-      await restoreLegacyWorkspace();
+      if (graphSourceMode === "discovery") restoreDiscoveryWorkspace();
     }
   }
 
@@ -1132,8 +793,6 @@ export default function AppShell() {
       return;
     }
 
-    if (graphSourceMode !== "discovery") rememberCurrentLegacySession();
-    relationFilter.exitPreview();
     discoveryAbortRef.current?.abort();
     const controller = new AbortController();
     discoveryAbortRef.current = controller;
@@ -1168,439 +827,25 @@ export default function AppShell() {
     }
   }
 
-  function buildChosenPathMap(nextCandidates: PairPathCandidate[]): Record<string, number> {
-    const next: Record<string, number> = {};
-    for (const pair of nextCandidates) {
-      const key = pairKey(pair.u, pair.v);
-      if (pair.candidates.length <= 0) {
-        next[key] = -1;
-        continue;
-      }
-      const raw = Number(pair.chosen_index);
-      const safe = Number.isFinite(raw) && raw >= 0 && raw < pair.candidates.length ? raw : 0;
-      next[key] = safe;
-    }
-    return next;
-  }
-
-  function applyMultiGraphPayload(
-    json: MultiEntityGraphResp,
-    selectedEntities: SuggestItem[],
-    root: number,
-    params: MultiGraphParams,
-    request: MultiGraphRequest
-  ) {
-    const nodeMap = new Map<number, NodeBrief>();
-    for (const n of json.nodes || []) nodeMap.set(n.id, n);
-    for (const s of selectedEntities) {
-      if (nodeMap.has(s.vid)) continue;
-      nodeMap.set(s.vid, {
-        id: s.vid,
-        label: s.label,
-        entity_type: s.entity_type || "",
-        source: s.source,
-        score: s.score,
-      });
-    }
-
-    replaceGraphData({
-      rootVid: root,
-      nodes: Array.from(nodeMap.values()),
-      edges: Array.isArray(json.edges) ? json.edges : [],
-      stats: (json.stats || null) as Record<string, unknown> | null,
-    });
-
-    const nextCandidates = Array.isArray(json.path_candidates) ? json.path_candidates : [];
-    setPathCandidates(nextCandidates);
-    setChosenPathByPair(buildChosenPathMap(nextCandidates));
-    setAppliedExtraPaths({});
-    setGraphSourceMode("multi");
-    setLastMultiGraphParams({ ...params, selectedEntities });
-    setLegacyWorkspaceSession({
-      kind: "multi",
-      params: { ...params, selectedEntities: [...selectedEntities] },
-      relations: [...request.relations],
-    });
-    setLastMultiGraphRequest(request);
-  }
-
-  async function runSearchWithParams(nextQ: string, nextEntityRawId: string) {
-    const qTrimmed = nextQ.trim();
-    const rawIdTrimmed = nextEntityRawId.trim();
-    const requestSpace = activeSpaceRef.current;
-    if (!guardSpaceScopedRequest("搜索")) return;
-    if (!qTrimmed && !rawIdTrimmed) return;
-
-    const useRawId = !!rawIdTrimmed;
-    searchAbortRef.current?.abort();
-    const controller = new AbortController();
-    searchAbortRef.current = controller;
-
-    setLoadingSearch(true);
-    setUiNotice(null);
-    try {
-      const json = await searchApi({
-        q: useRawId ? "" : nextQ,
-        search_in_name: useRawId ? false : searchName,
-        search_in_description: useRawId ? false : searchDesc,
-        entity_type: entityType || null,
-        source: source || null,
-        entity_raw_id: rawIdTrimmed || null,
-        entity_raw_id_mode: "contains",
-        include_edges: false,
-        signal: controller.signal,
-        spaceName: requestSpace,
-      });
-      if (activeSpaceRef.current !== requestSpace) return;
-      setSearchData(json);
-      const firstVid = (json.nodes || [])[0]?.id;
-      setSearchSelectedVid(Number.isFinite(firstVid) ? Number(firstVid) : null);
-      const includeEdgesNote =
-        typeof json.meta === "object" && json.meta
-          ? String((json.meta as Record<string, unknown>).include_edges_legacy_note || "")
-          : "";
-      if (includeEdgesNote) {
-        setUiNotice({ level: "info", message: includeEdgesNote });
-      }
-    } catch (e: unknown) {
-      if (e instanceof Error && e.name === "AbortError") {
-        return;
-      }
-      const parsed = parseApiError(e);
-      const base = parsed.message || "搜索失败";
-      setUiNotice({ level: "error", message: `搜索失败：${base}` });
-    } finally {
-      if (searchAbortRef.current === controller) {
-        setLoadingSearch(false);
-      }
-    }
-  }
-
-  async function runSearch() {
-    await runSearchWithParams(q, entityRawId);
-  }
-
-
   useEffect(() => {
     return () => {
       abortAllSpaceScopedRequests();
     };
   }, [abortAllSpaceScopedRequests]);
-  async function runEdgeSearch() {
-    const requestSpace = activeSpaceRef.current;
-    if (!guardSpaceScopedRequest("边搜索")) return;
-    if (!edgeQ.trim()) return;
-    edgeSearchAbortRef.current?.abort();
-    const controller = new AbortController();
-    edgeSearchAbortRef.current = controller;
-    setLoadingEdgeSearch(true);
-    setEdgeSearchNotice(null);
-    try {
-      const json = await edgeSearchApi({
-        q: edgeQ,
-        search_in_relation: edgeSearchInRelation,
-        search_in_props: edgeSearchInProps,
-        source_db: edgeSearchSourceDb || null,
-        relation: edgeSearchRelation || null,
-        limit: 100,
-        signal: controller.signal,
-        spaceName: requestSpace,
-      });
-      if (controller.signal.aborted) return;
-      if (activeSpaceRef.current !== requestSpace) return;
-      setEdgeSearchData(json);
-    } catch (e: unknown) {
-      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
-      const parsed = parseApiError(e);
-      setUiNotice({ level: "error", message: `边搜索失败：${parsed.message}` });
-    } finally {
-      if (edgeSearchAbortRef.current === controller) {
-        edgeSearchAbortRef.current = null;
-        setLoadingEdgeSearch(false);
-      }
-    }
-  }
-
-  async function runMultiGraph(params: MultiGraphParams, overrideRelations?: string[]) {
-    const requestSpace = activeSpaceRef.current;
-    if (!guardSpaceScopedRequest("图谱生成")) return;
-    relationFilter.exitPreview();
-    const seen = new Set<number>();
-    const selectedEntities = params.selectedEntities.filter((x) => {
-      if (seen.has(x.vid)) return false;
-      seen.add(x.vid);
-      return true;
-    });
-
-    if (selectedEntities.length < 2) return;
-    if (selectedEntities.length > 8) {
-      setUiNotice({ level: "warn", message: "多实体关系最多支持 8 个实体，请减少选择后重试。" });
-      return;
-    }
-
-    const vids = selectedEntities.map((x) => x.vid);
-    const reqRelations = overrideRelations ?? relations;
-    const safeK = params.k > 3 ? 3 : params.k < 2 ? 2 : params.k;
-    if (safeK !== params.k) {
-      setUiNotice({ level: "info", message: `k 已自动调整为 ${safeK}（当前仅支持 2~3）。` });
-    }
-    const reqBody: MultiGraphRequest = {
-      vids,
-      direct_only: params.explainPaths ? false : params.directOnly,
-      explain_paths: params.explainPaths,
-      k: safeK as 2 | 3,
-      relations: reqRelations,
-      max_nodes: 300,
-      max_edges: 20000,
-      per_pair_path_limit: 1,
-      ignore_direction: true,
-    };
-
-    multiGraphAbortRef.current?.abort();
-    const controller = new AbortController();
-    multiGraphAbortRef.current = controller;
-    setLoadingMultiGraph(true);
-    setEdgeSearchNotice(null);
-    try {
-      const json = await multiEntityGraphApi({ ...reqBody, signal: controller.signal, spaceName: requestSpace });
-      if (controller.signal.aborted) return;
-      if (activeSpaceRef.current !== requestSpace) return;
-      applyMultiGraphPayload(json, selectedEntities, vids[0], { ...params, k: safeK as 2 | 3 }, reqBody);
-      if (json.stats?.truncated) {
-        setUiNotice({
-          level: "warn",
-          message: `多实体图结果已裁剪：dropped_nodes=${Number(json.stats?.dropped_nodes || 0)} dropped_edges=${Number(json.stats?.dropped_edges || 0)} dropped_neighbors=${Number(json.stats?.dropped_neighbors || 0)}`,
-        });
-      }
-    } catch (e: unknown) {
-      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
-      const parsed = parseApiError(e);
-      setUiNotice({ level: "error", message: `多实体图生成失败：${parsed.message}` });
-    } finally {
-      if (multiGraphAbortRef.current === controller) {
-        multiGraphAbortRef.current = null;
-        setLoadingMultiGraph(false);
-      }
-    }
-  }
-
-  function setChosenPathForPair(u: number, v: number, chosenIndex: number) {
-    const key = pairKey(u, v);
-    setChosenPathByPair((prev) => ({ ...prev, [key]: chosenIndex }));
-  }
-
-  function buildApplyPathChoices(
-    candidates: PairPathCandidate[],
-    chosenMap: Record<string, number>
-  ): Array<{ u: number; v: number; chosen_index: number }> {
-    const out: Array<{ u: number; v: number; chosen_index: number }> = [];
-    for (const pair of candidates) {
-      if (pair.candidates.length <= 0) continue;
-      const key = pairKey(pair.u, pair.v);
-      const raw = chosenMap[key];
-      const fallback = Number(pair.chosen_index);
-      const chosenIndex =
-        Number.isFinite(raw) && raw >= 0 && raw < pair.candidates.length
-          ? raw
-          : Number.isFinite(fallback) && fallback >= 0 && fallback < pair.candidates.length
-            ? fallback
-            : 0;
-      out.push({ u: pair.u, v: pair.v, chosen_index: chosenIndex });
-    }
-    return out;
-  }
-
-  async function applyChosenPathForPair(u: number, v: number) {
-    if (graphSourceMode !== "multi") return;
-    if (!lastMultiGraphRequest || !lastMultiGraphParams) return;
-    if (!guardSpaceScopedRequest("路径应用")) return;
-
-    const target = pathCandidates.find((p) => pairKey(p.u, p.v) === pairKey(u, v));
-    if (!target || target.candidates.length <= 0) return;
-
-    const key = pairKey(u, v);
-    const selectedRaw = chosenPathByPair[key];
-    const selectedIndex =
-      Number.isFinite(selectedRaw) && selectedRaw >= 0 && selectedRaw < target.candidates.length ? selectedRaw : 0;
-
-    const nextChosenByPair = { ...chosenPathByPair, [key]: selectedIndex };
-    const choices = buildApplyPathChoices(pathCandidates, nextChosenByPair);
-    if (choices.length <= 0) return;
-
-    applyPathAbortRef.current?.abort();
-    const controller = new AbortController();
-    applyPathAbortRef.current = controller;
-    const requestSpace = activeSpaceRef.current;
-    setLoadingApplyPathChoice(true);
-    try {
-      const json = await multiEntityGraphApplyPathsApi({
-        base_request: lastMultiGraphRequest,
-        choices,
-        signal: controller.signal,
-        spaceName: requestSpace,
-      });
-      if (controller.signal.aborted) return;
-      if (activeSpaceRef.current !== requestSpace) return;
-      const selectedEntities = lastMultiGraphParams.selectedEntities;
-      const nextRoot = selectedEntities[0]?.vid ?? lastMultiGraphRequest.vids[0];
-      applyMultiGraphPayload(json, selectedEntities, nextRoot, lastMultiGraphParams, lastMultiGraphRequest);
-      if (json.stats?.truncated) {
-        setUiNotice({
-          level: "warn",
-          message: `路径应用后图结果被裁剪：dropped_nodes=${Number(json.stats?.dropped_nodes || 0)} dropped_edges=${Number(json.stats?.dropped_edges || 0)} dropped_neighbors=${Number(json.stats?.dropped_neighbors || 0)}`,
-        });
-      }
-    } catch (e: unknown) {
-      if (controller.signal.aborted || (e instanceof Error && e.name === "AbortError")) return;
-      const parsed = parseApiError(e);
-      setUiNotice({ level: "error", message: `路径应用失败：${parsed.message}` });
-    } finally {
-      if (applyPathAbortRef.current === controller) {
-        applyPathAbortRef.current = null;
-        setLoadingApplyPathChoice(false);
-      }
-    }
-  }
-
-  function appendChosenPathForPair(u: number, v: number) {
-    if (graphSourceMode !== "multi") return;
-    if (!lastMultiGraphRequest) return;
-
-    const target = pathCandidates.find((p) => pairKey(p.u, p.v) === pairKey(u, v));
-    if (!target || target.candidates.length <= 0) return;
-
-    const key = pairKey(u, v);
-    const selectedRaw = chosenPathByPair[key];
-    const selectedIndex =
-      Number.isFinite(selectedRaw) && selectedRaw >= 0 && selectedRaw < target.candidates.length ? selectedRaw : 0;
-    const candidate = target.candidates[selectedIndex];
-    if (!candidate) return;
-
-    const nodeMap = new Map<number, NodeBrief>();
-    for (const n of graphNodes) nodeMap.set(n.id, n);
-    for (const nid of candidate.nodes || []) {
-      const id = Number(nid);
-      if (!Number.isFinite(id) || nodeMap.has(id)) continue;
-      nodeMap.set(id, {
-        id,
-        label: multiEntityLabelMap.get(id) || String(id),
-        entity_type: "",
-        source: "",
-      });
-    }
-
-    const edgeMap = new Map<string, (typeof graphEdges)[number]>();
-    for (const e of graphEdges) {
-      const ek = edgeKey(e);
-      edgeMap.set(ek, e);
-    }
-    for (const e of candidate.edges || []) {
-      const ek = edgeKey(e);
-      if (edgeMap.has(ek)) continue;
-      edgeMap.set(ek, { ...e, is_explain: true });
-    }
-
-    const maxNodes = Math.max(2, Number(lastMultiGraphRequest.max_nodes || 300));
-    const maxEdges = Math.max(1, Number(lastMultiGraphRequest.max_edges || 20000));
-    if (nodeMap.size > maxNodes) {
-      setUiNotice({ level: "warn", message: `追加失败：节点数将超过上限 ${maxNodes}。请提高 max_nodes 或改用替换。` });
-      return;
-    }
-    if (edgeMap.size > maxEdges) {
-      setUiNotice({ level: "warn", message: `追加失败：边数将超过上限 ${maxEdges}。请提高 max_edges 或改用替换。` });
-      return;
-    }
-
-    const nextRoot = rootVid ?? lastMultiGraphRequest.vids[0];
-    const nextStats = {
-      ...((graphStats || {}) as Record<string, unknown>),
-      node_count: nodeMap.size,
-      edge_count: edgeMap.size,
-    };
-    replaceGraphData({
-      rootVid: nextRoot,
-      nodes: Array.from(nodeMap.values()),
-      edges: Array.from(edgeMap.values()),
-      stats: nextStats,
-    });
-
-    setAppliedExtraPaths((prev) => {
-      const existing = prev[key] || [];
-      if (existing.includes(selectedIndex)) return prev;
-      return { ...prev, [key]: [...existing, selectedIndex] };
-    });
-  }
-
-  async function loadSingleSubgraph(vid: number, autoSelectRoot = true) {
-    if (!guardSpaceScopedRequest("图谱渲染")) return;
-    relationFilter.exitPreview();
-    setGraphSourceMode("single");
-    setLastMultiGraphParams(null);
-    clearMultiPathState();
+  async function enterDrilldownSubgraph(vid: number, source: SelectionSource) {
+    if (!Number.isFinite(vid)) return;
+    if (!guardSpaceScopedRequest("正式 Drill-down")) return;
     const loaded = await loadSubgraph(vid);
     if (!loaded) return;
-    rememberSingleLegacySession(vid, hop, relations);
-    if (autoSelectRoot) handleSelectNode(vid);
-  }
-
-  async function loadSelectedSearchSubgraph(vidOverride?: number) {
-    const targetVid = Number.isFinite(vidOverride as number) ? Number(vidOverride) : searchSelectedVid;
-    if (targetVid == null) {
-      setUiNotice({ level: "info", message: "请先在搜索结果中选择一个节点作为 root。" });
-      return;
-    }
-    setSearchSelectedVid(targetVid);
-    await loadSingleSubgraph(targetVid);
+    setGraphSourceMode("drilldown");
+    handleSelectNode(vid, source);
   }
 
   async function loadDiscoveryCandidateSubgraph(item: DiscoveryEntityCandidateItem) {
     const vid = Number(item.vid || item.id);
-    if (!Number.isFinite(vid)) return;
-    if (!guardSpaceScopedRequest("正式 Drill-down")) return;
-    relationFilter.exitPreview();
     setWorkspaceMode("discovery");
-    setLastMultiGraphParams(null);
-    clearMultiPathState();
-    const loaded = await loadSubgraph(vid);
-    if (!loaded) return;
-    setGraphSourceMode("drilldown");
-    handleSelectNode(vid, "discovery_candidate");
+    await enterDrilldownSubgraph(vid, "discovery_candidate");
     setUiNotice({ level: "info", message: "已进入统一关系发现下的正式 drill-down 视图。" });
-  }
-
-  async function reloadGraphByCurrentMode(nextRoot: number) {
-    if (!guardSpaceScopedRequest("图谱重载")) return;
-    if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
-      await runDiscovery(lastDiscoveryRequest);
-      return;
-    }
-    if (graphSourceMode === "multi" && lastMultiGraphParams) {
-      await runMultiGraph(lastMultiGraphParams);
-      return;
-    }
-    await loadSingleSubgraph(nextRoot);
-  }
-
-  async function loadGraphWithFilters(nextRoot: number, nextHop: number, nextRelations: string[]) {
-    if (!guardSpaceScopedRequest("图谱过滤重跑")) return;
-    relationFilter.exitPreview();
-    if (graphSourceMode === "discovery" && lastDiscoveryRequest) {
-      await runDiscovery({
-        ...lastDiscoveryRequest,
-        allowed_relation_types: nextRelations,
-        hop: nextHop,
-      });
-      return;
-    }
-    if (graphSourceMode === "multi" && lastMultiGraphParams) {
-      await runMultiGraph(lastMultiGraphParams, nextRelations);
-      return;
-    }
-    setGraphSourceMode("single");
-    setLastMultiGraphParams(null);
-    clearMultiPathState();
-    await loadSubgraphWithParams(nextRoot, nextHop, nextRelations);
-    rememberSingleLegacySession(nextRoot, nextHop, nextRelations);
   }
 
   const discoverySelectedSeedVidSet = useMemo(() => {
@@ -1610,7 +855,6 @@ export default function AppShell() {
   }, [discoverySeeds]);
 
   const discoveryRunSeedVidSet = useMemo(() => {
-    if (graphSourceMode !== "discovery") return new Set<number>();
     const seed = new Set<number>();
     for (const vid of lastDiscoveryRequest?.seed_vids || []) seed.add(Number(vid));
     if (seed.size === 0) {
@@ -1619,7 +863,7 @@ export default function AppShell() {
       }
     }
     return seed;
-  }, [graphSourceMode, discoveryResult, lastDiscoveryRequest]);
+  }, [discoveryResult, lastDiscoveryRequest]);
 
   const discoveryGraphState = useDiscoveryGraphState({
     spaceName: effectiveCurrentSpace,
@@ -1642,24 +886,16 @@ export default function AppShell() {
   );
 
   const resetPageOrchestrationState = useCallback(() => {
-    relationFilter.exitPreview();
-    relationFilter.closePanel();
-    setGraphSourceMode("single");
+    setGraphSourceMode("discovery");
     discoveryGraphState.resetState();
     clearGraphData();
     setHop(1);
     setRelations([]);
     handleClearSelection();
-    setRelationTypeCatalogItems([]);
-    setRelationTypeCatalogQuery("");
-    setRelationTypeCatalogMatchedTotal(0);
-    setRelationTypeCatalogNextOffset(0);
-    setRelationTypeCatalogHasMore(false);
-    setRelationTypeCatalogLoading(false);
     setRenderEdgeLabels(false);
     setSelectedEdgeGraphId(null);
     setDiscoveryExpandProbeNodeId(null);
-  }, [clearGraphData, discoveryGraphState, handleClearSelection, relationFilter]);
+  }, [clearGraphData, discoveryGraphState]);
 
   useEffect(() => {
     pageResetRef.current = () => {
@@ -1680,14 +916,10 @@ export default function AppShell() {
   const effectiveGraphNodes =
     discoveryResultMode
       ? discoveryGraphState.visibleGraphNodes || EMPTY_GRAPH_NODES
-      : relationFilter.previewActive
-      ? relationFilter.previewNodes
       : graphNodes;
   const effectiveGraphEdges =
     discoveryResultMode
       ? discoveryGraphState.visibleGraphEdges || EMPTY_GRAPH_EDGES
-      : relationFilter.previewActive
-      ? relationFilter.previewEdges
       : graphEdges;
   const effectiveGraphStats =
     discoveryResultMode
@@ -1699,13 +931,6 @@ export default function AppShell() {
           rendered_edges: discoveryGraphState.renderedEdgeIds.size,
           hidden_by_user: discoveryGraphState.hiddenNodeIds.size,
         } as Record<string, unknown>)
-      : relationFilter.previewActive
-      ? ({
-          ...(graphStats || {}),
-          relation_preview: true,
-          node_count: effectiveGraphNodes.length,
-          edge_count: effectiveGraphEdges.length,
-        } as Record<string, unknown>)
       : graphStats;
 
   const visibilityRanking = useVisibilityRanking({
@@ -1716,7 +941,7 @@ export default function AppShell() {
     manualRevealedNodeIds,
     showSelfLoops,
     nodeGroupRootById,
-    searchNodes: searchData.nodes,
+    searchNodes: [],
   });
 
   const discoveryVisibleNodeHopLevelMap = useMemo(() => {
@@ -1787,86 +1012,6 @@ export default function AppShell() {
     });
   }, [discoveryResultMode, panelGroups, setPanelGroupCollapsed]);
 
-  useEffect(() => {
-    if (spaceSwitchBlocked) return;
-    if (!relationFilter.open) return;
-    const controller = new AbortController();
-    const requestSpace = activeSpaceRef.current;
-    const timeoutId = window.setTimeout(() => {
-      setRelationTypeCatalogLoading(true);
-      void relationTypesApi({
-        q: relationTypeCatalogQuery,
-        limit: RELATION_TYPES_PAGE_SIZE,
-        offset: 0,
-        signal: controller.signal,
-        spaceName: effectiveCurrentSpace,
-      })
-        .then((resp) => {
-          if (controller.signal.aborted) return;
-          if (activeSpaceRef.current !== requestSpace) return;
-          setRelationTypeCatalogItems(resp.items);
-          setRelationTypeCatalogMatchedTotal(resp.matched_total);
-          setRelationTypeCatalogNextOffset(resp.next_offset);
-          setRelationTypeCatalogHasMore(resp.has_more);
-        })
-        .catch((e: unknown) => {
-          if (e instanceof Error && e.name === "AbortError") return;
-          const parsed = parseApiError(e);
-          setUiNotice({ level: "warn", message: `关系类型列表加载失败：${parsed.message}` });
-        })
-        .finally(() => {
-          if (!controller.signal.aborted) setRelationTypeCatalogLoading(false);
-        });
-    }, 180);
-
-    return () => {
-      controller.abort();
-      window.clearTimeout(timeoutId);
-    };
-  }, [effectiveCurrentSpace, relationFilter.open, relationTypeCatalogQuery, spaceSwitchBlocked]);
-
-  const handleLoadMoreRelationTypes = useCallback(async () => {
-    if (!guardSpaceScopedRequest("关系类型目录加载")) return;
-    if (relationTypeCatalogLoading) return;
-    if (!relationTypeCatalogHasMore || relationTypeCatalogNextOffset == null) return;
-    const requestSpace = activeSpaceRef.current;
-    setRelationTypeCatalogLoading(true);
-    try {
-      const resp = await relationTypesApi({
-        q: relationTypeCatalogQuery,
-        limit: RELATION_TYPES_PAGE_SIZE,
-        offset: relationTypeCatalogNextOffset,
-        spaceName: requestSpace,
-      });
-      if (activeSpaceRef.current !== requestSpace) return;
-      setRelationTypeCatalogItems((prev) => mergeRelationTypeItems(prev, resp.items));
-      setRelationTypeCatalogMatchedTotal(resp.matched_total);
-      setRelationTypeCatalogNextOffset(resp.next_offset);
-      setRelationTypeCatalogHasMore(resp.has_more);
-    } catch (e: unknown) {
-      const parsed = parseApiError(e);
-      setUiNotice({ level: "warn", message: `关系类型列表加载失败：${parsed.message}` });
-    } finally {
-      setRelationTypeCatalogLoading(false);
-    }
-  }, [
-    guardSpaceScopedRequest,
-    relationTypeCatalogHasMore,
-    relationTypeCatalogLoading,
-    relationTypeCatalogNextOffset,
-    relationTypeCatalogQuery,
-  ]);
-
-  function handleOpenRelationFilter() {
-    setRelationTypeCatalogItems([]);
-    setRelationTypeCatalogQuery("");
-    setRelationTypeCatalogMatchedTotal(0);
-    setRelationTypeCatalogNextOffset(0);
-    setRelationTypeCatalogHasMore(false);
-    setRelationTypeCatalogLoading(false);
-    relationFilter.openPanel();
-  }
-
   function toggleEdgeLabelDisplay(disp: string) {
     setEdgeLabelSelectionTouched(true);
     setEdgeLabelSelectedDisplays((prev) => {
@@ -1880,33 +1025,8 @@ export default function AppShell() {
     });
   }
 
-  const multiSeedVidSet = useMemo(() => {
-    if (graphSourceMode !== "multi" || !lastMultiGraphParams) return new Set<number>();
-    const seed = new Set<number>();
-    for (const item of lastMultiGraphParams.selectedEntities) seed.add(item.vid);
-    return seed;
-  }, [graphSourceMode, lastMultiGraphParams]);
-
-  const activeSeedVidSet = graphSourceMode === "multi" ? multiSeedVidSet : discoveryRunSeedVidSet;
-
-  const multiEntityLabelMap = useMemo(() => {
-    const m = new Map<number, string>();
-    for (const item of lastMultiGraphParams?.selectedEntities || []) {
-      if (item.label) m.set(item.vid, item.label);
-    }
-    for (const n of graphNodes) {
-      if (!m.has(n.id) && n.label) m.set(n.id, n.label);
-    }
-    for (const n of searchData.nodes) {
-      if (!m.has(n.id) && n.label) m.set(n.id, n.label);
-    }
-    return m;
-  }, [lastMultiGraphParams, graphNodes, searchData.nodes]);
-
-  const showPathCandidates = graphSourceMode === "multi" && !!lastMultiGraphRequest?.explain_paths;
-
   const activeRenderMutation =
-    discoveryResultMode ? discoveryGraphState.renderMutation : legacyRenderMutation;
+    discoveryResultMode ? discoveryGraphState.renderMutation : drilldownRenderMutation;
   const { layoutPlan, nodePositionById } = useGraphLayoutController({
     visibleNodeIds: visibleGraphNodes.map((node) => String(node.id)),
     nodePositionCache: discoveryResultMode ? discoveryGraphState.nodePositionCache : undefined,
@@ -1924,7 +1044,7 @@ export default function AppShell() {
     visibleGraphEdges,
     rootVid,
     visibleNodeHopLevelMap,
-    activeSeedVidSet,
+    activeSeedVidSet: discoveryRunSeedVidSet,
     graphSourceMode,
     nodePositionById,
     discoveryTypeColor,
@@ -1933,44 +1053,6 @@ export default function AppShell() {
     edgeLabelKeyword,
   });
   const renderPatch = useGraphPatchBuilder(viewModel);
-
-  const selectEdgeWithDetail = useCallback(
-    (target: EdgeSearchItem, edgeId: string | null) => {
-      const source_db = target.source_db ? String(target.source_db) : undefined;
-      const rank = String(target.rank || "0");
-      const edge_type = String(target.edge_type || EDGE_TYPE_DEFAULT);
-      setSelectedEdgeGraphId(edgeId);
-      setSel({
-        kind: "edge",
-        src: Number(target.src),
-        dst: Number(target.dst),
-        rank,
-        edge_type,
-        relation: String(target.relation || ""),
-        source: "external_detail",
-        source_db,
-      });
-      setNodeDetail(null);
-      void loadEdgeDetail(Number(target.src), Number(target.dst), rank, edge_type);
-
-      if (edgeId) {
-        applyHighlightRef.current?.(null, edgeId, true);
-      }
-    },
-    [loadEdgeDetail]
-  );
-
-  function trySelectEdgeFromCurrentRenderedGraph(target: EdgeSearchItem): boolean {
-    const edgeId = findEdgeIdByIdentity(viewModel.edgeById, {
-      src: Number(target.src),
-      dst: Number(target.dst),
-      rank: String(target.rank || "0"),
-      edge_type: String(target.edge_type || EDGE_TYPE_DEFAULT),
-    });
-    if (!edgeId) return false;
-    selectEdgeWithDetail(target, edgeId);
-    return true;
-  }
 
   useEffect(() => {
     if (!discoveryResultMode) return;
@@ -2018,59 +1100,6 @@ export default function AppShell() {
     discoveryGraphState.graphEntityMap,
   ]);
 
-  async function handleSelectEdgeCandidate(item: EdgeSearchItem) {
-    setEdgeSearchNotice(null);
-
-    revealNode(Number(item.src));
-    revealNode(Number(item.dst));
-
-    if (trySelectEdgeFromCurrentRenderedGraph(item)) return;
-
-    setPendingEdgeLocate(item);
-    await loadSingleSubgraph(Number(item.src), false);
-  }
-
-  useEffect(() => {
-    if (!pendingEdgeLocate) return;
-    if (loadingGraph || loadingMultiGraph) return;
-
-    const edgeId = findEdgeIdByIdentity(viewModel.edgeById, {
-      src: Number(pendingEdgeLocate.src),
-      dst: Number(pendingEdgeLocate.dst),
-      rank: String(pendingEdgeLocate.rank || "0"),
-      edge_type: String(pendingEdgeLocate.edge_type || EDGE_TYPE_DEFAULT),
-    });
-
-    if (edgeId) {
-      selectEdgeWithDetail(pendingEdgeLocate, edgeId);
-      setPendingEdgeLocate(null);
-      setEdgeSearchNotice(null);
-      return;
-    }
-
-    if (rootVid !== Number(pendingEdgeLocate.src)) return;
-
-    const existsInGraphData = graphEdges.some((e) =>
-      isSameEdge(e, {
-        src: Number(pendingEdgeLocate.src),
-        dst: Number(pendingEdgeLocate.dst),
-        rank: String(pendingEdgeLocate.rank || "0"),
-        edge_type: String(pendingEdgeLocate.edge_type || EDGE_TYPE_DEFAULT),
-      })
-    );
-
-    if (existsInGraphData) {
-      selectEdgeWithDetail(pendingEdgeLocate, null);
-      setEdgeSearchNotice("该边已在当前图数据中，但当前未渲染（请检查自环开关或节点显示状态）。");
-    } else {
-      const msg = "该边不在当前 hop/relations 限制下可见，请提高 hop 或调整关系筛选后重试。";
-      setEdgeSearchNotice(msg);
-      setUiNotice({ level: "warn", message: msg });
-    }
-
-    setPendingEdgeLocate(null);
-  }, [pendingEdgeLocate, loadingGraph, loadingMultiGraph, viewModel.edgeById, rootVid, graphEdges, selectEdgeWithDetail]);
-
   const selectedNodeBrief = useMemo(() => {
     if (sel.kind !== "node") return null;
     const graphNode = discoveryResultMode
@@ -2091,7 +1120,7 @@ export default function AppShell() {
         };
       }
     }
-    return searchData.nodes.find((n) => n.id === sel.vid) || null;
+    return null;
   }, [
     sel,
     effectiveGraphNodes,
@@ -2099,7 +1128,6 @@ export default function AppShell() {
     discoveryGraphState.graphEntityMap,
     discoveryCandidateResults.result.items,
     discoverySeeds,
-    searchData.nodes,
   ]);
 
   const selectedNodeIsRoot = sel.kind === "node" && rootVid != null && sel.vid === rootVid;
@@ -2179,18 +1207,6 @@ export default function AppShell() {
     discoveryGraphState.visibleEdgeKeySet,
   ]);
 
-  function handleSearchClick() {
-    closeSuggestPanel();
-    closeRawIdSuggestPanel();
-    void ensureEntityTypesLoaded();
-    void runSearch();
-  }
-
-  function handleEdgeSearchClick() {
-    closeEdgeSuggestPanel();
-    void runEdgeSearch();
-  }
-
   function handleGraphNodeClick(vid: number) {
     handleSelectNode(vid, "graph_node_click");
   }
@@ -2205,7 +1221,7 @@ export default function AppShell() {
     if (discoveryResultMode) {
       discoveryGraphState.requestRelayout();
     } else {
-      requestLegacyRelayout();
+      requestDrilldownRelayout();
     }
   }
 
@@ -2307,294 +1323,169 @@ export default function AppShell() {
     />
   );
 
-  const leftPane =
-    workspaceMode === "legacy" ? (
-      <LegacyWorkspaceSidebar
-        key={`legacy-${effectiveCurrentSpace}`}
-        currentSpaceName={effectiveCurrentSpace}
-        spaceScopeKey={effectiveCurrentSpace}
-        q={q}
-        onQChange={onInputChange}
-        loadingSearch={loadingSearch}
-        onSearch={handleSearchClick}
-        onSearchInputKeyDown={onKeyDown}
-        suggestWrapRef={suggestWrapRef}
-        suggestOpen={suggestOpen}
-        suggestLoading={suggestLoading}
-        suggestError={suggestError}
-        suggestItems={suggestItems}
-        suggestHighlightIndex={suggestHighlightIndex}
-        setSuggestHighlightIndex={setSuggestHighlightIndex}
-        onSelectSuggestItem={selectSuggestCandidate}
-        searchName={searchName}
-        setSearchName={setSearchName}
-        searchDesc={searchDesc}
-        setSearchDesc={setSearchDesc}
-        entityType={entityType}
-        setEntityType={setEntityType}
-        entityTypeOptions={entityTypeOptions}
-        entityTypeFallbackUsed={entityTypeFallbackUsed}
-        source={source}
-        setSource={setSource}
-        entityRawId={entityRawId}
-        onRawIdChange={onRawIdInputChange}
-        onRawIdInputKeyDown={onRawIdKeyDown}
-        rawIdSuggestWrapRef={rawIdSuggestWrapRef}
-        rawIdSuggestOpen={rawIdSuggestOpen}
-        rawIdSuggestLoading={rawIdSuggestLoading}
-        rawIdSuggestError={rawIdSuggestError}
-        rawIdSuggestItems={rawIdSuggestItems}
-        rawIdSuggestHighlightIndex={rawIdSuggestHighlightIndex}
-        setRawIdSuggestHighlightIndex={setRawIdSuggestHighlightIndex}
-        onSelectRawIdSuggestItem={selectRawIdSuggestCandidate}
-        searchData={searchData}
-        rootVid={rootVid}
-        searchSelectedVid={searchSelectedVid}
-        onSelectSearchResultNode={(vid) => setSearchSelectedVid(vid)}
-        onLoadSelectedSubgraph={(vid) => {
-          void loadSelectedSearchSubgraph(vid);
-        }}
-        graphLoadBusy={graphBusy}
-        onEntityTypeDemandLoad={() => {
-          void ensureEntityTypesLoaded();
-        }}
-        edgeQ={edgeQ}
-        onEdgeQChange={onEdgeInputChange}
-        edgeSearchLoading={loadingEdgeSearch}
-        onEdgeSearch={handleEdgeSearchClick}
-        onEdgeSearchInputKeyDown={onEdgeKeyDown}
-        edgeSuggestWrapRef={edgeSuggestWrapRef}
-        edgeSuggestOpen={edgeSuggestOpen}
-        edgeSuggestLoading={edgeSuggestLoading}
-        edgeSuggestError={edgeSuggestError}
-        edgeSuggestItems={edgeSuggestItems}
-        edgeSuggestHighlightIndex={edgeSuggestHighlightIndex}
-        setEdgeSuggestHighlightIndex={setEdgeSuggestHighlightIndex}
-        onSelectEdgeSuggestItem={selectEdgeSuggestCandidate}
-        edgeSearchInRelation={edgeSearchInRelation}
-        setEdgeSearchInRelation={setEdgeSearchInRelation}
-        edgeSearchInProps={edgeSearchInProps}
-        setEdgeSearchInProps={setEdgeSearchInProps}
-        edgeSearchSourceDb={edgeSearchSourceDb}
-        setEdgeSearchSourceDb={setEdgeSearchSourceDb}
-        edgeSearchRelation={edgeSearchRelation}
-        setEdgeSearchRelation={setEdgeSearchRelation}
-        edgeSearchData={edgeSearchData}
-        onSelectEdgeSearchItem={(item) => {
-          void handleSelectEdgeCandidate(item);
-        }}
-        edgeSearchNotice={edgeSearchNotice}
-        loadingMultiGraph={graphBusy}
-        onGenerateMultiGraph={(params) => {
-          void runMultiGraph(params);
-        }}
-        showPathCandidates={showPathCandidates}
-        pathCandidates={pathCandidates}
-        chosenPathByPair={chosenPathByPair}
-        appliedExtraPaths={appliedExtraPaths}
-        onChoosePathForPair={setChosenPathForPair}
-        onApplyPathForPair={(u, v) => {
-          void applyChosenPathForPair(u, v);
-        }}
-        onAppendPathForPair={(u, v) => {
-          appendChosenPathForPair(u, v);
-        }}
-        pathApplyLoading={loadingApplyPathChoice}
-        resolveEntityLabel={(vid) => multiEntityLabelMap.get(vid) || String(vid)}
-      />
-    ) : (
-      <DiscoveryWorkspaceSidebar
-        key={`discovery-${effectiveCurrentSpace}`}
-        currentSpace={effectiveCurrentSpace}
-        selectedSpace={selectedSpaceSummary}
-        spaces={spaces}
-        spaceLoading={spacesLoading}
-        spaceError={spacesError}
-        currentSpaceStatus={currentSpaceStatus}
-        currentSpaceGraphStatus={currentSpaceGraphStatus}
-        currentSpaceSearchStatus={currentSpaceSearchStatus}
-        currentSpaceCoveragePct={currentSpaceCoveragePct}
-        currentSpaceIndexStatus={currentSpaceIndexStatus}
-        spaceSwitching={spaceSwitchBlocked}
-        spaceSwitchPhase={spaceSwitchPhaseLabel}
-        onSelectSpace={setCurrentSpace}
-        seeds={discoverySeeds}
-        searchQuery={discoveryCandidateSearch.query}
-        searchAdvancedOpen={discoveryCandidateSearch.advancedOpen}
-        preview={discoveryCandidateResults.preview}
-        candidateResult={discoveryCandidateResults.result}
-        selectedCandidateIds={discoveryCandidateResults.selectedIdSet}
-        seedIdSet={discoverySelectedSeedVidSet}
-        query={discoveryQuery}
-        runtime={discoveryRuntimeFilters}
-        renderCoverage={{
-          workingNodeCount: discoveryGraphState.workingNodeCount,
-          workingEdgeCount: discoveryGraphState.workingEdgeCount,
-          entityTypes: discoveryGraphState.availableEntityTypes,
-          relationTypes: discoveryGraphState.availableRelationTypes,
-          selectedEntityTypes: discoveryGraphState.selectedEntityTypes,
-          selectedRelationTypes: discoveryGraphState.selectedRelationTypes,
-        }}
-        entityTypeOptions={entityTypeOptions}
-        resultFacets={
-          discoveryResult
-            ? {
-                entityTypes: discoveryResult.facets.entity_types,
-                relationTypes: discoveryResult.facets.relation_types,
-                querySummary: discoveryResult.facets.query_summary,
-                layers: discoveryResult.facets.layers,
-                seeds: discoveryResult.facets.seeds,
-              }
-            : null
+  const leftPane = (
+    <DiscoveryWorkspaceSidebar
+      key={`discovery-${effectiveCurrentSpace}`}
+      currentSpace={effectiveCurrentSpace}
+      selectedSpace={selectedSpaceSummary}
+      spaces={spaces}
+      spaceLoading={spacesLoading}
+      spaceError={spacesError}
+      currentSpaceStatus={currentSpaceStatus}
+      currentSpaceGraphStatus={currentSpaceGraphStatus}
+      currentSpaceSearchStatus={currentSpaceSearchStatus}
+      currentSpaceCoveragePct={currentSpaceCoveragePct}
+      currentSpaceIndexStatus={currentSpaceIndexStatus}
+      spaceSwitching={spaceSwitchBlocked}
+      spaceSwitchPhase={spaceSwitchPhaseLabel}
+      onSelectSpace={setCurrentSpace}
+      seeds={discoverySeeds}
+      searchQuery={discoveryCandidateSearch.query}
+      searchAdvancedOpen={discoveryCandidateSearch.advancedOpen}
+      preview={discoveryCandidateResults.preview}
+      candidateResult={discoveryCandidateResults.result}
+      selectedCandidateIds={discoveryCandidateResults.selectedIdSet}
+      seedIdSet={discoverySelectedSeedVidSet}
+      query={discoveryQuery}
+      runtime={discoveryRuntimeFilters}
+      renderCoverage={{
+        workingNodeCount: discoveryGraphState.workingNodeCount,
+        workingEdgeCount: discoveryGraphState.workingEdgeCount,
+        entityTypes: discoveryGraphState.availableEntityTypes,
+        relationTypes: discoveryGraphState.availableRelationTypes,
+        selectedEntityTypes: discoveryGraphState.selectedEntityTypes,
+        selectedRelationTypes: discoveryGraphState.selectedRelationTypes,
+      }}
+      entityTypeOptions={entityTypeOptions}
+      resultFacets={
+        discoveryResult
+          ? {
+              entityTypes: discoveryResult.facets.entity_types,
+              relationTypes: discoveryResult.facets.relation_types,
+              querySummary: discoveryResult.facets.query_summary,
+              layers: discoveryResult.facets.layers,
+              seeds: discoveryResult.facets.seeds,
+            }
+          : null
+      }
+      resultStats={discoveryResult?.stats || null}
+      loading={loadingDiscovery}
+      hasPendingChanges={discoveryHasPendingChanges}
+      renderedNodes={discoveryGraphState.renderedNodes}
+      hiddenNodes={discoveryGraphState.hiddenNodes}
+      droppedNodes={{
+        droppedByBudget: discoveryGraphState.droppedGroups.droppedByBudget.map((item) => ({
+          node: item.node,
+          supportEdgesCount: item.supportEdges.length,
+          sourceNodeId: item.sourceNodeId,
+        })),
+        droppedByTypeFilter: discoveryGraphState.droppedGroups.droppedByTypeFilter.map((item) => ({
+          node: item.node,
+          supportEdgesCount: item.supportEdges.length,
+          sourceNodeId: item.sourceNodeId,
+        })),
+        droppedByRelationFilter: discoveryGraphState.droppedGroups.droppedByRelationFilter.map((item) => ({
+          node: item.node,
+          supportEdgesCount: item.supportEdges.length,
+          sourceNodeId: item.sourceNodeId,
+        })),
+      }}
+      renderedPanelCollapsed={discoveryRenderedPanelCollapsed}
+      droppedPanelCollapsed={discoveryDroppedPanelCollapsed}
+      onUpdateSearchQuery={discoveryCandidateSearch.updateQuery}
+      onToggleSearchAdvanced={discoveryCandidateSearch.toggleAdvancedOpen}
+      onSubmitSearch={() => {
+        if (!guardSpaceScopedRequest("候选搜索")) return;
+        void discoveryCandidateResults.runSearch({
+          append: false,
+          page: 1,
+          queryOverride: discoveryCandidateSearch.query,
+        });
+      }}
+      onClosePreview={discoveryCandidateResults.closePreview}
+      onSetPreviewHighlightIndex={discoveryCandidateResults.setPreviewHighlightIndex}
+      onSelectPreviewItem={(item) => {
+        discoveryCandidateResults.closePreview();
+        discoveryDetail.viewCandidateDetail(item);
+      }}
+      onAddCandidateSeed={(item) => {
+        addDiscoverySeedItems([candidateItemToSeed(item)]);
+        discoveryCandidateResults.removeSelected([item.vid]);
+      }}
+      onRemoveSeed={(vid) => {
+        void handleRemoveDiscoverySeed(vid);
+      }}
+      onClearSeeds={discoverySeedsState.clear}
+      onLoadMoreCandidates={() => {
+        if (!guardSpaceScopedRequest("候选搜索")) return;
+        void discoveryCandidateResults.loadMore();
+      }}
+      onToggleCandidateSelect={discoveryCandidateResults.toggleSelected}
+      onClearCandidateSelection={discoveryCandidateResults.clearSelected}
+      onAddSelectedCandidates={addSelectedDiscoveryCandidatesToSeeds}
+      onViewCandidateDetail={(item) => {
+        discoveryDetail.viewCandidateDetail(item);
+      }}
+      onLoadCandidateSubgraph={(item) => {
+        void loadDiscoveryCandidateSubgraph(item);
+      }}
+      onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
+      onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
+      onUpdateRenderCoverage={(patch) => {
+        if (patch.selectedEntityTypes) {
+          discoveryGraphState.setSelectedEntityTypes(patch.selectedEntityTypes);
         }
-        resultStats={discoveryResult?.stats || null}
-        loading={loadingDiscovery}
-        hasPendingChanges={discoveryHasPendingChanges}
-        renderedNodes={discoveryGraphState.renderedNodes}
-        hiddenNodes={discoveryGraphState.hiddenNodes}
-        droppedNodes={{
-          droppedByBudget: discoveryGraphState.droppedGroups.droppedByBudget.map((item) => ({
-            node: item.node,
-            supportEdgesCount: item.supportEdges.length,
-            sourceNodeId: item.sourceNodeId,
-          })),
-          droppedByTypeFilter: discoveryGraphState.droppedGroups.droppedByTypeFilter.map((item) => ({
-            node: item.node,
-            supportEdgesCount: item.supportEdges.length,
-            sourceNodeId: item.sourceNodeId,
-          })),
-          droppedByRelationFilter: discoveryGraphState.droppedGroups.droppedByRelationFilter.map((item) => ({
-            node: item.node,
-            supportEdgesCount: item.supportEdges.length,
-            sourceNodeId: item.sourceNodeId,
-          })),
-        }}
-        renderedPanelCollapsed={discoveryRenderedPanelCollapsed}
-        droppedPanelCollapsed={discoveryDroppedPanelCollapsed}
-        onUpdateSearchQuery={discoveryCandidateSearch.updateQuery}
-        onToggleSearchAdvanced={discoveryCandidateSearch.toggleAdvancedOpen}
-        onSubmitSearch={() => {
-          if (!guardSpaceScopedRequest("候选搜索")) return;
-          void discoveryCandidateResults.runSearch({
-            append: false,
-            page: 1,
-            queryOverride: discoveryCandidateSearch.query,
-          });
-        }}
-        onClosePreview={discoveryCandidateResults.closePreview}
-        onSetPreviewHighlightIndex={discoveryCandidateResults.setPreviewHighlightIndex}
-        onSelectPreviewItem={(item) => {
-          discoveryCandidateResults.closePreview();
-          discoveryDetail.viewCandidateDetail(item);
-        }}
-        onAddCandidateSeed={(item) => {
-          addDiscoverySeedItems([candidateItemToSeed(item)]);
-          discoveryCandidateResults.removeSelected([item.vid]);
-        }}
-        onRemoveSeed={(vid) => {
-          void handleRemoveDiscoverySeed(vid);
-        }}
-        onClearSeeds={discoverySeedsState.clear}
-        onLoadMoreCandidates={() => {
-          if (!guardSpaceScopedRequest("候选搜索")) return;
-          void discoveryCandidateResults.loadMore();
-        }}
-        onToggleCandidateSelect={discoveryCandidateResults.toggleSelected}
-        onClearCandidateSelection={discoveryCandidateResults.clearSelected}
-        onAddSelectedCandidates={addSelectedDiscoveryCandidatesToSeeds}
-        onViewCandidateDetail={(item) => {
-          discoveryDetail.viewCandidateDetail(item);
-        }}
-        onLoadCandidateSubgraph={(item) => {
-          void loadDiscoveryCandidateSubgraph(item);
-        }}
-        onUpdateQuery={(patch) => setDiscoveryQuery((prev) => ({ ...prev, ...patch }))}
-        onUpdateRuntime={(patch) => setDiscoveryRuntimeFilters((prev) => ({ ...prev, ...patch }))}
-        onUpdateRenderCoverage={(patch) => {
-          if (patch.selectedEntityTypes) {
-            discoveryGraphState.setSelectedEntityTypes(patch.selectedEntityTypes);
-          }
-          if (patch.selectedRelationTypes) {
-            discoveryGraphState.setSelectedRelationTypes(patch.selectedRelationTypes);
-          }
-        }}
-        onSetRenderedPanelCollapsed={setDiscoveryRenderedPanelCollapsed}
-        onSetDroppedPanelCollapsed={setDiscoveryDroppedPanelCollapsed}
-        onLocateNode={locateNodeInGraph}
-        onHideRenderedNode={handleHideDiscoveryNode}
-        onRestoreHiddenNode={handleRestoreHiddenDiscoveryNode}
-        onForceRenderDroppedNode={handleForceRenderDiscoveryNode}
-        onViewNodeDetailById={(vid) => {
-          handleSelectNode(vid, discoverySelectedSeedVidSet.has(vid) ? "seed" : "external_detail");
-        }}
-        onRun={() => {
-          void runDiscovery();
-        }}
-      />
-    );
+        if (patch.selectedRelationTypes) {
+          discoveryGraphState.setSelectedRelationTypes(patch.selectedRelationTypes);
+        }
+      }}
+      onSetRenderedPanelCollapsed={setDiscoveryRenderedPanelCollapsed}
+      onSetDroppedPanelCollapsed={setDiscoveryDroppedPanelCollapsed}
+      onLocateNode={locateNodeInGraph}
+      onHideRenderedNode={handleHideDiscoveryNode}
+      onRestoreHiddenNode={handleRestoreHiddenDiscoveryNode}
+      onForceRenderDroppedNode={handleForceRenderDiscoveryNode}
+      onViewNodeDetailById={(vid) => {
+        handleSelectNode(vid, discoverySelectedSeedVidSet.has(vid) ? "seed" : "external_detail");
+      }}
+      onRun={() => {
+        void runDiscovery();
+      }}
+    />
+  );
 
-  const topBar =
-    workspaceMode === "legacy" ? (
-      <LegacyWorkspaceTopBar
-        rootVid={rootVid}
-        loadingGraph={graphBusy}
-        graphBudgetLabel={budgetPresetLabel}
-        canLoadMoreEdges={canLoadMoreEdges}
-        onLoadMoreEdges={() => {
-          void loadMoreEdges();
-        }}
-        hop={hop}
-        setHop={setHop}
-        relations={relations}
-        onOpenRelationFilter={handleOpenRelationFilter}
-        onClearRelationsAndReload={() => {
-          void (async () => {
-            const nextRelations: string[] = [];
-            setRelations(nextRelations);
-            if (rootVid != null) await loadGraphWithFilters(rootVid, hop, nextRelations);
-          })();
-        }}
-        onReloadSubgraph={() => {
-          if (rootVid != null) void reloadGraphByCurrentMode(rootVid);
-        }}
-        onRelayout={handleRelayoutCurrentGraph}
-        onFitView={requestFitView}
-        graphStats={effectiveGraphStats}
-        relationPreviewActive={relationFilter.previewActive}
-        onExitRelationPreview={relationFilter.exitPreview}
-      />
-    ) : (
-      <DiscoveryWorkspaceTopBar
-        currentSpace={effectiveCurrentSpace}
-        discoveryViewMode={discoveryDrilldownMode ? "drilldown" : "result"}
-        currentSpaceStatus={currentSpaceStatus || ""}
-        currentSpaceIndexStatus={currentSpaceIndexStatus}
-        discoveryWorkspaceReady={discoveryWorkspaceReady}
-        drilldownRootVid={discoveryDrilldownMode ? rootVid : null}
-        drilldownRootLabel={discoveryDrilldownMode ? selectedNodeBrief?.label || graphNodes.find((node) => node.id === rootVid)?.label || "" : ""}
-        drilldownNodeCount={discoveryDrilldownMode ? effectiveGraphNodes.length : 0}
-        drilldownEdgeCount={discoveryDrilldownMode ? effectiveGraphEdges.length : 0}
-        canReturnToDiscoveryResult={Boolean(discoveryResult && lastDiscoveryRequest)}
-        discoveryRequestSpace={discoveryRequestSpace}
-        discoveryResponseSpace={discoveryResponseSpace}
-        responseGraphStatus={String(discoveryResult?.space_meta?.graph_status || "")}
-        discoveryNodeCount={Number(discoveryResult?.stats.node_count ?? effectiveGraphNodes.length ?? 0)}
-        discoveryEdgeCount={Number(discoveryResult?.stats.edge_count ?? effectiveGraphEdges.length ?? 0)}
-        discoveryCandidateCount={Number(discoveryResult?.stats.candidate_count ?? 0)}
-        lastRunSeedCount={Number(discoveryResult?.stats.seed_count ?? lastDiscoveryRequest?.seed_vids.length ?? 0)}
-        currentSeedCount={discoverySeeds.length}
-        graphBusy={graphBusy}
-        discoveryHasPendingChanges={discoveryHasPendingChanges}
-        spaceSwitchBlocked={spaceSwitchBlocked}
-        spaceSwitchPhaseLabel={spaceSwitchPhaseLabel}
-        switchTargetSpace={spaceSwitchState.switchTarget || ""}
-        effectiveGraphStats={effectiveGraphStats}
-        discoveryResultExplain={discoveryResultExplain}
-        onRelayout={handleRelayoutCurrentGraph}
-        onFitView={requestFitView}
-        onReturnToDiscoveryResult={restoreDiscoveryDrilldownResult}
-      />
-    );
+  const topBar = (
+    <DiscoveryWorkspaceTopBar
+      currentSpace={effectiveCurrentSpace}
+      discoveryViewMode={discoveryDrilldownMode ? "drilldown" : "result"}
+      currentSpaceStatus={currentSpaceStatus || ""}
+      currentSpaceIndexStatus={currentSpaceIndexStatus}
+      discoveryWorkspaceReady={discoveryWorkspaceReady}
+      drilldownRootVid={discoveryDrilldownMode ? rootVid : null}
+      drilldownRootLabel={discoveryDrilldownMode ? selectedNodeBrief?.label || graphNodes.find((node) => node.id === rootVid)?.label || "" : ""}
+      drilldownNodeCount={discoveryDrilldownMode ? effectiveGraphNodes.length : 0}
+      drilldownEdgeCount={discoveryDrilldownMode ? effectiveGraphEdges.length : 0}
+      canReturnToDiscoveryResult={Boolean(discoveryResult && lastDiscoveryRequest)}
+      discoveryRequestSpace={discoveryRequestSpace}
+      discoveryResponseSpace={discoveryResponseSpace}
+      responseGraphStatus={String(discoveryResult?.space_meta?.graph_status || "")}
+      discoveryNodeCount={Number(discoveryResult?.stats.node_count ?? effectiveGraphNodes.length ?? 0)}
+      discoveryEdgeCount={Number(discoveryResult?.stats.edge_count ?? effectiveGraphEdges.length ?? 0)}
+      discoveryCandidateCount={Number(discoveryResult?.stats.candidate_count ?? 0)}
+      lastRunSeedCount={Number(discoveryResult?.stats.seed_count ?? lastDiscoveryRequest?.seed_vids.length ?? 0)}
+      currentSeedCount={discoverySeeds.length}
+      graphBusy={graphBusy}
+      discoveryHasPendingChanges={discoveryHasPendingChanges}
+      spaceSwitchBlocked={spaceSwitchBlocked}
+      spaceSwitchPhaseLabel={spaceSwitchPhaseLabel}
+      switchTargetSpace={spaceSwitchState.switchTarget || ""}
+      effectiveGraphStats={effectiveGraphStats}
+      discoveryResultExplain={discoveryResultExplain}
+      onRelayout={handleRelayoutCurrentGraph}
+      onFitView={requestFitView}
+      onReturnToDiscoveryResult={restoreDiscoveryDrilldownResult}
+    />
+  );
 
   const canvas = (
     <div className="kg-canvas-wrap" style={{ position: "relative" }}>
@@ -2638,7 +1529,7 @@ export default function AppShell() {
           <div
             className="kg-canvas-anchor"
             data-testid="discovery-result-anchor"
-            data-state={workspaceMode === "discovery" ? (discoveryDrilldownMode ? "drilldown" : "ready") : "legacy"}
+            data-state={discoveryDrilldownMode ? "drilldown" : "ready"}
             data-workspace-mode={workspaceMode}
           >
             <GraphCanvas
@@ -2672,7 +1563,7 @@ export default function AppShell() {
   const rightPane = (
     <Suspense fallback={<LoadingPanel message="右侧详情面板加载中..." />}>
       <RightDetailPanel
-        allowGraphMutationActions={workspaceMode === "legacy" || discoveryDrilldownMode}
+        allowGraphMutationActions={discoveryDrilldownMode}
         discoveryMode={discoveryResultMode}
         renderNodeLabels={renderNodeLabels}
         setRenderNodeLabels={setRenderNodeLabels}
@@ -2712,17 +1603,11 @@ export default function AppShell() {
         selectedNodeBrief={selectedNodeBrief}
         visibleNodeHopLevelMap={visibleNodeHopLevelMap}
         reroot1hop={(vid) => {
-          setGraphSourceMode(discoveryDrilldownMode ? "drilldown" : "single");
-          setLastMultiGraphParams(null);
-          clearMultiPathState();
-          if (!discoveryDrilldownMode) rememberSingleLegacySession(vid, 1, relations);
+          setGraphSourceMode("drilldown");
           void reroot1hop(vid);
         }}
         expand1hop={(vid) => {
-          setGraphSourceMode(discoveryDrilldownMode ? "drilldown" : "single");
-          setLastMultiGraphParams(null);
-          clearMultiPathState();
-          if (!discoveryDrilldownMode && rootVid != null) rememberSingleLegacySession(rootVid, hop, relations);
+          setGraphSourceMode("drilldown");
           void expand1hop(vid);
         }}
         collapseExpandFromNode={collapseExpandFromNode}
@@ -2769,48 +1654,6 @@ export default function AppShell() {
     </Suspense>
   );
 
-  const overlayPanel =
-    workspaceMode === "legacy" && relationFilter.open ? (
-      <LegacyWorkspaceRelationFilter
-        relationCatalogItems={relationTypeCatalogItems}
-        relationCatalogLoading={relationTypeCatalogLoading}
-        relationCatalogHasMore={relationTypeCatalogHasMore}
-        relationCatalogMatchedTotal={relationTypeCatalogMatchedTotal}
-        relationCatalogQuery={relationTypeCatalogQuery}
-        draftRelations={relationFilter.draftRelations}
-        appliedRelations={relationFilter.appliedRelations}
-        relationCountMap={relationFilter.relationCountMap}
-        previewActive={relationFilter.previewActive}
-        previewEdgeTotal={relationFilter.previewEdgeTotal}
-        onRelationCatalogQueryChange={setRelationTypeCatalogQuery}
-        onRelationCatalogLoadMore={() => {
-          void handleLoadMoreRelationTypes();
-        }}
-        onClose={relationFilter.closePanel}
-        onToggleDraftRelation={relationFilter.toggleDraftRelation}
-        onClearDraft={relationFilter.clearDraft}
-        onRestoreApplied={relationFilter.restoreDraftFromApplied}
-        onInvertCurrentList={relationFilter.invertDraftByRelations}
-        onPreviewOnlyApply={relationFilter.enterPreview}
-        onExitPreview={relationFilter.exitPreview}
-        onApplyAndReload={() => {
-          void (async () => {
-            const next = relationFilter.commitDraftAsApplied();
-            relationFilter.closePanel();
-            setRelations(next);
-            if (rootVid != null) await loadGraphWithFilters(rootVid, hop, next);
-          })();
-        }}
-        presets={relationFilter.presets}
-        activePresetId={relationFilter.activePresetId}
-        onSelectPreset={relationFilter.selectPreset}
-        onSavePreset={relationFilter.savePreset}
-        onRenamePreset={relationFilter.renamePreset}
-        onDeletePreset={relationFilter.deletePreset}
-        estimateKeepEdges={relationFilter.estimateKeepEdges}
-      />
-    ) : null;
-
   return (
     <WorkspaceShell
       layoutStyle={layoutStyle}
@@ -2824,7 +1667,6 @@ export default function AppShell() {
       topBar={topBar}
       canvas={canvas}
       rightPane={rightPane}
-      overlayPanel={overlayPanel}
       onBeginResize={beginResize}
     />
   );

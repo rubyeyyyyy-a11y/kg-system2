@@ -1124,6 +1124,7 @@ export function DiscoveryPanel({
             <label style={{ display: "grid", gap: 4, fontSize: 12 }}>
               <span>entity_raw_id</span>
               <input
+                data-testid="discovery-search-advanced-raw-id"
                 value={searchQuery.entityRawId}
                 onChange={(e) => onUpdateSearchQuery({ entityRawId: e.target.value })}
                 placeholder="可选：按 entity_raw_id 搜索"

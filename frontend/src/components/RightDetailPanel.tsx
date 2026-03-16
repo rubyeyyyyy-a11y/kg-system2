@@ -682,7 +682,7 @@ export function RightDetailPanel({
               </div>
             </>
           ) : (
-            <div style={{ fontSize: 12, color: "#666" }}>统一关系发现模式下禁用 Root/Expand/隐藏节点等 legacy 子图操作。</div>
+            <div style={{ fontSize: 12, color: "#666" }}>统一关系发现结果视图下禁用 Root/Expand/隐藏节点等 drill-down 子图操作。</div>
           )}
 
           <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>

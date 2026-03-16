@@ -196,66 +196,6 @@ export type RelationTypesResp = {
   matched_total: number;
 };
 
-export type EdgeSearchItem = {
-  edge_type: string;
-  src: number;
-  dst: number;
-  rank: string;
-  relation: string;
-  source_db?: string;
-  score?: number;
-  src_label?: string;
-  dst_label?: string;
-  snippet?: string;
-};
-
-export type EdgeSuggestResp = {
-  q: string;
-  items: EdgeSearchItem[];
-  truncated: boolean;
-};
-
-export type EdgeSearchResp = {
-  edges: EdgeSearchItem[];
-  total_candidates: number;
-};
-
-export type ExplainPathCandidate = {
-  path_id: string;
-  length: number;
-  nodes: number[];
-  edges: EdgeBrief[];
-  score?: number;
-  summary?: string;
-};
-
-export type PairPathCandidate = {
-  u: number;
-  v: number;
-  has_direct: boolean;
-  chosen_index: number | null;
-  candidates: ExplainPathCandidate[];
-};
-
-export type MultiEntityGraphResp = {
-  nodes: NodeBrief[];
-  edges: EdgeBrief[];
-  stats: {
-    selected?: number;
-    direct_edges?: number;
-    explained_pairs?: number;
-    unconnected?: number[];
-    unconnected_pairs?: string[];
-    truncated?: boolean;
-    dropped_neighbors?: number;
-    node_count?: number;
-    edge_count?: number;
-    budget_applied?: Record<string, unknown>;
-    [k: string]: unknown;
-  };
-  path_candidates?: PairPathCandidate[];
-};
-
 export type GraphDiscoveryEntityFacetItem = {
   entity_type: string;
   count: number;

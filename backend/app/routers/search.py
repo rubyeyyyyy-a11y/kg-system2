@@ -2,9 +2,9 @@ from typing import Optional
 
 from fastapi import APIRouter
 
-from app.schemas.edge import EdgeSearchRequest, EdgeSearchResp, EdgeSuggestResp
 from app.schemas.search import EntityTypeItem, RawIdSuggestResp, SearchRequest, SearchResp, SuggestResp
-from app.services import edge_search_service, search_service
+from app.platform.metadata import entity_catalog_service
+from app.services import metadata_service
 from app.services.search_v2 import service as search_v2_service
 
 router = APIRouter(prefix="/api")
@@ -17,7 +17,10 @@ def search(req: SearchRequest):
 
 @router.get("/entity_types", response_model=list[EntityTypeItem])
 def entity_types():
-    return search_service.entity_types()
+    return entity_catalog_service.list_entity_types(
+        list_entity_types_fn=metadata_service.list_entity_types,
+        fallback_items=entity_catalog_service.FALLBACK_ENTITY_TYPES,
+    )
 
 
 @router.get("/suggest", response_model=SuggestResp)
@@ -38,23 +41,3 @@ def suggest_raw_id(
     source: Optional[str] = None,
 ):
     return search_v2_service.suggest_raw_id(q=q, limit=limit, entity_type=entity_type, source=source)
-
-
-@router.get("/edge_suggest", response_model=EdgeSuggestResp)
-def edge_suggest(
-    q: str,
-    limit: int = 12,
-    relation: Optional[str] = None,
-    source_db: Optional[str] = None,
-):
-    return edge_search_service.edge_suggest(
-        q=q,
-        limit=limit,
-        relation=relation,
-        source_db=source_db,
-    )
-
-
-@router.post("/edge_search", response_model=EdgeSearchResp)
-def edge_search(req: EdgeSearchRequest):
-    return edge_search_service.edge_search(req)

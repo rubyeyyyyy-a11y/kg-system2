@@ -12,9 +12,6 @@ from app.schemas.discovery import (
 from app.schemas.graph import (
     ExpandResp,
     ExpandRequest,
-    MultiEntityGraphApplyPathsRequest,
-    MultiEntityGraphRequest,
-    MultiEntityGraphResp,
     RelationTypesResp,
     SubgraphResp,
     SubgraphRequest,
@@ -65,16 +62,6 @@ def relation_types(
     offset: int = Query(default=0, ge=0),
 ):
     return graph_service.relation_types(q=q, limit=limit, offset=offset)
-
-
-@router.post("/multi_entity_graph", response_model=MultiEntityGraphResp)
-def multi_entity_graph(req: MultiEntityGraphRequest):
-    return graph_service.multi_entity_graph(req)
-
-
-@router.post("/multi_entity_graph_apply_paths", response_model=MultiEntityGraphResp)
-def multi_entity_graph_apply_paths(req: MultiEntityGraphApplyPathsRequest):
-    return graph_service.multi_entity_graph_apply_paths(req)
 
 
 @router.post("/graph/discovery", response_model=GraphDiscoveryResp)

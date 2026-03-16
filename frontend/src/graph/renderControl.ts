@@ -1,4 +1,4 @@
-export type GraphMode = "legacy" | "discovery";
+export type GraphMode = "drilldown" | "discovery";
 
 export type GraphRenderReason =
   | "initial_discovery"
@@ -10,11 +10,11 @@ export type GraphRenderReason =
   | "entity_coverage_toggle"
   | "relation_coverage_toggle"
   | "user_relayout"
-  | "legacy_replace"
-  | "legacy_expand"
-  | "legacy_reroot"
-  | "legacy_reveal"
-  | "legacy_collapse";
+  | "drilldown_replace"
+  | "drilldown_expand"
+  | "drilldown_reroot"
+  | "drilldown_reveal"
+  | "drilldown_collapse";
 
 export type GraphLayoutMode = "initial-full" | "incremental-insert" | "manual-full" | "preserve";
 
@@ -110,7 +110,7 @@ export function deriveGraphLayoutPlan(mutation: GraphRenderMutation): GraphLayou
       affectedNodeIds: mutation.affectedNodeIds,
     };
   }
-  if (mutation.graphMode === "legacy") {
+  if (mutation.graphMode === "drilldown") {
     return {
       mode: "initial-full",
       reason: mutation.reason,

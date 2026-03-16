@@ -102,7 +102,7 @@ export function useGraphData({
   const [budgetTier, setBudgetTier] = useState(0);
   const renderMutationSequenceRef = useRef(0);
   const [renderMutation, setRenderMutation] = useState<GraphRenderMutation>(() =>
-    createGraphRenderMutation("legacy", "legacy_replace")
+    createGraphRenderMutation("drilldown", "drilldown_replace")
   );
 
   const rootVidRef = useRef<number | null>(null);
@@ -126,7 +126,7 @@ export function useGraphData({
   ) {
     renderMutationSequenceRef.current += 1;
     setRenderMutation(
-      createGraphRenderMutation("legacy", reason, renderMutationSequenceRef.current, {
+      createGraphRenderMutation("drilldown", reason, renderMutationSequenceRef.current, {
         anchorNodeId: patch?.anchorNodeId ?? null,
         affectedNodeIds: patch?.affectedNodeIds ?? [],
       })
@@ -186,7 +186,7 @@ export function useGraphData({
     resetExpandProbeCache();
     resetPanelGroupingForNewRoot(params.nodes, params.rootVid);
     onClearSelection();
-    commitRenderMutation("legacy_replace", {
+    commitRenderMutation("drilldown_replace", {
       anchorNodeId: String(params.rootVid),
       affectedNodeIds: params.nodes.map((node) => String(node.id)),
     });
@@ -443,7 +443,7 @@ export function useGraphData({
 
         onSelectNode(autoShowIds[0]);
       }
-      commitRenderMutation("legacy_expand", {
+      commitRenderMutation("drilldown_expand", {
         anchorNodeId: String(fromVid),
         affectedNodeIds: json.added_nodes.map((node) => String(node.id)),
       });
@@ -495,7 +495,7 @@ export function useGraphData({
       resetPanelGroupingForNewRoot(json.nodes, vid);
       onClearSelection();
       onSelectNode(vid);
-      commitRenderMutation("legacy_reroot", {
+      commitRenderMutation("drilldown_reroot", {
         anchorNodeId: String(vid),
         affectedNodeIds: json.nodes.map((node) => String(node.id)),
       });
@@ -528,7 +528,7 @@ export function useGraphData({
     });
 
     if (autoSelect) onSelectNode(vid);
-    commitRenderMutation("legacy_reveal", {
+    commitRenderMutation("drilldown_reveal", {
       anchorNodeId: String(vid),
       affectedNodeIds: [String(vid)],
     });
@@ -550,7 +550,7 @@ export function useGraphData({
     });
 
     if (selectedNodeVid === vid) onClearSelection();
-    commitRenderMutation("legacy_collapse", {
+    commitRenderMutation("drilldown_collapse", {
       anchorNodeId: String(vid),
       affectedNodeIds: [String(vid)],
     });
@@ -588,7 +588,7 @@ export function useGraphData({
       next.delete(fromVid);
       return next;
     });
-    commitRenderMutation("legacy_collapse", {
+    commitRenderMutation("drilldown_collapse", {
       anchorNodeId: String(fromVid),
       affectedNodeIds: targetIds.map((id) => String(id)),
     });

@@ -515,36 +515,6 @@ api_specification:
       request_params: []
       response_structure:
         - string
-    - endpoint: /api/multi_entity_graph
-      method: POST
-      request_params:
-        vids: int[]
-        direct_only: bool
-        explain_paths: bool
-        k: int
-        relations: string[]
-        max_nodes: int
-        max_edges: int
-        per_pair_path_limit: int
-        ignore_direction: bool
-      response_structure:
-        nodes: GraphNode[]
-        edges: GraphEdge[]
-        stats: object
-        path_candidates: object[]
-    - endpoint: /api/multi_entity_graph_apply_paths
-      method: POST
-      request_params:
-        base_request: object
-        choices:
-          - u: int
-            v: int
-            chosen_index: int
-      response_structure:
-        nodes: GraphNode[]
-        edges: GraphEdge[]
-        stats: object
-        path_candidates: object[]
     - endpoint: /api/node/{vid}
       method: GET
       request_params:
@@ -670,44 +640,10 @@ api_specification:
           error_code: VALIDATION_ERROR
           field: string
           message: string
-    - endpoint: /api/edge_suggest
-      method: GET
-      request_params:
-        q: string
-        limit: int=12
-        relation: string|null
-        source_db: string|null
-      response_structure:
-        q: string
-        items:
-          - edge_type: string
-            src: int
-            dst: int
-            rank: string
-            relation: string
-            source_db: string
-            score: number|null
-            src_label: string
-            dst_label: string
-        truncated: bool
-    - endpoint: /api/edge_search
-      method: POST
-      request_params:
-        q: string
-        search_in_relation: bool
-        search_in_props: bool
-        source_db: string|null
-        relation: string|null
-        limit: int
-      response_structure:
-        edges:
-          - edge_type: string
-            src: int
-            dst: int
-            rank: string
-            relation: string
-            source_db: string
-            score: number|null
+    - note: as of 2026-03-16, `/api/multi_entity_graph*` and `/api/edge_*` were retired during legacy module deletion.
+      replacement:
+        - graph exploration: `/api/graph/discovery` + `/api/subgraph` + `/api/expand`
+        - candidate search: `/api/search` + `/api/suggest` + `/api/suggest_raw_id` + `/api/discovery/entity_candidates`
             src_label: string
             dst_label: string
             snippet: string

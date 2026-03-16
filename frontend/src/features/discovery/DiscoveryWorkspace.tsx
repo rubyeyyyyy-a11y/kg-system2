@@ -134,7 +134,7 @@ export function DiscoveryWorkspaceTopBar({
       ) : null}
       {inDrilldown ? (
         <div style={{ width: "100%", fontSize: 12, color: "#666" }}>
-          当前处于统一关系发现下的正式 drill-down 视图；不会隐式跳转到 legacy。
+          当前处于统一关系发现下的正式 drill-down 视图；不会隐式跳转到旧模块。
         </div>
       ) : null}
       {spaceSwitchBlocked ? (
