@@ -11,7 +11,6 @@ from app.services.imports import (
     cleanup_planning_service,
     cleanup_service,
     es_postprocess_service,
-    file_store,
     import_ngql_service,
     job_runtime,
     metadata_postprocess_service,
@@ -23,8 +22,7 @@ from app.services.imports.models import (
     CleanupJobRecord,
     ImportBatchItemRecord,
 )
-from app.services.imports.state_repository import cleanup_jobs as cleanup_jobs_repo
-from app.services.imports.state_repository import import_batches
+from app.services.imports.state_repository import cleanup_state
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +41,7 @@ def _update_cleanup_job(record: CleanupJobRecord, **changes) -> CleanupJobRecord
     if record.started_at and record.finished_at:
         record.duration_ms = max(0, (int(record.finished_at) - int(record.started_at)) * 1000)
     record.updated_at = int(time.time())
-    cleanup_jobs_repo.save(record)
+    cleanup_state.save_cleanup_job(record)
     return record
 
 
@@ -58,11 +56,7 @@ def _set_phase(record: CleanupJobRecord, phase: str, *, force_event: bool = Fals
 
 
 def _update_batch_cleanup_status(batch_ids: list[str], cleanup_status: str) -> None:
-    for batch_id in batch_ids:
-        try:
-            import_batches.update(batch_id, cleanup_status=cleanup_status)
-        except Exception:
-            continue
+    cleanup_state.update_batch_cleanup_statuses(batch_ids, cleanup_status)
 
 
 def _relation_key(item: ImportBatchItemRecord) -> tuple[str, int, int, int]:
@@ -227,15 +221,15 @@ def _write_cleanup_artifacts(
     artifacts = _merge_cleanup_artifacts(
         record.artifacts,
         [
-            file_store.write_cleanup_job_artifact(record.cleanup_job_id, "summary.json", summary_payload),
-            file_store.write_cleanup_job_artifact(
+            cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "summary.json", summary_payload),
+            cleanup_state.write_cleanup_job_artifact(
                 record.cleanup_job_id,
                 "conflicts.json",
                 [item.model_dump() if hasattr(item, "model_dump") else dict(item) for item in record.conflicts],
             ),
-            file_store.write_cleanup_job_artifact(record.cleanup_job_id, "skipped_entities.json", skipped_entities),
-            file_store.write_cleanup_job_artifact(record.cleanup_job_id, "skipped_relations.json", skipped_relations),
-            file_store.write_cleanup_job_artifact(record.cleanup_job_id, "verify_summary.json", record.verify_summary),
+            cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "skipped_entities.json", skipped_entities),
+            cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "skipped_relations.json", skipped_relations),
+            cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "verify_summary.json", record.verify_summary),
         ],
     )
     return _update_cleanup_job(record, artifacts=artifacts)
@@ -259,17 +253,17 @@ def _write_cleanup_plan_artifacts(
     plan: cleanup_planning_service.CleanupPlanningResult,
 ) -> CleanupJobRecord:
     plan_artifacts = [
-        file_store.write_cleanup_job_artifact(record.cleanup_job_id, "plan_summary.json", plan.plan_summary.model_dump()),
-        file_store.write_cleanup_job_artifact(record.cleanup_job_id, "blocked_entities.json", plan.blocked_entities_artifact),
-        file_store.write_cleanup_job_artifact(record.cleanup_job_id, "deletable_entities.json", plan.deletable_entities_artifact),
-        file_store.write_cleanup_job_artifact(record.cleanup_job_id, "deletable_relations.json", plan.deletable_relations_artifact),
+        cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "plan_summary.json", plan.plan_summary.model_dump()),
+        cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "blocked_entities.json", plan.blocked_entities_artifact),
+        cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "deletable_entities.json", plan.deletable_entities_artifact),
+        cleanup_state.write_cleanup_job_artifact(record.cleanup_job_id, "deletable_relations.json", plan.deletable_relations_artifact),
     ]
     merged = _merge_cleanup_artifacts(record.artifacts, plan_artifacts)
     return _update_cleanup_job(record, has_plan_artifacts=True, artifacts=merged)
 
 
 def run_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
-    record = cleanup_jobs_repo.load(cleanup_job_id)
+    record = cleanup_state.load_cleanup_job(cleanup_job_id)
     with use_space(record.space_id):
         now = int(time.time())
         record = _update_cleanup_job(
@@ -465,7 +459,7 @@ def run_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
             return record
         except CleanupExecutionError as exc:
             logger.exception("cleanup_job_failed cleanup_job_id=%s phase=%s kind=%s error=%s", cleanup_job_id, exc.phase, exc.kind, str(exc))
-            record = cleanup_jobs_repo.load(cleanup_job_id)
+            record = cleanup_state.load_cleanup_job(cleanup_job_id)
             record = _update_cleanup_job(
                 record,
                 status="failed",
@@ -507,7 +501,7 @@ def run_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
             return record
         except Exception as exc:
             logger.exception("cleanup_job_failed cleanup_job_id=%s error=%s", cleanup_job_id, str(exc))
-            record = cleanup_jobs_repo.load(cleanup_job_id)
+            record = cleanup_state.load_cleanup_job(cleanup_job_id)
             failure_phase = record.phase or "planning"
             record = _update_cleanup_job(
                 record,
@@ -552,7 +546,7 @@ def run_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
 
 _RUNTIME = job_runtime.QueuedWorkerRuntime[CleanupJobRecord](
     worker_name="import-cleanup-job-worker",
-    list_records=cleanup_jobs_repo.list,
+    list_records=cleanup_state.list_cleanup_jobs,
     run_record=lambda record: run_cleanup_job(record.cleanup_job_id),
     record_id=lambda record: record.cleanup_job_id,
     sort_key=lambda record: (record.created_at, record.cleanup_job_id),

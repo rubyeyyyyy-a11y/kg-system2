@@ -17,7 +17,7 @@ from app.services.imports.models import (
     ImportBatchItemRecord,
     ImportBatchRecord,
 )
-from app.services.imports.state_repository import import_batches
+from app.services.imports.state_repository import cleanup_state
 
 
 class CleanupPlanningError(RuntimeError):
@@ -25,6 +25,14 @@ class CleanupPlanningError(RuntimeError):
         super().__init__(message)
         self.kind = kind
         self.detail = dict(detail or {})
+
+
+@dataclass
+class CleanupRequestSpec:
+    space_id: str
+    batch_ids: list[str] = field(default_factory=list)
+    scope: str = "full_batch"
+    created_by: str = "import_workspace_cleanup"
 
 
 @dataclass
@@ -70,9 +78,18 @@ class CleanupPlanningResult:
         return [item.model_dump() for item in self.deletable_relation_records]
 
 
+@dataclass
+class CleanupPlanningSnapshot:
+    space_id: str
+    batch_ids: list[str] = field(default_factory=list)
+    selected_items: list[ImportBatchItemRecord] = field(default_factory=list)
+    relation_items_in_space: list[ImportBatchItemRecord] = field(default_factory=list)
+    batch_items_by_batch_id: dict[str, list[ImportBatchItemRecord]] = field(default_factory=dict)
+
+
 def _require_batch(batch_id: str) -> ImportBatchRecord:
     try:
-        return import_batches.load(batch_id)
+        return cleanup_state.load_batch(batch_id)
     except Exception:
         raise_import_http_error(
             status_code=404,
@@ -93,7 +110,7 @@ def _validate_batch_access(batch: ImportBatchRecord, *, expected_space: str) -> 
     return batch
 
 
-def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: str) -> CleanupRequestContext:
+def normalize_cleanup_request(*, batch_ids: list[str], scope: str, created_by: str, space_id: str | None = None) -> CleanupRequestSpec:
     unique_batch_ids: list[str] = []
     for batch_id in batch_ids:
         normalized = str(batch_id or "").strip()
@@ -113,16 +130,24 @@ def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: st
             message=f"unsupported cleanup scope `{scope}`",
             field="scope",
         )
+    return CleanupRequestSpec(
+        space_id=str(space_id or get_current_space()),
+        batch_ids=unique_batch_ids,
+        scope=scope,
+        created_by=validate_updated_by(created_by),
+    )
 
-    actor = validate_updated_by(created_by)
-    current_space = get_current_space()
+
+def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: str, space_id: str | None = None) -> CleanupRequestContext:
+    request = normalize_cleanup_request(batch_ids=batch_ids, scope=scope, created_by=created_by, space_id=space_id)
     batches: list[ImportBatchRecord] = []
     requested_relation_count = 0
     requested_entity_count = 0
     validation_errors: list[str] = []
     validation_results: list[dict[str, Any]] = []
-    for batch_id in unique_batch_ids:
-        batch = _validate_batch_access(_require_batch(batch_id), expected_space=current_space)
+    batch_items_by_batch_id = cleanup_state.load_batch_items_for_batches(request.batch_ids)
+    for batch_id in request.batch_ids:
+        batch = _validate_batch_access(_require_batch(batch_id), expected_space=request.space_id)
         batch_error: str | None = None
         if not batch.is_test_data:
             batch_error = f"batch `{batch_id}` is not marked as test data and cannot be cleaned up"
@@ -130,7 +155,7 @@ def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: st
             batch_error = f"batch `{batch_id}` already cleanup_succeeded and cannot be cleaned up again by default"
         elif batch.cleanup_status in {"queued", "running"}:
             batch_error = f"batch `{batch_id}` already has a queued or running cleanup"
-        elif not import_batches.batch_items_exist(batch_id):
+        elif not cleanup_state.batch_items_exist(batch_id):
             batch_error = f"batch `{batch_id}` has no item ledger and is read-only"
         validation_results.append(
             {
@@ -143,7 +168,7 @@ def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: st
         if batch_error is not None:
             validation_errors.append(batch_error)
             continue
-        items = import_batches.load_items(batch_id)
+        items = batch_items_by_batch_id.get(batch_id, [])
         requested_relation_count += sum(1 for item in items if item.item_type == "relation" and item.created_by_batch)
         requested_entity_count += sum(1 for item in items if item.item_type == "entity" and item.created_by_batch)
         batches.append(batch)
@@ -156,10 +181,10 @@ def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: st
             extra={"batch_results": validation_results},
         )
     return CleanupRequestContext(
-        space_id=current_space,
-        batch_ids=unique_batch_ids,
-        scope=scope,
-        created_by=actor,
+        space_id=request.space_id,
+        batch_ids=request.batch_ids,
+        scope=request.scope,
+        created_by=request.created_by,
         requested_relation_count=requested_relation_count,
         requested_entity_count=requested_entity_count,
         batches=batches,
@@ -167,11 +192,18 @@ def validate_cleanup_request(*, batch_ids: list[str], scope: str, created_by: st
     )
 
 
-def _selected_items(batch_ids: list[str]) -> list[ImportBatchItemRecord]:
-    items: list[ImportBatchItemRecord] = []
+def _build_planning_snapshot(*, space_id: str, batch_ids: list[str]) -> CleanupPlanningSnapshot:
+    batch_items_by_batch_id = cleanup_state.load_batch_items_for_batches(batch_ids)
+    selected_items: list[ImportBatchItemRecord] = []
     for batch_id in batch_ids:
-        items.extend(import_batches.load_items(batch_id))
-    return items
+        selected_items.extend(batch_items_by_batch_id.get(batch_id, []))
+    return CleanupPlanningSnapshot(
+        space_id=space_id,
+        batch_ids=list(batch_ids),
+        selected_items=selected_items,
+        relation_items_in_space=cleanup_state.list_relation_items(space_id=space_id),
+        batch_items_by_batch_id=batch_items_by_batch_id,
+    )
 
 
 def relation_key(item: ImportBatchItemRecord) -> tuple[str, int, int, int]:
@@ -219,16 +251,11 @@ def _summarize_item(item: ImportBatchItemRecord, *, reason: str, details: dict[s
 
 def _build_ledger_conflicts(
     *,
-    space_id: str,
     batch_ids: list[str],
+    all_relation_items: list[ImportBatchItemRecord],
     relation_delete_keys: set[tuple[str, int, int, int]],
     entity_candidates: list[ImportBatchItemRecord],
 ) -> list[CleanupConflictRecord]:
-    all_relation_items: list[ImportBatchItemRecord] = []
-    for batch in import_batches.list():
-        if str(batch.space_id or "") != space_id:
-            continue
-        all_relation_items.extend([item for item in import_batches.load_items(batch.batch_id) if item.item_type == "relation"])
     conflicts: list[CleanupConflictRecord] = []
     for entity_item in entity_candidates:
         vid = int(entity_item.vid or 0)
@@ -289,6 +316,20 @@ def plan_cleanup(
     scope: str,
     check_entity_live_references: Callable[[str, int, set[tuple[str, int, int, int]]], dict[str, Any]] | None = None,
 ) -> CleanupPlanningResult:
+    snapshot = _build_planning_snapshot(space_id=space_id, batch_ids=batch_ids)
+    return _plan_cleanup_snapshot(
+        snapshot=snapshot,
+        scope=scope,
+        check_entity_live_references=check_entity_live_references,
+    )
+
+
+def _plan_cleanup_snapshot(
+    *,
+    snapshot: CleanupPlanningSnapshot,
+    scope: str,
+    check_entity_live_references: Callable[[str, int, set[tuple[str, int, int, int]]], dict[str, Any]] | None = None,
+) -> CleanupPlanningResult:
     def _check_live(
         *,
         target_space_id: str,
@@ -303,7 +344,7 @@ def plan_cleanup(
             excluding_relation_keys=excluding_relation_keys,
         )
 
-    items = _selected_items(batch_ids)
+    items = list(snapshot.selected_items)
     relation_items_requested = [item for item in items if item.item_type == "relation" and item.created_by_batch]
     entity_items_requested = [item for item in items if item.item_type == "entity" and item.created_by_batch]
     read_only_relations = [item for item in items if item.item_type == "relation" and not item.created_by_batch]
@@ -331,8 +372,8 @@ def plan_cleanup(
 
     if scope == "full_batch":
         ledger_conflicts = _build_ledger_conflicts(
-            space_id=space_id,
-            batch_ids=batch_ids,
+            batch_ids=snapshot.batch_ids,
+            all_relation_items=snapshot.relation_items_in_space,
             relation_delete_keys=relation_delete_keys,
             entity_candidates=entity_items,
         )
@@ -356,7 +397,7 @@ def plan_cleanup(
                 continue
             try:
                 live_scan = _check_live(
-                    target_space_id=space_id,
+                    target_space_id=snapshot.space_id,
                     vid=vid,
                     excluding_relation_keys=relation_delete_keys,
                 )
