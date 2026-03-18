@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.imports import executor_service, file_store, import_ngql_service
-from app.services.imports.models import ImportJobState
+from app.services.imports.models import ImportBatchItemRecord, ImportBatchRecord, ImportJobState
 from app.services.spaces import registry_service
 from app.services.spaces.models import SpaceSummary
 
@@ -64,6 +64,8 @@ class ImportApiTest(unittest.TestCase):
         file_store.STAGING_FILES_DIR = root_path / "import-staging" / "files"
         file_store.DRAFTS_DIR = root_path / "import-drafts"
         file_store.JOBS_DIR = root_path / "import-jobs"
+        file_store.IMPORT_BATCHES_DIR = root_path / "import-batches"
+        file_store.IMPORT_CLEANUP_JOBS_DIR = root_path / "import-cleanup-jobs"
 
     def _patch_registry_root(self, root: str):
         root_path = Path(root) / "space-registry"
@@ -169,6 +171,261 @@ class ImportApiTest(unittest.TestCase):
             self.assertEqual(job.status_code, 200, job.text)
             self.assertEqual(job.json()["status"], "queued")
             self.assertEqual(job.json()["integration_level"], "fully_integrated")
+            self.assertTrue(job.json()["batch_id"].startswith("batch_"))
+
+    def test_batches_and_cleanup_job_endpoints(self):
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_api_1",
+                space_id="demo_kg",
+                draft_id="draft_api_1",
+                job_id="job_api_1",
+                status="succeeded",
+                is_test_data=True,
+            )
+        )
+        file_store.append_batch_item(
+            ImportBatchItemRecord(
+                batch_id="batch_api_1",
+                space_id="demo_kg",
+                job_id="job_api_1",
+                item_type="entity",
+                vid=1,
+                entity_name="Alpha",
+            )
+        )
+        with (
+            mock.patch("app.services.imports.cleanup_executor_service.ensure_worker_running"),
+            self._client() as client,
+        ):
+            batches = client.get("/api/import/batches")
+            self.assertEqual(batches.status_code, 200, batches.text)
+            self.assertEqual(batches.json()[0]["batch_id"], "batch_api_1")
+
+            items = client.get("/api/import/batches/batch_api_1/items")
+            self.assertEqual(items.status_code, 200, items.text)
+            self.assertEqual(items.json()[0]["vid"], 1)
+
+            cleanup = client.post(
+                "/api/import/batches/cleanup",
+                json={"batch_ids": ["batch_api_1"], "scope": "full_batch", "created_by": "tester"},
+            )
+            self.assertEqual(cleanup.status_code, 200, cleanup.text)
+            self.assertEqual(cleanup.json()["status"], "queued")
+
+            cleanup_jobs = client.get("/api/import/cleanup-jobs")
+            self.assertEqual(cleanup_jobs.status_code, 200, cleanup_jobs.text)
+            self.assertEqual(cleanup_jobs.json()[0]["cleanup_job_id"], cleanup.json()["cleanup_job_id"])
+
+    def test_cleanup_plan_preview_endpoint_happy_path_and_no_side_effects(self):
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_preview_api",
+                space_id="demo_kg",
+                draft_id="draft_preview_api",
+                job_id="job_preview_api",
+                status="succeeded",
+                is_test_data=True,
+            )
+        )
+        file_store.append_batch_item_if_absent(
+            ImportBatchItemRecord(
+                batch_id="batch_preview_api",
+                space_id="demo_kg",
+                job_id="job_preview_api",
+                item_type="relation",
+                src_vid=11,
+                dst_vid=12,
+                relation="rel_preview",
+                rank=0,
+                edge_type="REL2",
+                created_by_batch=True,
+            )
+        )
+        file_store.append_batch_item_if_absent(
+            ImportBatchItemRecord(
+                batch_id="batch_preview_api",
+                space_id="demo_kg",
+                job_id="job_preview_api",
+                item_type="entity",
+                vid=11,
+                entity_name="Alpha",
+                entity_raw_id="alpha-11",
+                created_by_batch=True,
+            )
+        )
+        with (
+            mock.patch(
+                "app.services.imports.cleanup_planning_service.cleanup_graph_scan_service.check_entity_live_references",
+                return_value={
+                    "has_blockers": False,
+                    "live_blocking_count": 0,
+                    "scan_note": "scan_ok",
+                    "scan_edge_type": "REL2",
+                    "excluded_by_plan_count": 1,
+                },
+            ),
+            mock.patch("app.services.imports.cleanup_executor_service.import_ngql_service.delete_edge") as delete_edge_mock,
+            mock.patch("app.services.imports.cleanup_executor_service.import_ngql_service.delete_vertex") as delete_vertex_mock,
+            self._client() as client,
+        ):
+            resp = client.post(
+                "/api/import/batches/cleanup-plan",
+                json={"batch_ids": ["batch_preview_api"], "scope": "full_batch", "created_by": "tester"},
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["scope"], "full_batch")
+        self.assertEqual(payload["plan_summary"]["requested_entity_count"], 1)
+        self.assertEqual(payload["plan_summary"]["requested_relation_count"], 1)
+        self.assertEqual(payload["plan_summary"]["deletable_entity_count"], 1)
+        self.assertEqual(payload["plan_summary"]["deletable_relation_count"], 1)
+        self.assertFalse(payload["has_plan_artifacts"])
+        self.assertEqual(file_store.list_cleanup_jobs(), [])
+        delete_edge_mock.assert_not_called()
+        delete_vertex_mock.assert_not_called()
+
+    def test_cleanup_plan_preview_all_blocked_returns_stable_summary(self):
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_preview_blocked",
+                space_id="demo_kg",
+                draft_id="draft_preview_blocked",
+                job_id="job_preview_blocked",
+                status="succeeded",
+                is_test_data=True,
+            )
+        )
+        file_store.append_batch_item_if_absent(
+            ImportBatchItemRecord(
+                batch_id="batch_preview_blocked",
+                space_id="demo_kg",
+                job_id="job_preview_blocked",
+                item_type="entity",
+                vid=21,
+                entity_name="Blocked",
+                entity_raw_id="blocked-21",
+                created_by_batch=True,
+            )
+        )
+        with (
+            mock.patch(
+                "app.services.imports.cleanup_planning_service.cleanup_graph_scan_service.check_entity_live_references",
+                return_value={
+                    "has_blockers": True,
+                    "live_blocking_count": 2,
+                    "scan_note": "blocked",
+                    "scan_edge_type": "REL2",
+                    "excluded_by_plan_count": 0,
+                    "live_blocking_edges": [{"edge_type": "REL2", "src_vid": 99, "dst_vid": 21}],
+                },
+            ),
+            self._client() as client,
+        ):
+            resp = client.post(
+                "/api/import/batches/cleanup-plan",
+                json={"batch_ids": ["batch_preview_blocked"], "scope": "full_batch", "created_by": "tester"},
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["plan_summary"]["blocked_entity_count"], 1)
+        self.assertEqual(payload["plan_summary"]["deletable_entity_count"], 0)
+        self.assertEqual(payload["plan_summary"]["deletable_relation_count"], 0)
+        self.assertEqual(payload["blocked_entities"]["total_count"], 1)
+        self.assertTrue(payload["warning_messages"])
+
+    def test_cleanup_plan_preview_rejects_invalid_batches(self):
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_preview_not_test",
+                space_id="demo_kg",
+                draft_id="draft_preview_not_test",
+                job_id="job_preview_not_test",
+                status="succeeded",
+                is_test_data=False,
+                cleanup_status="not_supported",
+            )
+        )
+        file_store.append_batch_item_if_absent(
+            ImportBatchItemRecord(
+                batch_id="batch_preview_not_test",
+                space_id="demo_kg",
+                job_id="job_preview_not_test",
+                item_type="entity",
+                vid=31,
+                entity_name="Gamma",
+                created_by_batch=True,
+            )
+        )
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_preview_no_ledger",
+                space_id="demo_kg",
+                draft_id="draft_preview_no_ledger",
+                job_id="job_preview_no_ledger",
+                status="succeeded",
+                is_test_data=True,
+            )
+        )
+        with self._client() as client:
+            not_test_resp = client.post(
+                "/api/import/batches/cleanup-plan",
+                json={"batch_ids": ["batch_preview_not_test"], "scope": "full_batch", "created_by": "tester"},
+            )
+            no_ledger_resp = client.post(
+                "/api/import/batches/cleanup-plan",
+                json={"batch_ids": ["batch_preview_no_ledger"], "scope": "full_batch", "created_by": "tester"},
+            )
+            missing_resp = client.post(
+                "/api/import/batches/cleanup-plan",
+                json={"batch_ids": ["batch_missing_preview"], "scope": "full_batch", "created_by": "tester"},
+            )
+
+        self.assertEqual(not_test_resp.status_code, 409, not_test_resp.text)
+        self.assertEqual(no_ledger_resp.status_code, 409, no_ledger_resp.text)
+        self.assertEqual(missing_resp.status_code, 404, missing_resp.text)
+
+    def test_cleanup_artifact_download_endpoint(self):
+        file_store.save_batch_record(
+            ImportBatchRecord(
+                batch_id="batch_cleanup_api",
+                space_id="demo_kg",
+                draft_id="draft_cleanup_api",
+                job_id="job_cleanup_api",
+                status="succeeded",
+                is_test_data=True,
+            )
+        )
+        file_store.append_batch_item_if_absent(
+            ImportBatchItemRecord(
+                batch_id="batch_cleanup_api",
+                space_id="demo_kg",
+                job_id="job_cleanup_api",
+                item_type="entity",
+                vid=101,
+                entity_name="Alpha",
+                created_by_batch=True,
+            )
+        )
+        with mock.patch("app.services.imports.cleanup_executor_service.ensure_worker_running"), self._client() as client:
+            created = client.post(
+                "/api/import/batches/cleanup",
+                json={"batch_ids": ["batch_cleanup_api"], "scope": "full_batch", "created_by": "tester"},
+            )
+            self.assertEqual(created.status_code, 200, created.text)
+            cleanup_job_id = created.json()["cleanup_job_id"]
+
+        file_store.write_cleanup_job_artifact(cleanup_job_id, "summary.json", {"ok": True, "cleanup_job_id": cleanup_job_id})
+        record = file_store.load_cleanup_job(cleanup_job_id)
+        record.artifacts = [file_store.write_cleanup_job_artifact(cleanup_job_id, "summary.json", {"ok": True, "cleanup_job_id": cleanup_job_id})]
+        file_store.save_cleanup_job(record)
+
+        with self._client() as client:
+            download = client.get(f"/api/import/cleanup-jobs/{cleanup_job_id}/artifacts/summary.json")
+        self.assertEqual(download.status_code, 200, download.text)
+        self.assertIn('"ok": true', download.text.lower())
 
     def test_entity_only_job_triggers_es_postprocess(self):
         with (

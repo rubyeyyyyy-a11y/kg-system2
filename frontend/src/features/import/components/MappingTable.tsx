@@ -1,10 +1,10 @@
 import type {
   ImportObjectType,
-  ImportPropertyMapping,
   ImportSchemaObject,
   ImportSource,
   ImportTargetMapping,
 } from "../types/import";
+import { EDGE_PROPERTY_FIELDS, VERTEX_PROPERTY_FIELDS, suggestTargetFromSource } from "../importRules";
 
 type MappingTableProps = {
   target: ImportTargetMapping;
@@ -13,9 +13,6 @@ type MappingTableProps = {
   onChange: (next: ImportTargetMapping) => void;
   onRemove?: () => void;
 };
-
-const VERTEX_PROPERTY_FIELDS = ["entity_name", "entity_type", "entity_raw_id", "description", "source"];
-const EDGE_PROPERTY_FIELDS = ["relation", "source", "evidence", "score"];
 
 function sourceForTarget(target: ImportTargetMapping, sources: ImportSource[]) {
   return sources.find((item) => item.source_id === target.source_id) || null;
@@ -29,26 +26,12 @@ function propertyOptions(target: ImportTargetMapping, schemaObjects: ImportSchem
 }
 
 function nextSourceDefaults(source: ImportSource | null, objectType: ImportObjectType) {
-  const columns = source?.columns || [];
-  const initialProperties: ImportPropertyMapping[] = [];
-  if (objectType === "tag") {
-    for (const column of columns) {
-      if (column === "VID" || column === "ID") continue;
-      initialProperties.push({ source_column: column, target_field: column });
-    }
-    return { identity_mapping: { id_column: columns.find((item) => item === "VID" || item === "ID") || "" }, property_mappings: initialProperties };
-  }
-  for (const column of columns) {
-    if (column === "SRC_VID" || column === "DST_VID" || column === "rank") continue;
-    initialProperties.push({ source_column: column, target_field: column });
-  }
+  if (!source) return { identity_mapping: {}, property_mappings: [], target_options: {} };
+  const nextTarget = suggestTargetFromSource(source, objectType);
   return {
-    identity_mapping: {
-      src_column: columns.find((item) => item === "SRC_VID" || item === "srcVID") || "",
-      dst_column: columns.find((item) => item === "DST_VID" || item === "dstVID") || "",
-      rank_column: columns.find((item) => item === "rank") || "",
-    },
-    property_mappings: initialProperties,
+    identity_mapping: nextTarget.identity_mapping,
+    property_mappings: nextTarget.property_mappings,
+    target_options: nextTarget.target_options,
   };
 }
 
@@ -81,6 +64,7 @@ export function MappingTable({ target, sources, schemaObjects, onChange, onRemov
                 object_name: objectType === "tag" ? "Entity" : "REL2",
                 identity_mapping: nextDefaults.identity_mapping,
                 property_mappings: nextDefaults.property_mappings,
+                target_options: nextDefaults.target_options,
               });
             }}
           >
@@ -104,6 +88,7 @@ export function MappingTable({ target, sources, schemaObjects, onChange, onRemov
                 source_id: event.target.value,
                 identity_mapping: nextDefaults.identity_mapping,
                 property_mappings: nextDefaults.property_mappings,
+                target_options: nextDefaults.target_options,
               });
             }}
           >

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { edgeDetail as edgeDetailApi, editableFields as editableFieldsApi, nodeDetail as nodeDetailApi } from "../api/kg";
+import { DynamicEditForm } from "../features/edit/components/DynamicEditForm";
+import { useEditDraft } from "../features/edit/hooks/useEditDraft";
+import { useEditLayout } from "../features/edit/hooks/useEditLayout";
+import { normalizeEdgeDetail, normalizeNodeDetail } from "../features/detail/utils/normalizeDetail";
 import type {
   EdgeDetailResp,
   EdgePatchResp,
@@ -59,44 +63,70 @@ function parseHttpError(err: unknown): { status: number | null; message: string 
   }
 }
 
-function FormField({
-  spec,
-  value,
+function buildPatchSet(
+  sections: ReturnType<typeof useEditLayout>,
+  draft: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  sections.forEach((section) => {
+    section.fields.forEach((field) => {
+      if (field.readOnly) return;
+      const nextValue = draft[field.name] || "";
+      if (nextValue === field.value) return;
+      out[field.name] = nextValue;
+    });
+  });
+  return out;
+}
+
+function EditorBlock({
+  title,
+  subtitle,
+  sections,
+  draft,
   disabled,
   onChange,
+  onReload,
+  onSave,
+  saveLabel,
+  reloadLabel = "重新加载详情",
+  reloadTestId,
+  saveTestId,
 }: {
-  spec: EditableFieldSpec;
-  value: string;
+  title: string;
+  subtitle: string;
+  sections: ReturnType<typeof useEditLayout>;
+  draft: Record<string, string>;
   disabled?: boolean;
-  onChange: (next: string) => void;
+  onChange: (fieldName: string, next: string) => void;
+  onReload?: () => void;
+  onSave: () => void;
+  saveLabel: string;
+  reloadLabel?: string;
+  reloadTestId?: string;
+  saveTestId?: string;
 }) {
-  const counterText = `${value.length}/${spec.maxLen}`;
   return (
-    <label style={{ display: "grid", gap: 4, fontSize: 12, color: "#444" }}>
-      <span>
-        {spec.name} {spec.required ? "*" : ""} <span style={{ color: "#888" }}>({counterText})</span>
-      </span>
-      {spec.multiline ? (
-        <textarea
-          data-testid={`edit-field-${spec.name}`}
-          value={value}
-          disabled={disabled}
-          rows={4}
-          maxLength={spec.maxLen}
-          onChange={(e) => onChange(e.target.value)}
-          style={{ width: "100%", padding: 8, resize: "vertical" }}
-        />
-      ) : (
-        <input
-          data-testid={`edit-field-${spec.name}`}
-          value={value}
-          disabled={disabled}
-          maxLength={spec.maxLen}
-          onChange={(e) => onChange(e.target.value)}
-          style={{ width: "100%", padding: 8 }}
-        />
-      )}
-    </label>
+    <div style={{ display: "grid", gap: 10 }}>
+      <div style={{ fontSize: 12, color: "#666" }}>{title}</div>
+      <div style={{ fontSize: 12, color: "#666" }}>{subtitle}</div>
+      <DynamicEditForm
+        sections={sections}
+        draft={draft}
+        disabled={disabled}
+        onChange={onChange}
+      />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {onReload ? (
+          <button data-testid={reloadTestId} onClick={onReload} disabled={disabled} style={{ padding: "6px 10px" }}>
+            {reloadLabel}
+          </button>
+        ) : null}
+        <button data-testid={saveTestId} onClick={onSave} disabled={disabled} style={{ padding: "6px 10px" }}>
+          {saveLabel}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -112,7 +142,6 @@ export function EditWritebackPanel({
   onSaveEdgeEdit,
 }: EditWritebackPanelProps) {
   const [schema, setSchema] = useState<EditableFieldsResp | null>(null);
-  const [schemaLoading, setSchemaLoading] = useState(false);
   const [schemaError, setSchemaError] = useState<string | null>(null);
 
   const [defaultUpdatedBy, setDefaultUpdatedBy] = useState<string>(() => {
@@ -128,39 +157,29 @@ export function EditWritebackPanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [selectedNodeSet, setSelectedNodeSet] = useState<Record<string, string>>({});
-  const [selectedEdgeSet, setSelectedEdgeSet] = useState<Record<string, string>>({});
-
   const [directNodeVid, setDirectNodeVid] = useState("");
   const [directNodeDetail, setDirectNodeDetail] = useState<NodeDetailResp | null>(null);
-  const [directNodeSet, setDirectNodeSet] = useState<Record<string, string>>({});
   const [directNodeLoading, setDirectNodeLoading] = useState(false);
 
   const [directEdgeSrc, setDirectEdgeSrc] = useState("");
   const [directEdgeDst, setDirectEdgeDst] = useState("");
   const [directEdgeRank, setDirectEdgeRank] = useState("");
   const [directEdgeDetail, setDirectEdgeDetail] = useState<EdgeDetailResp | null>(null);
-  const [directEdgeSet, setDirectEdgeSet] = useState<Record<string, string>>({});
   const [directEdgeLoading, setDirectEdgeLoading] = useState(false);
 
-  const nodeSpecs = useMemo(() => schema?.entity?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
-  const edgeSpecs = useMemo(() => schema?.edge?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
+  const nodeMetadataFields = useMemo(() => schema?.entity?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
+  const edgeMetadataFields = useMemo(() => schema?.edge?.fields ?? EMPTY_EDITABLE_FIELDS, [schema]);
 
   useEffect(() => {
     let cancelled = false;
     async function loadSchema() {
-      setSchemaLoading(true);
-      setSchemaError(null);
       try {
         const resp = await editableFieldsApi();
         if (cancelled) return;
         setSchema(resp);
       } catch (e: unknown) {
         if (cancelled) return;
-        const parsed = parseHttpError(e);
-        setSchemaError(parsed.message);
-      } finally {
-        if (!cancelled) setSchemaLoading(false);
+        setSchemaError(parseHttpError(e).message);
       }
     }
     void loadSchema();
@@ -178,37 +197,73 @@ export function EditWritebackPanel({
     setSaveUpdatedBy(defaultUpdatedBy);
   }, [defaultUpdatedBy]);
 
-  useEffect(() => {
-    if (sel.kind !== "node" || !nodeDetail) {
-      setSelectedNodeSet({});
-      return;
-    }
-    const next: Record<string, string> = {};
-    for (const spec of nodeSpecs) {
-      const raw = (nodeDetail as Record<string, unknown>)[spec.name];
-      next[spec.name] = typeof raw === "string" ? raw : "";
-    }
-    setSelectedNodeSet(next);
-  }, [sel, nodeDetail, nodeSpecs]);
+  const selectedNodeNormalized = useMemo(
+    () => normalizeNodeDetail({ detail: sel.kind === "node" ? nodeDetail : null, selectedNodeBrief: null, hopLevel: null }),
+    [nodeDetail, sel.kind],
+  );
+  const selectedEdgeNormalized = useMemo(
+    () =>
+      normalizeEdgeDetail({
+        detail: sel.kind === "edge" ? edgeDetail : null,
+        selection: sel.kind === "edge" ? sel : null,
+      }),
+    [edgeDetail, sel],
+  );
+  const directNodeNormalized = useMemo(
+    () => normalizeNodeDetail({ detail: directNodeDetail, selectedNodeBrief: null, hopLevel: null }),
+    [directNodeDetail],
+  );
+  const directEdgeNormalized = useMemo(
+    () =>
+      normalizeEdgeDetail({
+        detail: directEdgeDetail,
+        selection:
+          directEdgeDetail == null
+            ? null
+            : {
+                kind: "edge",
+                src: directEdgeDetail.src,
+                dst: directEdgeDetail.dst,
+                rank: directEdgeDetail.rank,
+                edge_type: directEdgeDetail.edge_type,
+                relation: directEdgeDetail.relation || "",
+                source: "external_detail",
+                source_db: directEdgeDetail.source_db,
+              },
+      }),
+    [directEdgeDetail],
+  );
 
-  useEffect(() => {
-    if (sel.kind !== "edge" || !edgeDetail) {
-      setSelectedEdgeSet({});
-      return;
-    }
-    const next: Record<string, string> = {};
-    for (const spec of edgeSpecs) {
-      const raw = (edgeDetail as Record<string, unknown>)[spec.name === "source" ? "source_db" : spec.name];
-      next[spec.name] = typeof raw === "string" ? raw : "";
-    }
-    setSelectedEdgeSet(next);
-  }, [sel, edgeDetail, edgeSpecs]);
+  const selectedNodeSections = useEditLayout({ kind: "node", detail: selectedNodeNormalized, metadataFields: nodeMetadataFields });
+  const selectedEdgeSections = useEditLayout({ kind: "edge", detail: selectedEdgeNormalized, metadataFields: edgeMetadataFields });
+  const directNodeSections = useEditLayout({ kind: "node", detail: directNodeNormalized, metadataFields: nodeMetadataFields });
+  const directEdgeSections = useEditLayout({ kind: "edge", detail: directEdgeNormalized, metadataFields: edgeMetadataFields });
+
+  const { draft: selectedNodeDraft, setDraft: setSelectedNodeDraft } = useEditDraft(
+    sel.kind === "node" ? `node:${sel.vid}:${nodeDetail?.version ?? "none"}` : "node:none",
+    selectedNodeSections,
+  );
+  const { draft: selectedEdgeDraft, setDraft: setSelectedEdgeDraft } = useEditDraft(
+    sel.kind === "edge" ? `edge:${sel.src}:${sel.dst}:${sel.rank}:${edgeDetail?.version ?? "none"}` : "edge:none",
+    selectedEdgeSections,
+  );
+  const { draft: directNodeDraft, setDraft: setDirectNodeDraft } = useEditDraft(
+    directNodeDetail ? `direct-node:${directNodeDetail.vid}:${directNodeDetail.version}` : "direct-node:none",
+    directNodeSections,
+  );
+  const { draft: directEdgeDraft, setDraft: setDirectEdgeDraft } = useEditDraft(
+    directEdgeDetail
+      ? `direct-edge:${directEdgeDetail.src}:${directEdgeDetail.dst}:${directEdgeDetail.rank}:${directEdgeDetail.version}`
+      : "direct-edge:none",
+    directEdgeSections,
+  );
 
   const selectedNodeVersion = sel.kind === "node" ? nodeDetail?.version ?? null : null;
   const selectedEdgeVersion = sel.kind === "edge" ? edgeDetail?.version ?? null : null;
   const actorTrimmed = (saveUpdatedBy || "").trim();
   const actorInvalid = actorTrimmed.length === 0 || actorTrimmed.length > 64;
-  const actorError = actorTrimmed.length === 0 ? "updated_by 必填" : actorTrimmed.length > 64 ? "updated_by 不能超过 64 个字符" : "";
+  const actorError =
+    actorTrimmed.length === 0 ? "updated_by 必填" : actorTrimmed.length > 64 ? "updated_by 不能超过 64 个字符" : "";
 
   const finalizeActor = useCallback((): string => {
     const actor = actorTrimmed;
@@ -220,12 +275,18 @@ export function EditWritebackPanel({
 
   const saveSelectedNode = useCallback(async () => {
     if (sel.kind !== "node" || selectedNodeVersion == null) return;
+    const setFields = buildPatchSet(selectedNodeSections, selectedNodeDraft);
+    if (Object.keys(setFields).length === 0) {
+      setNotice("没有可保存的变更");
+      setError(null);
+      return;
+    }
     setSaveLoading(true);
     setError(null);
     setNotice(null);
     try {
       const actor = finalizeActor();
-      const resp = await onSaveNodeEdit(sel.vid, selectedNodeSet, selectedNodeVersion, actor);
+      const resp = await onSaveNodeEdit(sel.vid, setFields, selectedNodeVersion, actor);
       setNotice(`保存成功，version=${resp.version}`);
       await onReloadNodeDetail(sel.vid);
     } catch (e: unknown) {
@@ -234,10 +295,24 @@ export function EditWritebackPanel({
     } finally {
       setSaveLoading(false);
     }
-  }, [finalizeActor, onReloadNodeDetail, onSaveNodeEdit, sel, selectedNodeSet, selectedNodeVersion]);
+  }, [
+    finalizeActor,
+    onReloadNodeDetail,
+    onSaveNodeEdit,
+    sel,
+    selectedNodeDraft,
+    selectedNodeSections,
+    selectedNodeVersion,
+  ]);
 
   const saveSelectedEdge = useCallback(async () => {
     if (sel.kind !== "edge" || selectedEdgeVersion == null) return;
+    const setFields = buildPatchSet(selectedEdgeSections, selectedEdgeDraft);
+    if (Object.keys(setFields).length === 0) {
+      setNotice("没有可保存的变更");
+      setError(null);
+      return;
+    }
     setSaveLoading(true);
     setError(null);
     setNotice(null);
@@ -249,7 +324,7 @@ export function EditWritebackPanel({
         dst: sel.dst,
         rank: sel.rank,
       };
-      const resp = await onSaveEdgeEdit(identity, selectedEdgeSet, selectedEdgeVersion, actor);
+      const resp = await onSaveEdgeEdit(identity, setFields, selectedEdgeVersion, actor);
       setNotice(`保存成功，version=${resp.version}`);
       await onReloadEdgeDetail(identity);
     } catch (e: unknown) {
@@ -258,7 +333,15 @@ export function EditWritebackPanel({
     } finally {
       setSaveLoading(false);
     }
-  }, [finalizeActor, onReloadEdgeDetail, onSaveEdgeEdit, sel, selectedEdgeSet, selectedEdgeVersion]);
+  }, [
+    finalizeActor,
+    onReloadEdgeDetail,
+    onSaveEdgeEdit,
+    sel,
+    selectedEdgeDraft,
+    selectedEdgeSections,
+    selectedEdgeVersion,
+  ]);
 
   async function loadDirectNode() {
     const vid = Number(directNodeVid);
@@ -271,12 +354,6 @@ export function EditWritebackPanel({
     try {
       const detail = await nodeDetailApi(vid);
       setDirectNodeDetail(detail);
-      const next: Record<string, string> = {};
-      for (const spec of nodeSpecs) {
-        const raw = (detail as Record<string, unknown>)[spec.name];
-        next[spec.name] = typeof raw === "string" ? raw : "";
-      }
-      setDirectNodeSet(next);
     } catch (e: unknown) {
       setError(parseHttpError(e).message);
     } finally {
@@ -302,12 +379,6 @@ export function EditWritebackPanel({
         rank,
       });
       setDirectEdgeDetail(detail);
-      const next: Record<string, string> = {};
-      for (const spec of edgeSpecs) {
-        const raw = (detail as Record<string, unknown>)[spec.name === "source" ? "source_db" : spec.name];
-        next[spec.name] = typeof raw === "string" ? raw : "";
-      }
-      setDirectEdgeSet(next);
     } catch (e: unknown) {
       setError(parseHttpError(e).message);
     } finally {
@@ -317,12 +388,18 @@ export function EditWritebackPanel({
 
   async function saveDirectNode() {
     if (!directNodeDetail) return;
+    const setFields = buildPatchSet(directNodeSections, directNodeDraft);
+    if (Object.keys(setFields).length === 0) {
+      setNotice("没有可保存的变更");
+      setError(null);
+      return;
+    }
     setSaveLoading(true);
     setError(null);
     setNotice(null);
     try {
       const actor = finalizeActor();
-      const resp = await onSaveNodeEdit(directNodeDetail.vid, directNodeSet, directNodeDetail.version, actor);
+      const resp = await onSaveNodeEdit(directNodeDetail.vid, setFields, directNodeDetail.version, actor);
       setNotice(`节点保存成功，version=${resp.version}`);
       const refreshed = await nodeDetailApi(directNodeDetail.vid);
       setDirectNodeDetail(refreshed);
@@ -336,6 +413,12 @@ export function EditWritebackPanel({
 
   async function saveDirectEdge() {
     if (!directEdgeDetail) return;
+    const setFields = buildPatchSet(directEdgeSections, directEdgeDraft);
+    if (Object.keys(setFields).length === 0) {
+      setNotice("没有可保存的变更");
+      setError(null);
+      return;
+    }
     setSaveLoading(true);
     setError(null);
     setNotice(null);
@@ -347,7 +430,7 @@ export function EditWritebackPanel({
         dst: directEdgeDetail.dst,
         rank: directEdgeDetail.rank,
       };
-      const resp = await onSaveEdgeEdit(identity, directEdgeSet, directEdgeDetail.version, actor);
+      const resp = await onSaveEdgeEdit(identity, setFields, directEdgeDetail.version, actor);
       setNotice(`边保存成功，version=${resp.version}`);
       const refreshed = await edgeDetailApi(identity);
       setDirectEdgeDetail(refreshed);
@@ -384,49 +467,29 @@ export function EditWritebackPanel({
       <label style={{ fontSize: 12 }}>
         <input type="checkbox" checked={setAsDefault} onChange={(e) => setSetAsDefault(e.target.checked)} /> 保存时设为默认
       </label>
+      {schemaError ? <div style={{ fontSize: 12, color: "#d46b08" }}>metadata 字段补充加载失败：{schemaError}</div> : null}
     </div>
   );
 
   const renderSelectedEditor = useMemo(() => {
     if (sel.kind === "none") return <div style={{ fontSize: 12, color: "#666" }}>请先选中节点或边再编辑。</div>;
-    if (schemaLoading) return <div style={{ fontSize: 12, color: "#666" }}>加载可编辑字段中…</div>;
-    if (schemaError) return <div style={{ fontSize: 12, color: "#d4380d" }}>字段 schema 加载失败：{schemaError}</div>;
 
     if (sel.kind === "node") {
       const canSave = !saveLoading && !detailLoading && nodeDetail != null && selectedNodeVersion != null && !actorInvalid;
       return (
-        <div style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            Node vid={sel.vid} | current_version={selectedNodeVersion ?? "-"} | updated_by={nodeDetail?.updated_by || "-"}
-          </div>
-          {nodeSpecs.map((spec) => (
-            <FormField
-              key={spec.name}
-              spec={spec}
-              value={selectedNodeSet[spec.name] || ""}
-              disabled={!canSave}
-              onChange={(next) => setSelectedNodeSet((prev) => ({ ...prev, [spec.name]: next }))}
-            />
-          ))}
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              data-testid="selected-node-reload-button"
-              onClick={() => void onReloadNodeDetail(sel.vid)}
-              disabled={detailLoading}
-              style={{ padding: "6px 10px" }}
-            >
-              重新加载详情
-            </button>
-            <button
-              data-testid="selected-node-save-button"
-              onClick={() => void saveSelectedNode()}
-              disabled={!canSave}
-              style={{ padding: "6px 10px" }}
-            >
-              {saveLoading ? "保存中…" : "保存节点"}
-            </button>
-          </div>
-        </div>
+        <EditorBlock
+          title={`Node vid=${sel.vid}`}
+          subtitle={`current_version=${selectedNodeVersion ?? "-"} | updated_by=${nodeDetail?.updated_by || "-"}`}
+          sections={selectedNodeSections}
+          draft={selectedNodeDraft}
+          disabled={!canSave}
+          onChange={(fieldName, next) => setSelectedNodeDraft((prev) => ({ ...prev, [fieldName]: next }))}
+          onReload={() => void onReloadNodeDetail(sel.vid)}
+          onSave={() => void saveSelectedNode()}
+          reloadTestId="selected-node-reload-button"
+          saveTestId="selected-node-save-button"
+          saveLabel={saveLoading ? "保存中…" : "保存节点"}
+        />
       );
     }
 
@@ -438,59 +501,39 @@ export function EditWritebackPanel({
       rank: sel.rank,
     };
     return (
-      <div style={{ display: "grid", gap: 10 }}>
-        <div style={{ fontSize: 12, color: "#666" }}>
-          Edge {identity.edge_type} {identity.src}{"->"}{identity.dst}@{identity.rank} | current_version=
-          {selectedEdgeVersion ?? "-"} | updated_by={edgeDetail?.updated_by || "-"}
-        </div>
-        {edgeSpecs.map((spec) => (
-          <FormField
-            key={spec.name}
-            spec={spec}
-            value={selectedEdgeSet[spec.name] || ""}
-            disabled={!canSave}
-            onChange={(next) => setSelectedEdgeSet((prev) => ({ ...prev, [spec.name]: next }))}
-          />
-        ))}
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            data-testid="selected-edge-reload-button"
-            onClick={() => void onReloadEdgeDetail(identity)}
-            disabled={detailLoading}
-            style={{ padding: "6px 10px" }}
-          >
-            重新加载详情
-          </button>
-          <button
-            data-testid="selected-edge-save-button"
-            onClick={() => void saveSelectedEdge()}
-            disabled={!canSave}
-            style={{ padding: "6px 10px" }}
-          >
-            {saveLoading ? "保存中…" : "保存边"}
-          </button>
-        </div>
-      </div>
+      <EditorBlock
+        title={`Edge ${identity.edge_type} ${identity.src}->${identity.dst}@${identity.rank}`}
+        subtitle={`current_version=${selectedEdgeVersion ?? "-"} | updated_by=${edgeDetail?.updated_by || "-"}`}
+        sections={selectedEdgeSections}
+        draft={selectedEdgeDraft}
+        disabled={!canSave}
+        onChange={(fieldName, next) => setSelectedEdgeDraft((prev) => ({ ...prev, [fieldName]: next }))}
+        onReload={() => void onReloadEdgeDetail(identity)}
+        onSave={() => void saveSelectedEdge()}
+        reloadTestId="selected-edge-reload-button"
+        saveTestId="selected-edge-save-button"
+        saveLabel={saveLoading ? "保存中…" : "保存边"}
+      />
     );
   }, [
     actorInvalid,
     detailLoading,
     edgeDetail,
-    edgeSpecs,
     nodeDetail,
-    nodeSpecs,
     onReloadEdgeDetail,
     onReloadNodeDetail,
     saveLoading,
-    schemaError,
-    schemaLoading,
-    sel,
-    selectedEdgeSet,
-    selectedEdgeVersion,
-    selectedNodeSet,
-    selectedNodeVersion,
     saveSelectedEdge,
     saveSelectedNode,
+    sel,
+    selectedEdgeDraft,
+    selectedEdgeSections,
+    selectedEdgeVersion,
+    selectedNodeDraft,
+    selectedNodeSections,
+    selectedNodeVersion,
+    setSelectedEdgeDraft,
+    setSelectedNodeDraft,
   ]);
 
   const renderDirectEditor = (
@@ -509,21 +552,18 @@ export function EditWritebackPanel({
             {directNodeLoading ? "加载中…" : "加载"}
           </button>
         </div>
-        <div style={{ fontSize: 12, color: "#666" }}>current_version={directNodeDetail?.version ?? "-"}</div>
         {directNodeDetail ? (
-          <div style={{ display: "grid", gap: 8 }}>
-            {nodeSpecs.map((spec) => (
-              <FormField
-                key={`direct-node-${spec.name}`}
-                spec={spec}
-                value={directNodeSet[spec.name] || ""}
-                onChange={(next) => setDirectNodeSet((prev) => ({ ...prev, [spec.name]: next }))}
-              />
-            ))}
-            <button data-testid="direct-node-save-button" onClick={() => void saveDirectNode()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
-              {saveLoading ? "保存中…" : "保存节点"}
-            </button>
-          </div>
+          <EditorBlock
+            title={`Node vid=${directNodeDetail.vid}`}
+            subtitle={`current_version=${directNodeDetail.version ?? "-"} | updated_by=${directNodeDetail.updated_by || "-"}`}
+            sections={directNodeSections}
+            draft={directNodeDraft}
+            disabled={saveLoading || actorInvalid}
+            onChange={(fieldName, next) => setDirectNodeDraft((prev) => ({ ...prev, [fieldName]: next }))}
+            onSave={() => void saveDirectNode()}
+            saveTestId="direct-node-save-button"
+            saveLabel={saveLoading ? "保存中…" : "保存节点"}
+          />
         ) : null}
       </div>
 
@@ -537,21 +577,18 @@ export function EditWritebackPanel({
             {directEdgeLoading ? "加载中…" : "加载"}
           </button>
         </div>
-        <div style={{ fontSize: 12, color: "#666" }}>current_version={directEdgeDetail?.version ?? "-"}</div>
         {directEdgeDetail ? (
-          <div style={{ display: "grid", gap: 8 }}>
-            {edgeSpecs.map((spec) => (
-              <FormField
-                key={`direct-edge-${spec.name}`}
-                spec={spec}
-                value={directEdgeSet[spec.name] || ""}
-                onChange={(next) => setDirectEdgeSet((prev) => ({ ...prev, [spec.name]: next }))}
-              />
-            ))}
-            <button data-testid="direct-edge-save-button" onClick={() => void saveDirectEdge()} disabled={saveLoading || actorInvalid} style={{ padding: "6px 10px" }}>
-              {saveLoading ? "保存中…" : "保存边"}
-            </button>
-          </div>
+          <EditorBlock
+            title={`Edge ${directEdgeDetail.edge_type} ${directEdgeDetail.src}->${directEdgeDetail.dst}@${directEdgeDetail.rank}`}
+            subtitle={`current_version=${directEdgeDetail.version ?? "-"} | updated_by=${directEdgeDetail.updated_by || "-"}`}
+            sections={directEdgeSections}
+            draft={directEdgeDraft}
+            disabled={saveLoading || actorInvalid}
+            onChange={(fieldName, next) => setDirectEdgeDraft((prev) => ({ ...prev, [fieldName]: next }))}
+            onSave={() => void saveDirectEdge()}
+            saveTestId="direct-edge-save-button"
+            saveLabel={saveLoading ? "保存中…" : "保存边"}
+          />
         ) : null}
       </div>
     </div>

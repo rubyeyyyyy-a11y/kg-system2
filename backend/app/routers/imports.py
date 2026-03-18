@@ -5,6 +5,11 @@ from fastapi.responses import FileResponse
 
 from app.core.space_context import get_current_space
 from app.schemas.imports import (
+    CleanupJobResp,
+    CleanupPlanPreviewResp,
+    ImportBatchCleanupRequest,
+    ImportBatchItemResp,
+    ImportBatchResp,
     ImportDraftResp,
     ImportDraftUpsertRequest,
     ImportDraftValidationResp,
@@ -21,6 +26,8 @@ from app.schemas.imports import (
     ImportSchemaResp,
 )
 from app.services.imports import (
+    cleanup_executor_service,
+    cleanup_service,
     draft_service,
     executor_service,
     file_store,
@@ -117,7 +124,7 @@ def validate_import_draft(draft_id: str):
 @router.post("/jobs", response_model=ImportJobResp)
 def create_import_job(req: ImportJobCreateRequest):
     _require_ready_import_space()
-    state = job_service.create_job(draft_id=req.draft_id, created_by=req.created_by)
+    state = job_service.create_job(draft_id=req.draft_id, created_by=req.created_by, is_test_data=req.is_test_data)
     executor_service.ensure_worker_running()
     return state.model_dump()
 
@@ -143,6 +150,96 @@ def list_import_jobs():
 @router.get("/jobs/{job_id}", response_model=ImportJobResp)
 def get_import_job(job_id: str):
     return job_service.get_job(job_id).model_dump()
+
+
+@router.get("/batches", response_model=list[ImportBatchResp])
+def list_import_batches():
+    _require_ready_import_space()
+    return [item.model_dump() for item in cleanup_service.list_batches()]
+
+
+@router.get("/batches/{batch_id}", response_model=ImportBatchResp)
+def get_import_batch(batch_id: str):
+    _require_ready_import_space()
+    return cleanup_service.get_batch(batch_id).model_dump()
+
+
+@router.get("/batches/{batch_id}/items", response_model=list[ImportBatchItemResp])
+def get_import_batch_items(batch_id: str):
+    _require_ready_import_space()
+    return [item.model_dump() for item in cleanup_service.get_batch_items(batch_id)]
+
+
+@router.post("/batches/cleanup", response_model=CleanupJobResp)
+def create_import_cleanup_job(req: ImportBatchCleanupRequest):
+    _require_ready_import_space()
+    record = cleanup_service.create_cleanup_job(batch_ids=req.batch_ids, scope=req.scope, created_by=req.created_by)
+    cleanup_executor_service.ensure_worker_running()
+    return record.model_dump()
+
+
+@router.post("/batches/cleanup-plan", response_model=CleanupPlanPreviewResp)
+def preview_import_cleanup_plan(req: ImportBatchCleanupRequest):
+    _require_ready_import_space()
+    context, plan = cleanup_service.preview_cleanup_plan(batch_ids=req.batch_ids, scope=req.scope, created_by=req.created_by)
+    sample_size = 5
+    return {
+        "batch_ids": context.batch_ids,
+        "scope": context.scope,
+        "plan_summary": plan.plan_summary.model_dump(),
+        "conflicts": [item.model_dump() for item in plan.conflicts],
+        "blocked_entities": {
+            "total_count": len(plan.blocked_entity_records),
+            "sample": [item.model_dump() for item in plan.blocked_entity_records[:sample_size]],
+        },
+        "deletable_entities": {
+            "total_count": len(plan.deletable_entity_records),
+            "sample": [item.model_dump() for item in plan.deletable_entity_records[:sample_size]],
+        },
+        "deletable_relations": {
+            "total_count": len(plan.deletable_relation_records),
+            "sample": [item.model_dump() for item in plan.deletable_relation_records[:sample_size]],
+        },
+        "warning_messages": list(plan.warning_messages),
+        "verification_scope_note": plan.plan_summary.verification_scope_note,
+        "has_plan_artifacts": False,
+        "artifacts": [],
+    }
+
+
+@router.get("/cleanup-jobs", response_model=list[CleanupJobResp])
+def list_import_cleanup_jobs():
+    _require_ready_import_space()
+    return [item.model_dump() for item in cleanup_service.list_cleanup_jobs()]
+
+
+@router.get("/cleanup-jobs/{cleanup_job_id}", response_model=CleanupJobResp)
+def get_import_cleanup_job(cleanup_job_id: str):
+    _require_ready_import_space()
+    return cleanup_service.get_cleanup_job(cleanup_job_id).model_dump()
+
+
+@router.get("/cleanup-jobs/{cleanup_job_id}/artifacts/{artifact_name}")
+def download_import_cleanup_artifact(cleanup_job_id: str, artifact_name: str):
+    _require_ready_import_space()
+    record = cleanup_service.get_cleanup_job(cleanup_job_id)
+    artifact = next((item for item in record.artifacts if item.filename == artifact_name), None)
+    if artifact is None:
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
+            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
+            field="artifact_name",
+        )
+    path = Path(artifact.path)
+    if not path.exists():
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
+            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
+            field="artifact_name",
+        )
+    return FileResponse(path, filename=artifact.filename, media_type="application/json")
 
 
 @router.get("/jobs/{job_id}/logs", response_model=ImportJobLogsResp)

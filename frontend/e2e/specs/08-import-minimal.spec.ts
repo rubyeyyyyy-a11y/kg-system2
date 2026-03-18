@@ -311,18 +311,21 @@ test("import minimal happy path freezes upload preview validate submit flow", as
     buffer: Buffer.from("ID,entity_name,entity_type,source\n1,Demo Import Entity,Disease,manual\n", "utf8"),
   });
   await page.getByTestId("import-preview-button").click();
-  await expect(page.getByText("source_id=source_1")).toHaveCount(1);
-  await expect(page.getByText("columns=ID, entity_name, entity_type, source")).toHaveCount(1);
+  await expect(page.getByTestId("import-source-card-source_1")).toContainText("source_id=source_1");
+  await expect(page.getByTestId("import-source-card-source_1")).toContainText("columns=ID, entity_name, entity_type, source");
 
   await page.getByTestId("import-save-draft-button").click();
-  await expect(page.getByText("draft_1 | mapped")).toHaveCount(1);
+  await expect(page.getByTestId("import-draft-header")).toHaveText("draft_1 | mapped");
 
   await page.getByTestId("import-validate-button").click();
-  await expect(page.getByText("compiled plan frozen: plan_1 | workspace=vertex | integration=fully_integrated | space=demo_kg")).toHaveCount(1);
+  await expect(page.getByTestId("import-compiled-plan-summary")).toContainText(
+    "compiled plan frozen: plan_1 | workspace=vertex | integration=fully_integrated | space=demo_kg"
+  );
 
   await page.getByTestId("import-submit-job-button").click();
-  await expect(page.getByText("job_1")).toHaveCount(2);
-  await expect(page.getByText("job queued")).toHaveCount(1);
+  await expect(page.getByTestId("import-job-item-job_1")).toBeVisible();
+  await expect(page.getByTestId("import-selected-job-id")).toHaveText("job_1");
+  await expect(page.getByTestId("import-job-logs")).toContainText("job queued");
 });
 
 test("import job list stays bound to current space after switch and queued job can cancel", async ({ page }) => {
@@ -481,12 +484,13 @@ test("import job list stays bound to current space after switch and queued job c
   await gotoApp(page);
   await page.getByTestId("workspace-tab-import").click();
   await page.getByTestId("import-space-selector").selectOption("it_space_218354");
-  await expect(page.getByText("small_job_1")).toHaveCount(2);
+  await expect(page.getByTestId("import-job-item-small_job_1")).toBeVisible();
+  await expect(page.getByTestId("import-selected-job-id")).toHaveText("small_job_1");
   await expect(page.getByTestId("import-job-closure-summary")).toContainText("searchable=yes");
   await expect(page.getByTestId("import-job-closure-summary")).toContainText("index_status=verified_nonempty");
-  await expect(page.getByText("demo_job_1")).toHaveCount(0);
+  await expect(page.getByTestId("import-job-item-demo_job_1")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "取消" }).click();
-  await expect(page.getByText("job cancelled before start")).toHaveCount(1);
-  await expect(page.getByText("cancelled")).toHaveCount(2);
+  await page.getByTestId("import-job-cancel-button").click();
+  await expect(page.getByTestId("import-job-logs")).toContainText("job cancelled before start");
+  await expect(page.getByTestId("import-selected-job-status")).toHaveText("cancelled");
 });

@@ -1,5 +1,9 @@
 import { apiGet, apiPost, downloadBlob, uploadFile } from "../../../api/http";
 import type {
+  CleanupJobResp,
+  CleanupPlanPreviewResp,
+  ImportBatchItem,
+  ImportBatchResp,
   ImportDraftResp,
   ImportDraftValidationResp,
   ImportFileUploadResp,
@@ -94,4 +98,44 @@ export async function downloadFailedRows(jobId: string): Promise<Blob> {
 
 export async function downloadImportArtifact(jobId: string, artifactName: string): Promise<Blob> {
   return downloadBlob(`/api/import/jobs/${jobId}/artifacts/${artifactName}`);
+}
+
+export async function listImportBatches(): Promise<ImportBatchResp[]> {
+  return apiGet<ImportBatchResp[]>("/api/import/batches");
+}
+
+export async function getImportBatch(batchId: string): Promise<ImportBatchResp> {
+  return apiGet<ImportBatchResp>(`/api/import/batches/${batchId}`);
+}
+
+export async function listImportBatchItems(batchId: string): Promise<ImportBatchItem[]> {
+  return apiGet<ImportBatchItem[]>(`/api/import/batches/${batchId}/items`);
+}
+
+export async function createImportCleanupJob(body: {
+  batch_ids: string[];
+  scope: "full_batch" | "relations_only";
+  created_by: string;
+}): Promise<CleanupJobResp> {
+  return apiPost<CleanupJobResp>("/api/import/batches/cleanup", body);
+}
+
+export async function createCleanupPlanPreview(body: {
+  batch_ids: string[];
+  scope: "full_batch" | "relations_only";
+  created_by: string;
+}): Promise<CleanupPlanPreviewResp> {
+  return apiPost<CleanupPlanPreviewResp>("/api/import/batches/cleanup-plan", body);
+}
+
+export async function listCleanupJobs(): Promise<CleanupJobResp[]> {
+  return apiGet<CleanupJobResp[]>("/api/import/cleanup-jobs");
+}
+
+export async function getCleanupJob(cleanupJobId: string): Promise<CleanupJobResp> {
+  return apiGet<CleanupJobResp>(`/api/import/cleanup-jobs/${cleanupJobId}`);
+}
+
+export async function downloadCleanupArtifact(cleanupJobId: string, artifactName: string): Promise<Blob> {
+  return downloadBlob(`/api/import/cleanup-jobs/${cleanupJobId}/artifacts/${artifactName}`);
 }

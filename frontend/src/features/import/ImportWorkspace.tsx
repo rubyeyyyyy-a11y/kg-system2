@@ -3,30 +3,39 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { parseApiError } from "../../utils/httpError";
 import {
   cancelImportJob,
+  createCleanupPlanPreview,
+  createImportCleanupJob,
+  downloadCleanupArtifact,
   downloadFailedRows,
   downloadImportArtifact,
   fetchImportSchema,
   fetchImportSchemaPlan,
   getImportJobLogs,
+  listImportBatchItems,
   previewImport,
   submitImportJob,
   upsertImportDraft,
   uploadImportFile,
   validateImportDraft,
 } from "./api/import";
+import { BatchPanel } from "./components/BatchPanel";
+import { suggestTargetFromSource } from "./importRules";
 import { ImportSpaceContextBar } from "./components/ImportSpaceContextBar";
 import { JobPanel } from "./components/JobPanel";
 import { MappingTable } from "./components/MappingTable";
+import { useCleanupJobs } from "./hooks/useCleanupJobs";
+import { useImportBatches } from "./hooks/useImportBatches";
 import { useImportJobs } from "./hooks/useImportJobs";
 import { useCreateSpace } from "../space/hooks/useCreateSpace";
 import { useCurrentSpace } from "../space/hooks/useCurrentSpace";
 import type { CurrentSpaceResp, SpaceSummary } from "../space/types/space";
 import type {
   CompiledImportPlan,
+  CleanupPlanPreviewResp,
+  ImportBatchItem,
   ImportDraftResp,
   ImportFileUploadResp,
   ImportMode,
-  ImportObjectType,
   ImportSchemaObjectPlan,
   ImportSchemaResp,
   ImportSource,
@@ -62,66 +71,6 @@ function formatBytes(bytes: number) {
   if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${bytes} B`;
-}
-
-function normalizeColumn(value: string) {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-function aliasLogicalField(column: string) {
-  const token = normalizeColumn(column);
-  const lookup: Record<string, string> = {
-    id: "ID",
-    vid: "ID",
-    srcvid: "srcVID",
-    src_vid: "srcVID",
-    subjectourdefinedid: "srcVID",
-    dstvid: "dstVID",
-    dst_vid: "dstVID",
-    objectourdefinedid: "dstVID",
-    rank: "rank",
-    relation: "relation",
-    source: "source",
-    evidence: "evidence",
-    pmid: "evidence",
-    relationdetail: "evidence",
-    score: "score",
-    entityname: "entity_name",
-    entitytype: "entity_type",
-    entityrawid: "entity_raw_id",
-    description: "description",
-  };
-  return lookup[token] || "";
-}
-
-function suggestTargetFromSource(source: ImportSource, objectType?: ImportObjectType): ImportTargetMapping {
-  const nextObjectType = objectType || source.recommended_object_type || (source.inferred_kind === "edge" ? "edge_type" : "tag");
-  const aliasMap = new Map(source.alias_hints.map((item) => [item.logical_field, item.source_column]));
-  const identity_mapping =
-    nextObjectType === "tag"
-      ? { id_column: aliasMap.get("ID") || "" }
-      : {
-          src_column: aliasMap.get("srcVID") || "",
-          dst_column: aliasMap.get("dstVID") || "",
-          rank_column: aliasMap.get("rank") || "",
-        };
-  const identityColumns = new Set(Object.values(identity_mapping).filter(Boolean));
-  const property_mappings = source.columns
-    .filter((column) => !identityColumns.has(column))
-    .map((column) => ({
-      source_column: column,
-      target_field: aliasLogicalField(column) || column,
-      logical_field: aliasLogicalField(column) || undefined,
-    }));
-  return {
-    object_type: nextObjectType,
-    object_name: nextObjectType === "tag" ? "Entity" : "REL2",
-    source_id: source.source_id,
-    identity_mapping,
-    property_mappings,
-    row_selector: null,
-    target_options: {},
-  };
 }
 
 function downloadBlobToFile(blob: Blob, filename: string) {
@@ -171,10 +120,17 @@ export function ImportWorkspace({
   const [createdBy, setCreatedBy] = useState("import_workspace");
   const [jobLogs, setJobLogs] = useState<string[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [selectedBatchIds, setSelectedBatchIds] = useState<string[]>([]);
+  const [selectedBatchItems, setSelectedBatchItems] = useState<ImportBatchItem[]>([]);
+  const [cleanupPlanPreview, setCleanupPlanPreview] = useState<CleanupPlanPreviewResp | null>(null);
+  const [jobsTab, setJobsTab] = useState<"jobs" | "batches">("jobs");
   const [busy, setBusy] = useState<string | null>(null);
   const [createPanelOpen, setCreatePanelOpen] = useState(false);
   const [spaceActionSummary, setSpaceActionSummary] = useState<{ title: string; message: string } | null>(null);
   const { jobs, loading: jobsLoading, reload: reloadJobs } = useImportJobs(true);
+  const { batches, loading: batchesLoading, reload: reloadBatches } = useImportBatches(true);
+  const { cleanupJobs, loading: cleanupJobsLoading, reload: reloadCleanupJobs } = useCleanupJobs(true);
   const effectiveCurrentSpace = currentSpace || resolvedCurrent?.space_name || "";
   const selectedSpace = useMemo(
     () => spaces.find((item) => item.space_name === effectiveCurrentSpace) || null,
@@ -204,6 +160,10 @@ export function ImportWorkspace({
     clearFileBoundState();
     setJobLogs([]);
     setSelectedJobId(null);
+    setSelectedBatchId(null);
+    setSelectedBatchIds([]);
+    setSelectedBatchItems([]);
+    setCleanupPlanPreview(null);
   }
 
   function validateSelectedUpload(file: File) {
@@ -278,6 +238,29 @@ export function ImportWorkspace({
   }, [jobs, selectedJobId]);
 
   useEffect(() => {
+    if (batches.length === 0) {
+      if (selectedBatchId != null) setSelectedBatchId(null);
+      setSelectedBatchIds([]);
+      return;
+    }
+    if (selectedBatchId == null) {
+      setSelectedBatchId(batches[0].batch_id);
+      return;
+    }
+    if (!batches.some((batch) => batch.batch_id === selectedBatchId)) setSelectedBatchId(batches[0].batch_id);
+    setSelectedBatchIds((prev) => prev.filter((batchId) => batches.some((batch) => batch.batch_id === batchId)));
+  }, [batches, selectedBatchId]);
+
+  useEffect(() => {
+    if (!cleanupPlanPreview) return;
+    const previewBatchKey = [...cleanupPlanPreview.batch_ids].sort().join(",");
+    const selectedBatchKey = [...selectedBatchIds].sort().join(",");
+    if (previewBatchKey !== selectedBatchKey) {
+      setCleanupPlanPreview(null);
+    }
+  }, [cleanupPlanPreview, selectedBatchIds]);
+
+  useEffect(() => {
     if (!selectedJobId) {
       setJobLogs([]);
       return;
@@ -291,6 +274,21 @@ export function ImportWorkspace({
       }
     })();
   }, [selectedJobId, jobs]);
+
+  useEffect(() => {
+    if (!selectedBatchId) {
+      setSelectedBatchItems([]);
+      return;
+    }
+    void (async () => {
+      try {
+        const items = await listImportBatchItems(selectedBatchId);
+        setSelectedBatchItems(items);
+      } catch {
+        setSelectedBatchItems([]);
+      }
+    })();
+  }, [selectedBatchId, batches]);
 
   useEffect(() => {
     if (!preview) return;
@@ -510,6 +508,7 @@ export function ImportWorkspace({
       const job = await submitImportJob({ draft_id: draft.draft_id, created_by: createdBy });
       setSelectedJobId(job.job_id);
       await reloadJobs();
+      await reloadBatches();
       onNotice({ level: "info", message: `job 已提交：${job.job_id}` });
     } catch (error) {
       const parsed = parseApiError(error);
@@ -539,6 +538,16 @@ export function ImportWorkspace({
     }
   }
 
+  async function handleDownloadCleanupArtifact(cleanupJobId: string, artifactName: string) {
+    try {
+      const blob = await downloadCleanupArtifact(cleanupJobId, artifactName);
+      downloadBlobToFile(blob, artifactName);
+    } catch (error) {
+      const parsed = parseApiError(error);
+      onNotice({ level: "error", message: `cleanup artifact 下载失败：${parsed.message}` });
+    }
+  }
+
   async function handleCancelJob(jobId: string) {
     try {
       await cancelImportJob(jobId);
@@ -547,6 +556,90 @@ export function ImportWorkspace({
       const parsed = parseApiError(error);
       onNotice({ level: "error", message: `取消 job 失败：${parsed.message}` });
     }
+  }
+
+  function toggleBatchSelection(batchId: string) {
+    setSelectedBatchIds((prev) => (prev.includes(batchId) ? prev.filter((item) => item !== batchId) : [...prev, batchId]));
+  }
+
+  async function handlePreviewCleanup(scope: "full_batch" | "relations_only") {
+    if (selectedBatchIds.length === 0) {
+      onNotice({ level: "warn", message: "请先选择至少一个 test batch" });
+      return;
+    }
+    setBusy("cleanup_preview");
+    try {
+      const preview = await createCleanupPlanPreview({
+        batch_ids: selectedBatchIds,
+        scope,
+        created_by: createdBy || "import_workspace_cleanup",
+      });
+      setCleanupPlanPreview(preview);
+      onNotice({
+        level: "info",
+        message: `cleanup plan 已生成：deletable_entities=${preview.plan_summary.deletable_entity_count}, deletable_relations=${preview.plan_summary.deletable_relation_count}, blocked_entities=${preview.plan_summary.blocked_entity_count}`,
+      });
+    } catch (error) {
+      const parsed = parseApiError(error);
+      onNotice({ level: "error", message: `cleanup 预览失败：${parsed.message}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function submitCleanup(scope: "full_batch" | "relations_only", confirmText: string) {
+    if (selectedBatchIds.length === 0) {
+      onNotice({ level: "warn", message: "请先选择至少一个 test batch" });
+      return;
+    }
+    const selected = batches.filter((batch) => selectedBatchIds.includes(batch.batch_id));
+    const entityCount = selected.reduce((sum, batch) => sum + batch.entity_count, 0);
+    const relationCount = selected.reduce((sum, batch) => sum + batch.relation_count, 0);
+    const confirmed = window.confirm(
+      `${confirmText}\n\nbatch_count=${selected.length}\nscope=${scope}\nentities=${entityCount}\nrelations=${relationCount}\nOnly test-data batches with ledger will be deleted.\nExecute phase will recalculate cleanup plan before delete.`
+    );
+    if (!confirmed) return;
+    setBusy("cleanup");
+    try {
+      const cleanupJob = await createImportCleanupJob({
+        batch_ids: selectedBatchIds,
+        scope,
+        created_by: createdBy || "import_workspace_cleanup",
+      });
+      await Promise.all([reloadBatches(), reloadCleanupJobs()]);
+      onNotice({
+        level: "info",
+        message: `cleanup job 已创建：${cleanupJob.cleanup_job_id} (${cleanupJob.status})`,
+      });
+      setCleanupPlanPreview(null);
+      setJobsTab("batches");
+    } catch (error) {
+      const parsed = parseApiError(error);
+      onNotice({ level: "error", message: `cleanup 提交失败：${parsed.message}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleConfirmCleanup(scope: "full_batch" | "relations_only") {
+    if (!cleanupPlanPreview) {
+      onNotice({ level: "warn", message: "请先预览 cleanup plan" });
+      return;
+    }
+    const previewBatchKey = [...cleanupPlanPreview.batch_ids].sort().join(",");
+    const selectedBatchKey = [...selectedBatchIds].sort().join(",");
+    if (previewBatchKey !== selectedBatchKey || cleanupPlanPreview.scope !== scope) {
+      onNotice({ level: "warn", message: "预览计划与当前选择不一致，请重新 Preview Cleanup Plan" });
+      return;
+    }
+    await submitCleanup(
+      scope,
+      "Confirm cleanup from preview plan? Preview is point-in-time and execute will recompute plan."
+    );
+  }
+
+  async function handleQuickCleanup(scope: "full_batch" | "relations_only") {
+    await submitCleanup(scope, "Quick cleanup without preview?");
   }
 
   return (
@@ -584,6 +677,8 @@ export function ImportWorkspace({
             onRefresh={() => {
               void refreshSpaces();
               void reloadJobs();
+              void reloadBatches();
+              void reloadCleanupJobs();
             }}
             onCreateSpace={handleCreateSpace}
           />
@@ -661,7 +756,11 @@ export function ImportWorkspace({
               {sources.length > 0 ? (
                 <div style={{ display: "grid", gap: 12, marginTop: 16 }}>
                   {sources.map((source) => (
-                    <div key={source.source_id} style={{ padding: 14, borderRadius: 14, background: "#fffdf8", border: "1px solid #f0e6d8" }}>
+                    <div
+                      key={source.source_id}
+                      data-testid={`import-source-card-${source.source_id}`}
+                      style={{ padding: 14, borderRadius: 14, background: "#fffdf8", border: "1px solid #f0e6d8" }}
+                    >
                       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
                         <strong>{source.filename}</strong>
                         <span style={{ fontSize: 12, color: "#7d6b57" }}>source_id={source.source_id}</span>
@@ -819,7 +918,7 @@ export function ImportWorkspace({
 
                 {compiledPlan ? (
                   <div style={{ display: "grid", gap: 10 }}>
-                    <div style={{ padding: 14, borderRadius: 14, background: "#eefbf1", fontSize: 13, color: "#166534" }}>
+                    <div data-testid="import-compiled-plan-summary" style={{ padding: 14, borderRadius: 14, background: "#eefbf1", fontSize: 13, color: "#166534" }}>
                       compiled plan frozen: {compiledPlan.plan_id} | workspace={compiledPlan.workspace_mode} | integration=
                       {compiledPlan.integration_level} | space={compiledPlan.space_name}
                     </div>
@@ -875,7 +974,9 @@ export function ImportWorkspace({
             <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
                 <strong>Draft Snapshot</strong>
-                <span style={{ fontSize: 12, color: "#7d6b57" }}>{draft ? `${draft.draft_id} | ${draft.status}` : "未保存"}</span>
+                <span data-testid="import-draft-header" style={{ fontSize: 12, color: "#7d6b57" }}>
+                  {draft ? `${draft.draft_id} | ${draft.status}` : "未保存"}
+                </span>
               </div>
               <div style={{ display: "grid", gap: 6, fontSize: 13, color: "#5b4b38" }}>
                 <div>space={draft?.space_name || effectiveCurrentSpace || "-"}</div>
@@ -903,6 +1004,7 @@ export function ImportWorkspace({
                 </span>
               </div>
               <pre
+                data-testid="import-job-logs"
                 style={{
                   margin: 0,
                   padding: 14,
@@ -924,19 +1026,57 @@ export function ImportWorkspace({
 
         <section style={{ borderRadius: 24, background: CARD, padding: 20, border: "1px solid rgba(76, 56, 36, 0.12)" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 16 }}>
-            <strong>4. Jobs</strong>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <strong>4. Operations</strong>
+              <button
+                data-testid="import-tab-jobs"
+                onClick={() => setJobsTab("jobs")}
+                style={{ background: jobsTab === "jobs" ? "#fff3dc" : "#fff" }}
+              >
+                Jobs
+              </button>
+              <button
+                data-testid="import-tab-batches"
+                onClick={() => setJobsTab("batches")}
+                style={{ background: jobsTab === "batches" ? "#fff3dc" : "#fff" }}
+              >
+                Batches
+              </button>
+            </div>
             <div style={{ fontSize: 12, color: "#7d6b57" }}>
-              {jobsLoading ? "jobs loading..." : `jobs=${jobs.length}`} | space={effectiveCurrentSpace || "-"}
+              {jobsTab === "jobs"
+                ? `${jobsLoading ? "jobs loading..." : `jobs=${jobs.length}`}`
+                : `${batchesLoading ? "batches loading..." : `batches=${batches.length}`} | cleanup_jobs=${cleanupJobs.length}`}{" "}
+              | space={effectiveCurrentSpace || "-"}
             </div>
           </div>
-          <JobPanel
-            jobs={jobs}
-            selectedJobId={selectedJobId}
-            onSelect={setSelectedJobId}
-            onCancel={(jobId) => void handleCancelJob(jobId)}
-            onDownloadFailedRows={(jobId) => void handleDownloadFailedRows(jobId)}
-            onDownloadArtifact={(jobId, artifactName) => void handleDownloadArtifact(jobId, artifactName)}
-          />
+          {jobsTab === "jobs" ? (
+            <JobPanel
+              jobs={jobs}
+              selectedJobId={selectedJobId}
+              onSelect={setSelectedJobId}
+              onCancel={(jobId) => void handleCancelJob(jobId)}
+              onDownloadFailedRows={(jobId) => void handleDownloadFailedRows(jobId)}
+              onDownloadArtifact={(jobId, artifactName) => void handleDownloadArtifact(jobId, artifactName)}
+            />
+          ) : (
+            <BatchPanel
+              batches={batches}
+              selectedBatchId={selectedBatchId}
+              selectedBatchItems={selectedBatchItems}
+              selectedBatchIds={selectedBatchIds}
+              cleanupJobs={cleanupJobs}
+              cleanupLoading={cleanupJobsLoading || busy === "cleanup"}
+              cleanupPlanPreview={cleanupPlanPreview}
+              cleanupPlanLoading={busy === "cleanup_preview"}
+              onSelectBatch={setSelectedBatchId}
+              onToggleBatch={toggleBatchSelection}
+              onPreviewCleanupPlan={(scope) => void handlePreviewCleanup(scope)}
+              onConfirmCleanup={(scope) => void handleConfirmCleanup(scope)}
+              onQuickCleanup={(scope) => void handleQuickCleanup(scope)}
+              onDownloadCleanupArtifact={(cleanupJobId, artifactName) => void handleDownloadCleanupArtifact(cleanupJobId, artifactName)}
+            />
+          )}
         </section>
       </div>
     </div>

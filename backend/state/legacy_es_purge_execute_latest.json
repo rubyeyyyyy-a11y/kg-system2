@@ -1,0 +1,181 @@
+{
+  "started_at": "2026-03-13T07:02:13Z",
+  "mode": "execute",
+  "es_index": "kg_entity",
+  "es_timeout_ms": 600000,
+  "registry_file": "/home/ray/kg-system/.run/space-registry/spaces.json",
+  "summary_json": "backend/state/legacy_es_purge_execute_latest.json",
+  "preconditions": {
+    "demo_kg": {
+      "index_status": {
+        "status": "verified_nonempty",
+        "doc_count": 5059789,
+        "nebula_entity_count": 5059789,
+        "coverage_pct": 100.0,
+        "note": "space documents match the canonical ES contract",
+        "updated_at": "2026-03-13T04:12:41Z"
+      },
+      "full_completion": true,
+      "remaining_docs": 0,
+      "doc_counts_match": true
+    },
+    "legacy_missing_space": {
+      "count": 3586289,
+      "took_ms": 120.386
+    },
+    "canonical_counts_before": {
+      "demo_kg": {
+        "doc_count": 5059789,
+        "took_ms": 76.106,
+        "expected_doc_count": 5059789
+      },
+      "it_space_217946": {
+        "doc_count": 0,
+        "took_ms": 32.03,
+        "expected_doc_count": 0
+      },
+      "it_space_218024": {
+        "doc_count": 2,
+        "took_ms": 85.634,
+        "expected_doc_count": 2
+      },
+      "it_space_218182": {
+        "doc_count": 3,
+        "took_ms": 39.155,
+        "expected_doc_count": 2
+      },
+      "it_space_218354": {
+        "doc_count": 4,
+        "took_ms": 90.048,
+        "expected_doc_count": 4
+      },
+      "test2": {
+        "doc_count": 0,
+        "took_ms": 63.971,
+        "expected_doc_count": 0
+      }
+    },
+    "ready_space_count": 6,
+    "gate_ok": true
+  },
+  "delete": {
+    "took_ms": 56481.72,
+    "response": {
+      "took": 56411,
+      "timed_out": false,
+      "total": 3586289,
+      "deleted": 1753920,
+      "batches": 3587,
+      "version_conflicts": 1832369,
+      "noops": 0,
+      "retries": {
+        "bulk": 0,
+        "search": 0
+      },
+      "throttled_millis": 0,
+      "requests_per_second": -1.0,
+      "throttled_until_millis": 0,
+      "failures": []
+    }
+  },
+  "verification": {
+    "legacy_missing_space_after": {
+      "count": 0,
+      "took_ms": 56.147
+    },
+    "canonical_counts_after": {
+      "demo_kg": {
+        "doc_count": 5059789,
+        "took_ms": 77.507,
+        "expected_doc_count": 5059789
+      },
+      "it_space_217946": {
+        "doc_count": 0,
+        "took_ms": 34.897,
+        "expected_doc_count": 0
+      },
+      "it_space_218024": {
+        "doc_count": 2,
+        "took_ms": 30.809,
+        "expected_doc_count": 2
+      },
+      "it_space_218182": {
+        "doc_count": 3,
+        "took_ms": 28.421,
+        "expected_doc_count": 2
+      },
+      "it_space_218354": {
+        "doc_count": 4,
+        "took_ms": 26.985,
+        "expected_doc_count": 4
+      },
+      "test2": {
+        "doc_count": 0,
+        "took_ms": 28.965,
+        "expected_doc_count": 0
+      }
+    },
+    "canonical_counts_unchanged": {
+      "demo_kg": {
+        "before": 5059789,
+        "after": 5059789,
+        "unchanged": true
+      },
+      "it_space_217946": {
+        "before": 0,
+        "after": 0,
+        "unchanged": true
+      },
+      "it_space_218024": {
+        "before": 2,
+        "after": 2,
+        "unchanged": true
+      },
+      "it_space_218182": {
+        "before": 3,
+        "after": 3,
+        "unchanged": true
+      },
+      "it_space_218354": {
+        "before": 4,
+        "after": 4,
+        "unchanged": true
+      },
+      "test2": {
+        "before": 0,
+        "after": 0,
+        "unchanged": true
+      }
+    },
+    "all_canonical_counts_unchanged": true,
+    "demo_kg_full_check": {
+      "command": "/home/ray/kg-system/backend/.venv/bin/python /home/ray/kg-system/backend/scripts/check_demo_kg_backfill.py --require-full --tail 0",
+      "returncode": 0,
+      "ok": true,
+      "stdout_tail": [
+        "  \"nebula_entity_count\": 5059789,",
+        "  \"coverage_pct\": 100.0,",
+        "  \"note\": \"space documents match the canonical ES contract\",",
+        "  \"updated_at\": \"2026-03-13T04:12:41Z\"",
+        "}",
+        "",
+        "legacy_missing_space_doc_count:",
+        "{",
+        "  \"count\": 0,",
+        "  \"took_ms\": 43.630082000163384",
+        "}",
+        "",
+        "full_completion:",
+        "{",
+        "  \"full_completion\": true,",
+        "  \"remaining_docs\": 0,",
+        "  \"completion_standard\": \"canonical_es_doc_count must reach nebula_entity_count with verified canonical samples\"",
+        "}",
+        "",
+        "latest_log: /home/ray/kg-system/backend/logs/demo_kg_backfill/demo_kg_backfill_20260312T073943Z.log"
+      ],
+      "stderr_tail": []
+    }
+  },
+  "finished_at": "2026-03-13T07:03:16Z"
+}

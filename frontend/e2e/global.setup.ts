@@ -8,9 +8,33 @@ async function ensureJson(url: string) {
   return response.json() as Promise<unknown>;
 }
 
+function delay(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+async function ensureJsonWithRetry(url: string, retries: number, delayMs: number) {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      return await ensureJson(url);
+    } catch (error) {
+      lastError = error;
+      if (attempt < retries) {
+        await delay(delayMs);
+      }
+    }
+  }
+  throw new Error(`backend readiness check failed for ${url} after ${retries} attempts: ${String(lastError)}`);
+}
+
 export default async function globalSetup() {
+  if (process.env.E2E_SKIP_BACKEND_CHECK === "1") {
+    return;
+  }
   const backendBase = process.env.E2E_BACKEND_URL || "http://127.0.0.1:8000";
-  const spacesPayload = (await ensureJson(`${backendBase}/api/spaces`)) as
+  const retries = Number(process.env.E2E_BACKEND_CHECK_RETRIES || 20);
+  const delayMs = Number(process.env.E2E_BACKEND_CHECK_DELAY_MS || 1000);
+  const spacesPayload = (await ensureJsonWithRetry(`${backendBase}/api/spaces`, retries, delayMs)) as
     | Array<{
         space_name?: string;
         graph_status?: string;

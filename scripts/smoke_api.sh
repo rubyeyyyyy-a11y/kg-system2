@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 SMOKE_SEARCH_Q="${SMOKE_SEARCH_Q:-ca}"
+SMOKE_RAW_ID_Q="${SMOKE_RAW_ID_Q:-MONDO:0000771}"
 SMOKE_ROOT_VID="${SMOKE_ROOT_VID:-1}"
 
 declare -A backend_state=()
@@ -31,6 +32,14 @@ echo "[smoke] POST /api/search"
 search_payload="$(SMOKE_SEARCH_Q="$SMOKE_SEARCH_Q" python3 -c 'import json,os; print(json.dumps({"q": os.environ["SMOKE_SEARCH_Q"], "search_in_name": True, "search_in_description": False, "include_edges": False}))' )"
 search_json="$(curl -fsS --max-time 20 -H 'Content-Type: application/json' -d "$search_payload" "$backend_base/api/search")"
 printf '%s' "$search_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert isinstance(data.get("nodes"), list); assert isinstance(data.get("edges"), list); assert isinstance(data.get("total_candidates"), int); print(f"ok nodes={len(data['\''nodes'\''])} edges={len(data['\''edges'\''])} total_candidates={data['\''total_candidates'\'']}")'
+
+echo "[smoke] GET /api/suggest"
+suggest_json="$(curl -fsS --max-time 20 --get --data-urlencode "q=$SMOKE_SEARCH_Q" --data "limit=5" "$backend_base/api/suggest")"
+printf '%s' "$suggest_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert isinstance(data.get("items"), list); print(f"ok q={data.get('\''q'\'', '')!r} items={len(data['\''items'\''])} truncated={bool(data.get('\''truncated'\''))}")'
+
+echo "[smoke] GET /api/suggest_raw_id"
+raw_id_json="$(curl -fsS --max-time 20 --get --data-urlencode "q=$SMOKE_RAW_ID_Q" --data "limit=5" "$backend_base/api/suggest_raw_id")"
+printf '%s' "$raw_id_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert isinstance(data.get("items"), list); print(f"ok q={data.get('\''q'\'', '')!r} items={len(data['\''items'\''])} truncated={bool(data.get('\''truncated'\''))}")'
 
 echo "[smoke] POST /api/subgraph"
 subgraph_payload="$(SMOKE_ROOT_VID="$SMOKE_ROOT_VID" python3 -c 'import json,os; print(json.dumps({"root_vid": int(os.environ["SMOKE_ROOT_VID"]), "hop": 1, "max_nodes": 120, "max_edges": 4000, "relations": []}))' )"

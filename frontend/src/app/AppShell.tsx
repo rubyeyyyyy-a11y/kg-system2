@@ -483,28 +483,28 @@ export default function AppShell() {
     manualRevealedNodeIds,
     manualHiddenNodeIds,
     nodeGroupRootById,
-    expandedSourceNodeIds,
+    drilldownExpandedNodeIds,
     hiddenNodesCollapsed,
     setHiddenNodesCollapsed,
     panelGroupCollapsed,
     setPanelGroupCollapsed,
-    expandProbeByVid,
-    loadSubgraph,
+    drilldownExpandStateByVid,
+    loadDrilldown,
     expand1hop,
     reroot1hop,
     revealNode,
     unrevealNode,
     collapseExpandFromNode,
-    clearGraphData,
-    mergeGraphData,
-    replaceGraphData,
+    clearDrilldownData,
+    mergeDrilldownData,
+    replaceDrilldownData,
     updateNodeInGraph,
     updateEdgeInGraph,
     renderMutation: drilldownRenderMutation,
     requestRelayout: requestDrilldownRelayout,
   } = useGraphData({
     spaceName: effectiveCurrentSpace,
-    scopeKey: effectiveCurrentSpace,
+    drilldownScopeKey: effectiveCurrentSpace,
     selectedNodeVid,
     onSelectNode: handleSelectNode,
     onClearSelection: handleClearSelection,
@@ -604,7 +604,7 @@ export default function AppShell() {
       edges: Array.isArray(json.edges) ? json.edges : [],
     };
 
-    replaceGraphData({
+    replaceDrilldownData({
       rootVid: request.seed_vids[0],
       nodes: nextPayload.nodes,
       edges: nextPayload.edges,
@@ -656,7 +656,7 @@ export default function AppShell() {
   function restoreDiscoveryWorkspace() {
     if (!discoveryResult || !lastDiscoveryRequest) {
       setGraphSourceMode("discovery");
-      clearGraphData();
+      clearDrilldownData();
       discoveryGraphState.resetState();
       return;
     }
@@ -740,7 +740,7 @@ export default function AppShell() {
     if (nextSeeds.length <= 0) {
       setDiscoveryResult(null);
       setLastDiscoveryRequest(null);
-      clearGraphData();
+      clearDrilldownData();
       discoveryGraphState.resetState();
       handleClearSelection();
       return;
@@ -835,7 +835,7 @@ export default function AppShell() {
   async function enterDrilldownSubgraph(vid: number, source: SelectionSource) {
     if (!Number.isFinite(vid)) return;
     if (!guardSpaceScopedRequest("正式 Drill-down")) return;
-    const loaded = await loadSubgraph(vid);
+    const loaded = await loadDrilldown(vid);
     if (!loaded) return;
     setGraphSourceMode("drilldown");
     handleSelectNode(vid, source);
@@ -873,7 +873,7 @@ export default function AppShell() {
     maxNodes: lastDiscoveryRequest?.max_nodes ?? discoveryQuery.maxNodes,
     maxEdges: lastDiscoveryRequest?.max_edges ?? discoveryQuery.maxEdges,
     seedNodeIds: discoveryRunSeedVidSet,
-    onMergeGraphData: mergeGraphData,
+    onMergeGraphData: mergeDrilldownData,
     onNotice: (level, message) => setUiNotice({ level, message }),
   });
   const currentDiscoveryExpandFingerprint = useMemo(
@@ -888,14 +888,14 @@ export default function AppShell() {
   const resetPageOrchestrationState = useCallback(() => {
     setGraphSourceMode("discovery");
     discoveryGraphState.resetState();
-    clearGraphData();
+    clearDrilldownData();
     setHop(1);
     setRelations([]);
     handleClearSelection();
     setRenderEdgeLabels(false);
     setSelectedEdgeGraphId(null);
     setDiscoveryExpandProbeNodeId(null);
-  }, [clearGraphData, discoveryGraphState]);
+  }, [clearDrilldownData, discoveryGraphState]);
 
   useEffect(() => {
     pageResetRef.current = () => {
@@ -1133,7 +1133,7 @@ export default function AppShell() {
   const selectedNodeIsRoot = sel.kind === "node" && rootVid != null && sel.vid === rootVid;
   const selectedNodeIsVisible = sel.kind === "node" ? visibleNodeIdSet.has(sel.vid) : false;
   const selectedNodeIsAutoTop = sel.kind === "node" ? autoVisibleTopIds.has(sel.vid) : false;
-  const selectedNodeExpandClosable = sel.kind === "node" && expandedSourceNodeIds.has(sel.vid);
+  const selectedNodeExpandClosable = sel.kind === "node" && drilldownExpandedNodeIds.has(sel.vid);
   const discoverySelectedExpandSession =
     sel.kind === "node" ? discoveryGraphState.expandSessionMap[String(sel.vid)] : undefined;
   const discoverySelectedNodeExpandUiState =
@@ -1146,7 +1146,7 @@ export default function AppShell() {
   );
 
   const selectedNodeProbeState =
-    discoveryResultMode ? undefined : sel.kind === "node" ? expandProbeByVid[sel.vid] : undefined;
+    discoveryResultMode ? undefined : sel.kind === "node" ? drilldownExpandStateByVid[sel.vid] : undefined;
 
   const expandButtonDisabled =
     discoveryResultMode

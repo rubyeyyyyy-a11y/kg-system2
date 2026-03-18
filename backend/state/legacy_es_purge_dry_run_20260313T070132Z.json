@@ -1,0 +1,63 @@
+{
+  "started_at": "2026-03-13T07:01:32Z",
+  "mode": "dry-run",
+  "es_index": "kg_entity",
+  "registry_file": "/home/ray/kg-system/.run/space-registry/spaces.json",
+  "summary_json": "/home/ray/kg-system/backend/state/legacy_es_purge_dry_run_20260313T070132Z.json",
+  "preconditions": {
+    "demo_kg": {
+      "index_status": {
+        "status": "verified_nonempty",
+        "doc_count": 5059789,
+        "nebula_entity_count": 5059789,
+        "coverage_pct": 100.0,
+        "note": "space documents match the canonical ES contract",
+        "updated_at": "2026-03-13T04:12:41Z"
+      },
+      "full_completion": true,
+      "remaining_docs": 0,
+      "doc_counts_match": true
+    },
+    "legacy_missing_space": {
+      "count": 5059789,
+      "took_ms": 42.51
+    },
+    "canonical_counts_before": {
+      "demo_kg": {
+        "doc_count": 5059789,
+        "took_ms": 63.002,
+        "expected_doc_count": 5059789
+      },
+      "it_space_217946": {
+        "doc_count": 0,
+        "took_ms": 13.608,
+        "expected_doc_count": 0
+      },
+      "it_space_218024": {
+        "doc_count": 2,
+        "took_ms": 17.748,
+        "expected_doc_count": 2
+      },
+      "it_space_218182": {
+        "doc_count": 3,
+        "took_ms": 9.675,
+        "expected_doc_count": 2
+      },
+      "it_space_218354": {
+        "doc_count": 4,
+        "took_ms": 20.232,
+        "expected_doc_count": 4
+      },
+      "test2": {
+        "doc_count": 0,
+        "took_ms": 14.83,
+        "expected_doc_count": 0
+      }
+    },
+    "ready_space_count": 6,
+    "gate_ok": true
+  },
+  "delete": null,
+  "verification": null,
+  "finished_at": "2026-03-13T07:01:32Z"
+}

@@ -1,92 +1,46 @@
-# React + TypeScript + Vite
+# Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+`frontend/` 是统一关系发现与 import 的前端工程，技术栈为 `React 19 + TypeScript + Vite + G6`。
 
-Currently, two official plugins are available:
+## 正式前端链路
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- 统一关系发现是唯一正式图入口
+- 候选搜索正式承接 `POST /api/search`、`GET /api/suggest`、`GET /api/suggest_raw_id`、`POST /api/discovery/entity_candidates`
+- formal drill-down 使用 `POST /api/subgraph`、`POST /api/expand`
+- discovery 图工作流使用 `POST /api/graph/discovery`、`POST /api/graph/discovery/expand`
 
-## React Compiler
+## 本地运行
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+bash ../scripts/bootstrap_env.sh
+cd frontend
+npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
-
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+默认通过 Vite 代理把 `/api/*` 转发到 `http://localhost:8000`。
 
 ## E2E
 
-Browser E2E now lives under `frontend/e2e/` and is fixture-driven from `frontend/e2e/fixtures/multi-space.json`.
+Playwright 套件已经正式入库在 `frontend/e2e/`。
 
-Minimum prerequisites:
+前置条件：
 
-- backend is already running at `http://127.0.0.1:8000`
-- the fixture spaces in `multi-space.json` exist and remain `graph_status=ready` / `search_status=full`
-- Chromium is installed once via `npm run e2e:install`
+- 后端运行在 `http://127.0.0.1:8000`
+- `frontend/e2e/fixtures/multi-space.json` 中的 space 存在，且保持 `graph_status=ready`、`search_status=full`
+- Chromium 已安装，且宿主机具备 Playwright 依赖（建议 `npx playwright install --with-deps chromium`）
 
-Run commands:
+常用命令：
 
 ```bash
 npm run e2e
 npm run e2e:smoke
+npm run e2e:import-mock
+npm run e2e:quick-cleanup
 ```
 
-The Playwright runner starts the Vite frontend automatically on `http://127.0.0.1:4173` and performs a backend readiness check in `e2e/global.setup.ts` before specs execute.
+Playwright 默认会自动启动 `http://127.0.0.1:4173` 的测试 Vite server（`npm run dev:e2e`）。
+
+- mock import/cleanup 回归可通过 `E2E_SKIP_BACKEND_CHECK=1` 跳过全局后端 readiness 检查（已内置在 `e2e:import-mock` / `e2e:quick-cleanup`）。
+- e2e npm 脚本会自动注入 `NO_PROXY/no_proxy=127.0.0.1,localhost`，避免代理导致本地 webServer 探测误判。
+- 详细依赖、命令矩阵与已知限制见：
+  `docs/IMPORT_BATCH_GOVERNANCE_TEST_RUNBOOK.md`

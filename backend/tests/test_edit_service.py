@@ -28,14 +28,19 @@ class NodeEditServiceTest(unittest.TestCase):
             return _FakeResult(
                 {
                     "vid": [1],
-                    "entity_name": [None],
-                    "entity_type": [None],
-                    "source": [None],
-                    "description": [None],
-                    "entity_raw_id": [None],
-                    "version": [None],
-                    "updated_at": [None],
-                    "updated_by": [None],
+                    "props": [
+                        {
+                            "entity_name": None,
+                            "entity_type": None,
+                            "source": None,
+                            "description": None,
+                            "entity_raw_id": None,
+                            "version": None,
+                            "updated_at": None,
+                            "updated_by": None,
+                            "custom_field": "kept",
+                        }
+                    ],
                 }
             )
 
@@ -44,6 +49,7 @@ class NodeEditServiceTest(unittest.TestCase):
 
         self.assertIn("FETCH PROP ON `Entity` 1", captured["ngql"])
         self.assertNotIn("MATCH (v:`Entity`)", captured["ngql"])
+        self.assertIn("properties(vertex) AS props", captured["ngql"])
         self.assertEqual(
             snapshot,
             {
@@ -56,6 +62,7 @@ class NodeEditServiceTest(unittest.TestCase):
                 "version": 0,
                 "updated_at": 0,
                 "updated_by": "",
+                "custom_field": "kept",
             },
         )
 
@@ -120,11 +127,15 @@ class NodeEditServiceTest(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 409)
         self.assertEqual(ctx.exception.detail["error_code"], "VERSION_CONFLICT")
 
-    def test_patch_node_returns_422_on_invalid_field(self):
-        req = NodePatchRequest(set={"bad_field": "x"}, expected_version=0, updated_by="tester")
+    def test_patch_node_returns_422_on_read_only_field(self):
+        req = NodePatchRequest(set={"vid": "2"}, expected_version=0, updated_by="tester")
 
         with (
             mock.patch("app.services.edit_service.validate_updated_by", return_value="tester"),
+            mock.patch(
+                "app.services.edit_service._node_snapshot",
+                return_value={"vid": 1, "version": 0, "entity_name": "", "source": "", "updated_by": "", "updated_at": 0},
+            ),
             mock.patch("app.services.edit_service._audit"),
         ):
             with self.assertRaises(HTTPException) as ctx:
@@ -132,12 +143,12 @@ class NodeEditServiceTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.status_code, 422)
 
-    def test_patch_edge_uses_unqualified_fields_and_no_yield(self):
+    def test_patch_edge_updates_dynamic_editable_field_and_keeps_relation_read_only(self):
         req = EdgePatchRequest(
             src=1,
             dst=2,
             rank="0",
-            set={"relation": "associate|codex"},
+            set={"source": "Codex"},
             expected_version=2,
             updated_by="tester",
         )
@@ -154,7 +165,7 @@ class NodeEditServiceTest(unittest.TestCase):
             "edge_type": "REL2",
         }
         after = dict(before)
-        after.update({"relation": "associate|codex", "version": 3, "updated_at": 100, "updated_by": "tester"})
+        after.update({"source": "Codex", "version": 3, "updated_at": 100, "updated_by": "tester"})
 
         with (
             mock.patch("app.services.edit_service._edge_snapshot", side_effect=[before, after]),
@@ -168,11 +179,31 @@ class NodeEditServiceTest(unittest.TestCase):
 
         update_ngql = execute_mock.call_args[0][0]
         self.assertIn("UPDATE EDGE ON `REL2` 1->2@0", update_ngql)
-        self.assertIn('`relation` = "associate|codex"', update_ngql)
+        self.assertIn('`source` = "Codex"', update_ngql)
         self.assertIn("`version` = 3", update_ngql)
         self.assertNotIn("YIELD properties(edge)", update_ngql)
         self.assertEqual(resp["version"], 3)
-        self.assertEqual(resp["updated"]["relation"], "associate|codex")
+        self.assertEqual(resp["updated"]["source"], "Codex")
+
+    def test_patch_edge_rejects_relation_write(self):
+        req = EdgePatchRequest(
+            src=1,
+            dst=2,
+            rank="0",
+            set={"relation": "associate|codex"},
+            expected_version=2,
+            updated_by="tester",
+        )
+
+        with (
+            mock.patch("app.services.edit_service.validate_updated_by", return_value="tester"),
+            mock.patch("app.services.edit_service._edge_snapshot", return_value={"edge_type": "REL2", "version": 2}),
+            mock.patch("app.services.edit_service._audit"),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                edit_service.patch_edge(req)
+
+        self.assertEqual(ctx.exception.status_code, 422)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,7 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
           jobs.map((job) => (
             <button
               key={job.job_id}
+              data-testid={`import-job-item-${job.job_id}`}
               onClick={() => onSelect(job.job_id)}
               style={{
                 display: "grid",
@@ -77,11 +78,13 @@ export function JobPanel({ jobs, selectedJobId, onSelect, onCancel, onDownloadFa
         {selectedJob ? (
           <div style={{ display: "grid", gap: 12 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              <strong>{selectedJob.job_id}</strong>
-              <span style={{ fontSize: 12, color: STATUS_COLOR[selectedJob.status] }}>{displayStatus(selectedJob)}</span>
+              <strong data-testid="import-selected-job-id">{selectedJob.job_id}</strong>
+              <span data-testid="import-selected-job-status" style={{ fontSize: 12, color: STATUS_COLOR[selectedJob.status] }}>
+                {displayStatus(selectedJob)}
+              </span>
               <span style={{ fontSize: 12, color: "#7d6b57" }}>workspace={selectedJob.workspace_mode}</span>
               {selectedJob.status === "queued" || selectedJob.status === "running" ? (
-                <button onClick={() => onCancel(selectedJob.job_id)} style={{ marginLeft: "auto" }}>
+                <button data-testid="import-job-cancel-button" onClick={() => onCancel(selectedJob.job_id)} style={{ marginLeft: "auto" }}>
                   取消
                 </button>
               ) : null}

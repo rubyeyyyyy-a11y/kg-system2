@@ -1,5 +1,6 @@
 import time
 import uuid
+from urllib.parse import quote
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
@@ -30,6 +31,39 @@ JobFailureStage = Literal[
 ]
 IntegrationLevel = Literal["fully_integrated", "import_only", "partially_integrated"]
 ObjectType = Literal["tag", "edge_type"]
+ImportBatchSourceType = Literal["import_ui", "team_ingestion"]
+ImportBatchStatus = Literal[
+    "queued",
+    "running",
+    "succeeded",
+    "failed_import",
+    "failed_postprocess",
+    "cancelled",
+]
+ImportBatchCleanupStatus = Literal[
+    "not_requested",
+    "queued",
+    "running",
+    "succeeded",
+    "partial_succeeded",
+    "failed",
+    "not_supported",
+]
+ImportBatchItemType = Literal["entity", "relation"]
+CleanupJobScope = Literal["full_batch", "relations_only"]
+CleanupJobStatus = Literal["queued", "running", "succeeded", "partial_succeeded", "failed"]
+CleanupConflictSource = Literal["ledger", "live_graph"]
+CleanupJobPhase = Literal[
+    "planning",
+    "deleting_relations",
+    "deleting_entities",
+    "deleting_es_docs",
+    "refreshing_metadata",
+    "reconciling",
+    "verifying",
+    "completed",
+    "failed",
+]
 
 IDENTITY_FIELDS = {"ID", "srcVID", "dstVID", "rank"}
 
@@ -40,6 +74,25 @@ def _ts() -> int:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+
+def build_import_batch_item_key(
+    *,
+    item_type: str,
+    vid: int | None = None,
+    src_vid: int | None = None,
+    dst_vid: int | None = None,
+    relation: str | None = None,
+    rank: int | None = None,
+    edge_type: str | None = None,
+) -> str:
+    if item_type == "entity":
+        return f"entity:{int(vid or 0)}"
+    relation_name = quote(str(relation or ""), safe="")
+    return (
+        f"relation:{str(edge_type or 'REL2')}:{int(src_vid or 0)}:{int(dst_vid or 0)}:"
+        f"{relation_name}:{int(rank or 0)}"
+    )
 
 
 def _merge_field_mappings(
@@ -114,6 +167,7 @@ class DraftSource(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     alias_hints: List[SourceAliasHint] = Field(default_factory=list)
     recommended_object_type: Optional[ObjectType] = None
+    default_edge_kind: Optional[str] = None
 
 
 class FieldMapping(BaseModel):
@@ -132,9 +186,10 @@ class IdentityMapping(BaseModel):
 
 
 class PropertyMapping(BaseModel):
-    source_column: str
+    source_column: str = ""
     target_field: str
     logical_field: Optional[str] = None
+    default_value: Optional[str] = None
 
 
 class RowSelector(BaseModel):
@@ -370,10 +425,177 @@ class JobArtifact(BaseModel):
     path: str
 
 
+class ImportBatchRecord(BaseModel):
+    batch_id: str
+    space_id: str
+    source_type: ImportBatchSourceType = "import_ui"
+    created_at: int = Field(default_factory=_ts)
+    updated_at: int = Field(default_factory=_ts)
+    is_test_data: bool = True
+    draft_id: str
+    job_id: str
+    submission_id: Optional[str] = None
+    status: ImportBatchStatus = "queued"
+    entity_count: int = 0
+    relation_count: int = 0
+    searchable: Optional[bool] = None
+    cleanup_status: ImportBatchCleanupStatus = "not_requested"
+    tags: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    ledger_summary: Dict[str, Any] = Field(default_factory=dict)
+    warning_messages: List[str] = Field(default_factory=list)
+
+
+class ImportBatchItemRecord(BaseModel):
+    item_id: str = Field(default_factory=lambda: _new_id("batch_item"))
+    batch_id: str
+    space_id: str
+    job_id: str
+    created_at: int = Field(default_factory=_ts)
+    item_type: ImportBatchItemType
+    created_by_batch: bool = True
+    vid: Optional[int] = None
+    entity_raw_id: Optional[str] = None
+    entity_name: Optional[str] = None
+    src_vid: Optional[int] = None
+    dst_vid: Optional[int] = None
+    relation: Optional[str] = None
+    rank: Optional[int] = None
+    edge_type: Optional[str] = None
+    row_index: Optional[int] = None
+    item_key: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _populate_item_key(self):
+        self.item_key = str(
+            self.item_key
+            or build_import_batch_item_key(
+                item_type=self.item_type,
+                vid=self.vid,
+                src_vid=self.src_vid,
+                dst_vid=self.dst_vid,
+                relation=self.relation,
+                rank=self.rank,
+                edge_type=self.edge_type,
+            )
+        )
+        return self
+
+
+class CleanupJobPhaseRecord(BaseModel):
+    phase: CleanupJobPhase
+    at: int = Field(default_factory=_ts)
+
+
+class CleanupJobArtifactRecord(BaseModel):
+    kind: Literal[
+        "summary",
+        "conflicts",
+        "skipped_entities",
+        "skipped_relations",
+        "verify_summary",
+        "plan_summary",
+        "blocked_entities",
+        "deletable_entities",
+        "deletable_relations",
+    ]
+    filename: str
+    path: str
+
+
+class CleanupConflictRecord(BaseModel):
+    vid: Optional[int] = None
+    item_type: ImportBatchItemType = "entity"
+    source: CleanupConflictSource = "ledger"
+    reason: str
+    blocking_batch_ids: List[str] = Field(default_factory=list)
+    blocking_relations: int = 0
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CleanupPlanSummary(BaseModel):
+    requested_entity_count: int = 0
+    requested_relation_count: int = 0
+    ledger_blocked_entity_count: int = 0
+    live_graph_blocked_entity_count: int = 0
+    blocked_entity_count: int = 0
+    deletable_entity_count: int = 0
+    deletable_relation_count: int = 0
+    conflict_count: int = 0
+    warnings: List[str] = Field(default_factory=list)
+    verification_scope_note: str = ""
+    generated_at: int = Field(default_factory=_ts)
+
+
+class CleanupBlockedEntityRecord(BaseModel):
+    vid: Optional[int] = None
+    entity_name: Optional[str] = None
+    entity_raw_id: Optional[str] = None
+    item_key: Optional[str] = None
+    conflict_sources: List[CleanupConflictSource] = Field(default_factory=list)
+    conflicts: List[CleanupConflictRecord] = Field(default_factory=list)
+
+
+class CleanupDeletableEntityRecord(BaseModel):
+    vid: Optional[int] = None
+    entity_name: Optional[str] = None
+    entity_raw_id: Optional[str] = None
+    item_key: Optional[str] = None
+
+
+class CleanupDeletableRelationRecord(BaseModel):
+    edge_type: Optional[str] = None
+    src_vid: Optional[int] = None
+    dst_vid: Optional[int] = None
+    rank: Optional[int] = None
+    relation: Optional[str] = None
+    item_key: Optional[str] = None
+
+
+class CleanupJobRecord(BaseModel):
+    cleanup_job_id: str
+    space_id: str
+    batch_ids: List[str] = Field(default_factory=list)
+    scope: CleanupJobScope = "full_batch"
+    created_by: str = "cleanup_job"
+    created_at: int = Field(default_factory=_ts)
+    updated_at: int = Field(default_factory=_ts)
+    started_at: Optional[int] = None
+    finished_at: Optional[int] = None
+    status: CleanupJobStatus = "queued"
+    phase: CleanupJobPhase = "planning"
+    final_phase: Optional[CleanupJobPhase] = None
+    phase_history: List[CleanupJobPhaseRecord] = Field(default_factory=lambda: [CleanupJobPhaseRecord(phase="planning")])
+    requested_relation_count: int = 0
+    requested_entity_count: int = 0
+    deleted_relation_count: int = 0
+    deleted_entity_count: int = 0
+    skipped_relation_count: int = 0
+    skipped_entity_count: int = 0
+    deduplicated_relation_count: int = 0
+    deduplicated_entity_count: int = 0
+    conflict_count: int = 0
+    warning_messages: List[str] = Field(default_factory=list)
+    error_message: Optional[str] = None
+    failure_phase: Optional[str] = None
+    failure_kind: Optional[str] = None
+    failure_detail: Dict[str, Any] = Field(default_factory=dict)
+    duration_ms: Optional[int] = None
+    request_key: Optional[str] = None
+    conflicts: List[CleanupConflictRecord] = Field(default_factory=list)
+    plan_summary: CleanupPlanSummary = Field(default_factory=CleanupPlanSummary)
+    has_plan_artifacts: bool = False
+    verify_summary: Dict[str, Any] = Field(default_factory=dict)
+    metadata_summary: Dict[str, Any] = Field(default_factory=dict)
+    reconcile_summary: Dict[str, Any] = Field(default_factory=dict)
+    artifacts: List[CleanupJobArtifactRecord] = Field(default_factory=list)
+
+
 class ImportJobState(BaseModel):
     job_id: str
     format_version: str = "imports-v2"
     draft_id: str
+    batch_id: str = ""
     space_name: str = ""
     template_type: str = "entity_rel2_default"
     status: JobStatus
@@ -422,4 +644,6 @@ class ImportJobState(BaseModel):
             merged["workspace_mode"] = merged.get("mode")
         if "mode" not in merged and "workspace_mode" in merged:
             merged["mode"] = merged.get("workspace_mode")
+        if "batch_id" not in merged:
+            merged["batch_id"] = ""
         return merged

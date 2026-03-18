@@ -406,6 +406,7 @@ api_specification:
         hosts_rows: int
     - endpoint: /api/search
       method: POST
+      note: formal compatibility path; router=`backend/app/routers/search.py`, owner=`app.services.search_v2.service.search`
       request_params:
         q: string
         search_in_name: bool
@@ -440,8 +441,13 @@ api_specification:
           strategy: string
           reason: string
           timings_ms: object
+        space_meta:
+          space_name: string
+          graph_status: string
+          search_status: string
     - endpoint: /api/suggest
       method: GET
+      note: formal compatibility path; router=`backend/app/routers/search.py`, owner=`app.services.search_v2.service.suggest`
       request_params:
         q: string
         limit: int=12
@@ -456,8 +462,13 @@ api_specification:
             source: string
             score: number|null
         truncated: bool
+        space_meta:
+          space_name: string
+          graph_status: string
+          search_status: string
     - endpoint: /api/suggest_raw_id
       method: GET
+      note: formal compatibility path; router=`backend/app/routers/search.py`, owner=`app.services.search_v2.service.suggest_raw_id`
       request_params:
         q: string
         limit: int=12
@@ -472,6 +483,10 @@ api_specification:
             entity_type: string
             source: string
         truncated: bool
+        space_meta:
+          space_name: string
+          graph_status: string
+          search_status: string
     - endpoint: /api/entity_types
       method: GET
       request_params: []
@@ -640,13 +655,10 @@ api_specification:
           error_code: VALIDATION_ERROR
           field: string
           message: string
-    - note: as of 2026-03-16, `/api/multi_entity_graph*` and `/api/edge_*` were retired during legacy module deletion.
+    - note: as of 2026-03-16, `/api/multi_entity_graph*` and legacy `edge_* suggest/search` endpoints were retired during legacy module deletion.
       replacement:
         - graph exploration: `/api/graph/discovery` + `/api/subgraph` + `/api/expand`
         - candidate search: `/api/search` + `/api/suggest` + `/api/suggest_raw_id` + `/api/discovery/entity_candidates`
-            src_label: string
-            dst_label: string
-            snippet: string
         total_candidates: int
 ```
 

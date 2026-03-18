@@ -2,9 +2,9 @@ import logging
 import time
 from typing import Any, Dict, List, Sequence
 
+from app.config import settings
 from nebula3.Exception import IOErrorException, NotValidConnectionException
 
-from app.config import settings
 from app.core.space_context import get_current_space
 from app.db.nebula import EDGE_TAG, execute_ngql
 from app.services.common import vw
@@ -156,6 +156,47 @@ YIELD src(edge) AS src, dst(edge) AS dst,
                     "edge_type": settings.edge_type,
                     "relation": str(vw(relations[i]) or ""),
                     "source_db": str(vw(sources[i]) or ""),
+                }
+            )
+        return edges, took_ms
+
+    def fetch_incident_edges(
+        self,
+        vid: int,
+        *,
+        edge_type: str | None = None,
+        limit: int | None = None,
+        space_name: str | None = None,
+    ) -> tuple[List[Dict[str, Any]], float]:
+        normalized_vid = int(vid)
+        if normalized_vid <= 0:
+            return [], 0.0
+        edge_name = str(edge_type or settings.edge_type or "").strip()
+        edge_tag = f"`{edge_name.replace('`', '')}`" if edge_name else EDGE_TAG
+        ngql = (
+            f"GO FROM {normalized_vid} OVER {edge_tag} BIDIRECT\n"
+            "YIELD src(edge) AS src_vid,\n"
+            "      dst(edge) AS dst_vid,\n"
+            "      rank(edge) AS rank,\n"
+            "      properties(edge).relation AS relation"
+        )
+        if limit is not None and int(limit) > 0:
+            ngql += f"\n| LIMIT {int(limit)}"
+        ngql += ";"
+        res, took_ms = self.execute(ngql, space_name=space_name)
+        srcs = res.column_values("src_vid")
+        dsts = res.column_values("dst_vid")
+        ranks = res.column_values("rank")
+        relations = res.column_values("relation")
+        edges: List[Dict[str, Any]] = []
+        for i in range(len(srcs)):
+            edges.append(
+                {
+                    "edge_type": edge_name or settings.edge_type,
+                    "src_vid": int(vw(srcs[i]) or 0),
+                    "dst_vid": int(vw(dsts[i]) or 0),
+                    "rank": int(vw(ranks[i]) or 0),
+                    "relation": str(vw(relations[i]) or ""),
                 }
             )
         return edges, took_ms

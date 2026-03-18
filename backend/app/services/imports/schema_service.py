@@ -2,6 +2,7 @@ from typing import Any
 
 from app.config import settings
 from app.db.nebula_client import execute_ngql_safe
+from app.object_meta import import_rules
 from app.services.common import vw
 from app.services.imports.models import (
     DraftSource,
@@ -157,23 +158,24 @@ def build_schema_plan(
         if source is None:
             warnings.append(f"target `{target.object_name}` references missing source `{target.source_id}`")
             continue
+        effective_target = import_rules.apply_target_import_rules(source=source, target=target)
         existing = _object_lookup(schema, target.object_type, target.object_name)
         exists = existing is not None
         if not exists and not schema_options.allow_create_object:
-            warnings.append(f"{target.object_type} `{target.object_name}` does not exist and create is disabled")
+            warnings.append(f"{effective_target.object_type} `{effective_target.object_name}` does not exist and create is disabled")
         existing_props = {str(item.get('name') or ''): item for item in (existing or {}).get("properties", [])}
-        mapped_columns = set(target.identity_mapping.mapped_columns()) | {
-            item.source_column for item in target.property_mappings if item.source_column
+        mapped_columns = set(effective_target.identity_mapping.mapped_columns()) | {
+            item.source_column for item in effective_target.property_mappings if item.source_column
         }
         add_properties: list[SchemaPropertyPlan] = []
-        for item in target.property_mappings:
+        for item in effective_target.property_mappings:
             prop_name = item.target_field
             if not prop_name:
                 continue
             prop_exists = prop_name in existing_props
             if exists and not prop_exists and not schema_options.allow_add_properties:
                 warnings.append(
-                    f"{target.object_type} `{target.object_name}` missing property `{prop_name}` and add-property is disabled"
+                    f"{effective_target.object_type} `{effective_target.object_name}` missing property `{prop_name}` and add-property is disabled"
                 )
             prop_type = str(existing_props.get(prop_name, {}).get("type") or default_property_type(prop_name))
             add_properties.append(
@@ -190,16 +192,16 @@ def build_schema_plan(
                 continue
             add_properties.append(system_prop.model_copy())
         object_integration_warnings = integration_warnings_for_target(
-            object_type=target.object_type, object_name=target.object_name, object_exists=exists
+            object_type=effective_target.object_type, object_name=effective_target.object_name, object_exists=exists
         )
         integration_warnings.extend(object_integration_warnings)
         ignored_columns = [column for column in source.columns if column not in mapped_columns]
         plans.append(
             SchemaObjectPlan(
-                target_id=target.target_id,
-                source_id=target.source_id,
-                object_type=target.object_type,
-                object_name=target.object_name,
+                target_id=effective_target.target_id,
+                source_id=effective_target.source_id,
+                object_type=effective_target.object_type,
+                object_name=effective_target.object_name,
                 object_exists=exists,
                 add_object=not exists,
                 add_properties=[item for item in add_properties if not item.exists],

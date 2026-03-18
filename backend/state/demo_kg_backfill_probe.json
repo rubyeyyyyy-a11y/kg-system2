@@ -1,0 +1,92 @@
+{
+  "generated_at": 1773373868,
+  "target_spaces": [
+    "demo_kg"
+  ],
+  "state_file": "/home/ray/kg-system/backend/state/es_backfill_spaces.state.json",
+  "index_name": "kg_entity",
+  "summaries": [
+    {
+      "space_name": "demo_kg",
+      "strategy": "legacy_es_rewrite",
+      "status": "verified_partial",
+      "note": "canonical coverage is partial: es_doc_count=10000 below nebula_entity_count=5059789",
+      "start_cursor": 1000,
+      "start_last_vid": 0,
+      "cursor": 1000,
+      "last_vid": 1000,
+      "batch_count": 2,
+      "docs": 1000,
+      "ok_count": 1000,
+      "fail_count": 0,
+      "legacy_missing_space_doc_count": 5059789,
+      "nebula_entity_count": 5059789,
+      "nebula_count_ms": 0.0,
+      "nebula_count_source": "metadata_stats",
+      "nebula_count_error": "Socket read failed: timed out",
+      "es_doc_count": 10000,
+      "es_count_ms": 44.939,
+      "coverage_pct": 0.2,
+      "verify": {
+        "ok": true,
+        "space_name": "demo_kg",
+        "doc_count": 10498,
+        "sample_count": 3,
+        "sample_ids_ok": true,
+        "sample_space_ok": true,
+        "sample_query_ok": true,
+        "query_mode": "raw_id_exact",
+        "matched_vids": [
+          1
+        ],
+        "timings_ms": {
+          "count_ms": 40.523,
+          "sample_ms": 77.64,
+          "query_ms": 77.67
+        },
+        "samples": [
+          {
+            "_id": "demo_kg:1",
+            "_source": {
+              "vid": 1,
+              "entity_raw_id": "MONDO:0000001",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "disease",
+              "raw_id_norm": "mondo0000001",
+              "source": "KG|UMLS"
+            }
+          },
+          {
+            "_id": "demo_kg:2",
+            "_source": {
+              "vid": 2,
+              "entity_raw_id": "MONDO:0000002",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "obsolete 46,XX sex reversal",
+              "raw_id_norm": "mondo0000002",
+              "source": "KG"
+            }
+          },
+          {
+            "_id": "demo_kg:3",
+            "_source": {
+              "vid": 3,
+              "entity_raw_id": "MONDO:0000003",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "obsolete 17-hydroxysteroid dehydrogenase deficiency",
+              "raw_id_norm": "mondo0000003",
+              "source": "KG"
+            }
+          }
+        ]
+      },
+      "elapsed_s": 13.719,
+      "full_completion": false,
+      "remaining_docs": 5049789,
+      "completion_standard": "canonical_es_doc_count must reach nebula_entity_count with verified canonical samples"
+    }
+  ]
+}

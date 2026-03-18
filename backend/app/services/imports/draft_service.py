@@ -1,5 +1,6 @@
 import time
 
+from app.object_meta import import_rules
 from app.core.space_context import get_current_space
 from app.services.imports import file_store, source_service, validation_service
 from app.services.imports.errors import raise_import_http_error
@@ -31,6 +32,7 @@ def _normalize_mapping(
     discriminator_column: str | None,
 ) -> list[ImportTargetConfig]:
     first_source_id = sources[0].source_id if sources else ""
+    sources_by_id = {source.source_id: source for source in sources}
     normalized: list[ImportTargetConfig] = []
     for item in raw_mapping:
         payload = dict(item)
@@ -41,7 +43,11 @@ def _normalize_mapping(
                 "column": discriminator_column,
                 "equals": payload.get("discriminator_value"),
             }
-        normalized.append(ImportTargetConfig.model_validate(payload))
+        target = ImportTargetConfig.model_validate(payload)
+        source = sources_by_id.get(target.source_id)
+        if source is not None:
+            target = import_rules.apply_target_import_rules(source=source, target=target)
+        normalized.append(target)
     return normalized
 
 

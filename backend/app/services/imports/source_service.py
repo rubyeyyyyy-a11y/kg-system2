@@ -1,7 +1,7 @@
 import hashlib
-import re
 from typing import Iterable
 
+from app.object_meta import import_rules
 from app.services.imports import file_store
 from app.services.imports.models import (
     DraftSource,
@@ -12,31 +12,14 @@ from app.services.imports.models import (
     SourceAliasHint,
 )
 
-_NORMALIZE_RE = re.compile(r"[^a-z0-9]+")
-
-LOGICAL_ALIAS_RULES: dict[str, set[str]] = {
-    "ID": {"id", "vid"},
-    "srcVID": {"srcvid", "src_vid", "subject_our_defined_id"},
-    "dstVID": {"dstvid", "dst_vid", "object_our_defined_id"},
-    "rank": {"rank"},
-    "relation": {"relation"},
-    "source": {"source"},
-    "evidence": {"evidence", "pmid", "relation_detail"},
-    "score": {"score"},
-    "entity_name": {"entity_name"},
-    "entity_type": {"entity_type"},
-    "entity_raw_id": {"entity_raw_id"},
-    "description": {"description"},
-}
-
-VERTEX_PROPERTY_FIELDS = {"entity_name", "entity_type", "entity_raw_id", "description", "source"}
-EDGE_PROPERTY_FIELDS = {"relation", "source", "evidence", "score"}
-VERTEX_IDENTITY_FIELDS = {"ID"}
-EDGE_IDENTITY_FIELDS = {"srcVID", "dstVID", "rank"}
+VERTEX_PROPERTY_FIELDS = set(import_rules.VERTEX_FIXED_PROPERTY_FIELDS)
+EDGE_PROPERTY_FIELDS = set(import_rules.EDGE_FIXED_PROPERTY_FIELDS) | {"edge_kind"}
+VERTEX_IDENTITY_FIELDS = set(import_rules.VERTEX_IDENTITY_FIELDS)
+EDGE_IDENTITY_FIELDS = set(import_rules.EDGE_IDENTITY_FIELDS)
 
 
 def normalize_token(value: str) -> str:
-    return _NORMALIZE_RE.sub("", str(value or "").strip().lower())
+    return import_rules.normalize_token(value)
 
 
 def source_id_for_file(file_id: str) -> str:
@@ -50,20 +33,11 @@ def header_hash(columns: Iterable[str]) -> str:
 
 
 def logical_field_for_column(column: str) -> str | None:
-    token = normalize_token(column)
-    for logical_field, aliases in LOGICAL_ALIAS_RULES.items():
-        if token in {normalize_token(alias) for alias in aliases}:
-            return logical_field
-    return None
+    return import_rules.logical_field_for_column(column)
 
 
 def alias_hints(columns: Iterable[str]) -> list[SourceAliasHint]:
-    hints: list[SourceAliasHint] = []
-    for column in columns:
-        logical_field = logical_field_for_column(column)
-        if logical_field:
-            hints.append(SourceAliasHint(source_column=str(column), logical_field=logical_field))
-    return hints
+    return [SourceAliasHint.model_validate(item) for item in import_rules.alias_hints(columns)]
 
 
 def infer_kind(columns: Iterable[str]) -> str:
@@ -93,6 +67,8 @@ def preview_hints(source: DraftSource) -> list[str]:
     hints: list[str] = []
     for hint in source.alias_hints:
         hints.append(f"column `{hint.source_column}` matched logical field `{hint.logical_field}`")
+    if source.default_edge_kind:
+        hints.append(f"edge kind default inferred as `{source.default_edge_kind}` from source context")
     return hints
 
 
@@ -115,6 +91,7 @@ def build_source_snapshot(file_id: str, *, sample_rows: int) -> DraftSource:
         warnings=warnings,
         alias_hints=alias_hints(columns),
         recommended_object_type=recommended_object_type(inferred_kind),
+        default_edge_kind=import_rules.inferred_default_edge_kind(filename=record.original_name),
     )
 
 
@@ -123,46 +100,12 @@ def build_sources(file_ids: list[str], *, sample_rows: int) -> list[DraftSource]
 
 
 def suggest_target_mappings(*, source: DraftSource, object_type: ObjectType) -> tuple[IdentityMapping, list[PropertyMapping]]:
-    identity = IdentityMapping()
-    properties: list[PropertyMapping] = []
-    for column in source.columns:
-        logical_field = logical_field_for_column(column)
-        if object_type == "tag":
-            if logical_field == "ID":
-                identity.id_column = column
-                continue
-            if logical_field in VERTEX_PROPERTY_FIELDS:
-                properties.append(PropertyMapping(source_column=column, target_field=logical_field, logical_field=logical_field))
-                continue
-        else:
-            if logical_field == "srcVID":
-                identity.src_column = column
-                continue
-            if logical_field == "dstVID":
-                identity.dst_column = column
-                continue
-            if logical_field == "rank":
-                identity.rank_column = column
-                continue
-            if logical_field in EDGE_PROPERTY_FIELDS:
-                properties.append(PropertyMapping(source_column=column, target_field=logical_field, logical_field=logical_field))
-                continue
-        if logical_field and logical_field not in {"ID", "srcVID", "dstVID", "rank"}:
-            properties.append(PropertyMapping(source_column=column, target_field=logical_field, logical_field=logical_field))
-        elif not logical_field:
-            properties.append(PropertyMapping(source_column=column, target_field=column))
+    identity, properties, _target_options = import_rules.suggest_target_mappings(source=source, object_type=object_type)
     return identity, properties
 
 
 def build_default_target(*, source: DraftSource, object_type: ObjectType, object_name: str) -> ImportTargetConfig:
-    identity_mapping, property_mappings = suggest_target_mappings(source=source, object_type=object_type)
-    return ImportTargetConfig(
-        object_type=object_type,
-        object_name=object_name,
-        source_id=source.source_id,
-        identity_mapping=identity_mapping,
-        property_mappings=property_mappings,
-    )
+    return import_rules.build_default_target(source=source, object_type=object_type, object_name=object_name)
 
 
 def validate_source_kind_hint(*, object_type: ObjectType, inferred_kind: str) -> tuple[list[str], list[str]]:

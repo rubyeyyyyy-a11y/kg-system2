@@ -538,6 +538,84 @@ class ElasticsearchClient:
             },
         )
 
+    def delete_documents_by_ids(
+        self,
+        space_name: str,
+        vids: List[int],
+        *,
+        index_name: Optional[str] = None,
+        refresh: str = "wait_for",
+    ) -> Dict[str, Any]:
+        resolved_space = self._resolved_space(space_name)
+        unique_vids = sorted({int(vid) for vid in vids if int(vid) > 0})
+        if not unique_vids:
+            return {
+                "space_name": resolved_space,
+                "docs": 0,
+                "ok_count": 0,
+                "fail_count": 0,
+                "bulk_ms": 0.0,
+                "skipped": True,
+                "reason": "no_entity_vids",
+            }
+        idx = index_name or self.index
+        ok = 0
+        fail = 0
+        took_ms = 0.0
+        payloads: List[bytes] = []
+        current_parts: List[bytes] = []
+        current_bytes = 0
+        current_actions = 0
+        for vid in unique_vids:
+            action_line = json.dumps(
+                {"delete": {"_index": idx, "_id": self.document_id(resolved_space, vid)}},
+                ensure_ascii=False,
+            ).encode("utf-8") + b"\n"
+            action_bytes = len(action_line)
+            if action_bytes > self.bulk_max_bytes:
+                raise RuntimeError(
+                    f"ES bulk delete action exceeds configured request budget: vid={vid} bytes={action_bytes} max={self.bulk_max_bytes}"
+                )
+            if current_parts and (
+                current_actions >= self.bulk_max_actions or current_bytes + action_bytes > self.bulk_max_bytes
+            ):
+                payloads.append(b"".join(current_parts))
+                current_parts = []
+                current_bytes = 0
+                current_actions = 0
+            current_parts.append(action_line)
+            current_bytes += action_bytes
+            current_actions += 1
+        if current_parts:
+            payloads.append(b"".join(current_parts))
+        for batch_index, payload in enumerate(payloads):
+            batch_refresh = str(refresh or "wait_for") if batch_index == len(payloads) - 1 else "false"
+            data, batch_took_ms = self._request_json(
+                "POST",
+                "/_bulk",
+                raw_body=payload,
+                query={"refresh": batch_refresh},
+                content_type="application/x-ndjson",
+                timeout_s=self.bulk_timeout_s,
+            )
+            items = data.get("items") or []
+            for item in items:
+                op = item.get("delete") or {}
+                status = int(op.get("status") or 0)
+                if status in {200, 404}:
+                    ok += 1
+                else:
+                    fail += 1
+            took_ms += float(batch_took_ms)
+        return {
+            "space_name": resolved_space,
+            "docs": len(unique_vids),
+            "ok_count": ok,
+            "fail_count": fail,
+            "bulk_ms": round(took_ms, 3),
+            "skipped": False,
+        }
+
     def ensure_index(self, index_name: Optional[str] = None) -> Tuple[bool, str]:
         idx = index_name or self.index
         try:

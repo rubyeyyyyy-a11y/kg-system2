@@ -17,11 +17,11 @@ load_dotenv(REPO_ROOT / ".env")
 from app import config as app_config
 from app.api import routes_edit
 from app.core.config import ensure_audit_log_dir
-from app.core.space_context import bind_request_space, reset_current_space
+from app.core.space_context import SPACE_HEADER, bind_request_space, reset_current_space
 from app.db import nebula as nebula_db
 from app.db.nebula import execute_ngql
-from app.routers import detail, graph, imports, search, search_v2, spaces
-from app.services.imports import executor_service
+from app.routers import detail, graph, imports, search, search_v2, spaces, team_ingestion
+from app.services.imports import cleanup_executor_service, executor_service
 from app.services.spaces import registry_service
 
 app = FastAPI(title="KG Entity Search API")
@@ -64,10 +64,22 @@ def startup_prepare():
         os.getpid(),
     )
     executor_service.startup_recover_and_start()
+    cleanup_executor_service.startup_recover_and_start()
 
 
 @app.middleware("http")
 async def add_instance_header(request: Request, call_next) -> Response:
+    if request.url.path.startswith("/api/v1/team-ingestion") and request.headers.get(SPACE_HEADER) is not None:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": {
+                    "error_code": "TEAM_INGESTION_SPACE_HEADER_REJECTED",
+                    "message": "team-ingestion V1 rejects external X-KG-Space and always executes in demo_kg",
+                    "field": SPACE_HEADER,
+                }
+            },
+        )
     try:
         token = bind_request_space(request)
     except HTTPException as exc:
@@ -98,3 +110,4 @@ app.include_router(detail.router)
 app.include_router(routes_edit.router)
 app.include_router(imports.router)
 app.include_router(spaces.router)
+app.include_router(team_ingestion.router)

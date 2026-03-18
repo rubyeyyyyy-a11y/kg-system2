@@ -1,6 +1,8 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { EXPAND_AUTO_REVEAL_TOPK, TOP_N_VISIBLE } from "../constants/kg";
+import { EdgeDetailView } from "../features/detail/components/EdgeDetailView";
+import { NodeDetailView } from "../features/detail/components/NodeDetailView";
 import { EditWritebackPanel } from "./EditWritebackPanel";
 import type {
   EdgeDetailResp,
@@ -108,14 +110,6 @@ type RightDetailPanelProps = {
   onHideDiscoveryNode?: (vid: number) => void;
 };
 
-const DESCRIPTION_SUMMARY_LIMIT = 200;
-
-function buildDescriptionSummary(snippet?: string, description?: string) {
-  const base = String(snippet || description || "").trim();
-  if (!base) return "";
-  return base.length > DESCRIPTION_SUMMARY_LIMIT ? `${base.slice(0, DESCRIPTION_SUMMARY_LIMIT)}...` : base;
-}
-
 export function RightDetailPanel({
   allowGraphMutationActions = true,
   discoveryMode = false,
@@ -185,20 +179,6 @@ export function RightDetailPanel({
   onHideDiscoveryNode,
 }: RightDetailPanelProps) {
   const [editorTab, setEditorTab] = useState<"detail" | "edit" | "direct">("detail");
-  const [descriptionExpanded, setDescriptionExpanded] = useState(false);
-  const [nodePropertiesOpen, setNodePropertiesOpen] = useState(false);
-  const [edgePropertiesOpen, setEdgePropertiesOpen] = useState(false);
-
-  useEffect(() => {
-    setDescriptionExpanded(false);
-    setNodePropertiesOpen(false);
-    setEdgePropertiesOpen(false);
-  }, [editorTab, sel]);
-
-  const nodeFullDescription = String(nodeDetail?.description || selectedNodeBrief?.description || "").trim();
-  const nodeSummaryDescription = buildDescriptionSummary(selectedNodeBrief?.snippet, nodeFullDescription);
-  const nodeDescriptionText = descriptionExpanded && nodeFullDescription ? nodeFullDescription : nodeSummaryDescription || nodeFullDescription;
-  const canToggleDescription = Boolean(nodeFullDescription) && Boolean(nodeSummaryDescription) && nodeSummaryDescription !== nodeFullDescription;
   const selectedNodeIsSeed = sel.kind === "node" ? Boolean(discoverySeedNodeIds?.has(sel.vid)) : false;
 
   function toggleExpandFilter(list: string[], value: string) {
@@ -507,263 +487,163 @@ export function RightDetailPanel({
 
       {editorTab === "detail" ? (
         sel.kind === "none" ? (
-        <div style={{ color: "#666", fontSize: 13 }}>未选择节点/边</div>
-      ) : sel.kind === "node" ? (
-        <div data-testid="selected-node-detail" style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontWeight: 700 }}>{selectedNodeBrief?.label || `Node ${sel.vid}`}</div>
-
-          <div
-            style={{
-              border: "1px solid #f0f0f0",
-              borderRadius: 8,
-              background: "#fafafa",
-              padding: 10,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
-              gap: 8,
-            }}
-          >
-            <div style={{ display: "grid", gap: 2 }}>
-              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>id</div>
-              <div style={{ fontSize: 12 }}>{sel.vid}</div>
-            </div>
-            <div style={{ display: "grid", gap: 2 }}>
-              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>entity_type</div>
-              <div style={{ fontSize: 12 }}>{selectedNodeBrief?.entity_type || "-"}</div>
-            </div>
-            <div style={{ display: "grid", gap: 2 }}>
-              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>raw_id</div>
-              <div style={{ fontSize: 12, wordBreak: "break-all" }}>{nodeDetail?.entity_raw_id || selectedNodeBrief?.raw_id || "-"}</div>
-            </div>
-            <div style={{ display: "grid", gap: 2 }}>
-              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>source</div>
-              <div style={{ fontSize: 12 }}>{selectedNodeBrief?.source || nodeDetail?.source || "-"}</div>
-            </div>
-            <div style={{ display: "grid", gap: 2 }}>
-              <div style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>hop_level</div>
-              <div style={{ fontSize: 12 }}>{visibleNodeHopLevelMap.get(sel.vid) ?? "-"}</div>
-            </div>
-          </div>
-
-          {discoveryMode ? (
-            <>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button
-                  data-testid="discovery-expand-button"
-                  onClick={() => onExpandDiscoveryNode?.(sel.vid)}
-                  disabled={expandButtonDisabled}
-                  style={{ padding: "8px 12px" }}
-                >
-                  {expandButtonText}
-                </button>
-
-                {!selectedNodeIsSeed ? (
+          <div style={{ color: "#666", fontSize: 13 }}>未选择节点/边</div>
+        ) : sel.kind === "node" ? (
+          <div style={{ display: "grid", gap: 10 }}>
+            {discoveryMode ? (
+              <>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button
-                    data-testid="discovery-hide-button"
-                    onClick={() => onHideDiscoveryNode?.(sel.vid)}
-                    disabled={!selectedNodeIsVisible}
+                    data-testid="discovery-expand-button"
+                    onClick={() => onExpandDiscoveryNode?.(sel.vid)}
+                    disabled={expandButtonDisabled}
                     style={{ padding: "8px 12px" }}
                   >
-                    取消渲染
+                    {expandButtonText}
                   </button>
-                ) : null}
-              </div>
 
-              <div style={{ fontSize: 12, color: "#666" }}>
-                {selectedNodeIsSeed
-                  ? "当前节点是 seed，不能执行普通取消渲染；请从左侧 seed 列表删除后触发全局 discovery 重跑。"
-                  : "当前节点是普通节点，可取消渲染并在左侧 Hidden by User 中恢复。"}
-                {expandButtonText === "无更多相关节点" ? " ｜该节点当前过滤条件下无更多相关节点。" : ""}
-                {discoveryExpandFilterHint ? ` ｜${discoveryExpandFilterHint}` : ""}
-              </div>
+                  {!selectedNodeIsSeed ? (
+                    <button
+                      data-testid="discovery-hide-button"
+                      onClick={() => onHideDiscoveryNode?.(sel.vid)}
+                      disabled={!selectedNodeIsVisible}
+                      style={{ padding: "8px 12px" }}
+                    >
+                      取消渲染
+                    </button>
+                  ) : null}
+                </div>
 
-              <div style={{ display: "grid", gap: 10, border: "1px solid #f0f0f0", borderRadius: 8, background: "#fff", padding: 10 }}>
-                <div style={{ fontSize: 12, fontWeight: 600 }}>本次 Expand 过滤器</div>
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  {selectedNodeIsSeed
+                    ? "当前节点是 seed，不能执行普通取消渲染；请从左侧 seed 列表删除后触发全局 discovery 重跑。"
+                    : "当前节点是普通节点，可取消渲染并在左侧 Hidden by User 中恢复。"}
+                  {expandButtonText === "无更多相关节点" ? " ｜该节点当前过滤条件下无更多相关节点。" : ""}
+                  {discoveryExpandFilterHint ? ` ｜${discoveryExpandFilterHint}` : ""}
+                </div>
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, color: "#666" }}>Expand Entity Types</div>
-                  <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
-                    {(discoveryExpandEntityOptions || []).map((item) => (
-                      <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(discoveryExpandFilters?.entityTypes.includes(item))}
-                          onChange={() =>
-                            onUpdateDiscoveryExpandFilters?.({
-                              entityTypes: toggleExpandFilter(discoveryExpandFilters?.entityTypes || [], item),
-                            })
-                          }
-                        />
-                        {item}
-                      </label>
-                    ))}
+                <div style={{ display: "grid", gap: 10, border: "1px solid #f0f0f0", borderRadius: 8, background: "#fff", padding: 10 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600 }}>本次 Expand 过滤器</div>
+
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontSize: 12, color: "#666" }}>Expand Entity Types</div>
+                    <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
+                      {(discoveryExpandEntityOptions || []).map((item) => (
+                        <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(discoveryExpandFilters?.entityTypes.includes(item))}
+                            onChange={() =>
+                              onUpdateDiscoveryExpandFilters?.({
+                                entityTypes: toggleExpandFilter(discoveryExpandFilters?.entityTypes || [], item),
+                              })
+                            }
+                          />
+                          {item}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <div style={{ fontSize: 12, color: "#666" }}>Expand Relation Types</div>
+                    <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
+                      {(discoveryExpandRelationOptions || []).map((item) => (
+                        <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
+                          <input
+                            type="checkbox"
+                            checked={Boolean(discoveryExpandFilters?.relationTypes.includes(item))}
+                            onChange={() =>
+                              onUpdateDiscoveryExpandFilters?.({
+                                relationTypes: toggleExpandFilter(discoveryExpandFilters?.relationTypes || [], item),
+                              })
+                            }
+                          />
+                          {relationDisplay(item) || item}
+                        </label>
+                      ))}
+                    </div>
                   </div>
                 </div>
+              </>
+            ) : allowGraphMutationActions ? (
+              <>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button
+                    onClick={() => reroot1hop(sel.vid)}
+                    disabled={loadingGraph}
+                    style={{ padding: "8px 12px" }}
+                    title="以当前节点作为新 Root，重新加载 1-hop 子图（替换当前图）"
+                  >
+                    设为 Root 并展开（1-hop）
+                  </button>
 
-                <div style={{ display: "grid", gap: 6 }}>
-                  <div style={{ fontSize: 12, color: "#666" }}>Expand Relation Types</div>
-                  <div style={{ display: "grid", gap: 6, maxHeight: 120, overflow: "auto" }}>
-                    {(discoveryExpandRelationOptions || []).map((item) => (
-                      <label key={item} style={{ display: "inline-flex", gap: 8, alignItems: "center", fontSize: 12 }}>
-                        <input
-                          type="checkbox"
-                          checked={Boolean(discoveryExpandFilters?.relationTypes.includes(item))}
-                          onChange={() =>
-                            onUpdateDiscoveryExpandFilters?.({
-                              relationTypes: toggleExpandFilter(discoveryExpandFilters?.relationTypes || [], item),
-                            })
-                          }
-                        />
-                        {relationDisplay(item) || item}
-                      </label>
-                    ))}
-                  </div>
+                  <button
+                    onClick={() => expand1hop(sel.vid)}
+                    disabled={expandButtonDisabled}
+                    style={{ padding: "8px 12px" }}
+                    title={
+                      selectedNodeProbeState === "noextra"
+                        ? "该节点在当前图上下文中没有可新增的 1-hop 邻居（无多余相关节点）"
+                        : selectedNodeProbeState === "loading"
+                          ? "正在检测该节点是否有可新增的 1-hop 邻居…"
+                          : `追加该节点 1-hop 邻居到当前图；新增节点前 ${EXPAND_AUTO_REVEAL_TOPK} 个自动显示`
+                    }
+                  >
+                    {expandButtonText}
+                  </button>
+
+                  <button
+                    onClick={() => collapseExpandFromNode(sel.vid)}
+                    disabled={!selectedNodeExpandClosable || loadingGraph}
+                    style={{ padding: "8px 12px" }}
+                    title={
+                      selectedNodeExpandClosable
+                        ? "关闭以该节点为来源的 Expand 展开（撤销该批节点渲染）"
+                        : "该节点尚未执行 Expand 或已关闭"
+                    }
+                  >
+                    关闭Expand
+                  </button>
+
+                  <button
+                    onClick={() => unrevealNode(sel.vid)}
+                    disabled={!selectedNodeIsVisible || selectedNodeIsRoot}
+                    style={{ padding: "8px 12px" }}
+                    title={selectedNodeIsRoot ? "Root 节点不允许隐藏" : "将该节点从图谱中隐藏（可撤销）"}
+                  >
+                    隐藏节点（可撤销）
+                  </button>
                 </div>
-              </div>
-            </>
-          ) : allowGraphMutationActions ? (
-            <>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <button
-                  onClick={() => reroot1hop(sel.vid)}
-                  disabled={loadingGraph}
-                  style={{ padding: "8px 12px" }}
-                  title="以当前节点作为新 Root，重新加载 1-hop 子图（替换当前图）"
-                >
-                  设为 Root 并展开（1-hop）
-                </button>
 
-                <button
-                  onClick={() => expand1hop(sel.vid)}
-                  disabled={expandButtonDisabled}
-                  style={{ padding: "8px 12px" }}
-                  title={
-                    selectedNodeProbeState === "noextra"
-                      ? "该节点在当前图上下文中没有可新增的 1-hop 邻居（无多余相关节点）"
-                      : selectedNodeProbeState === "loading"
-                      ? "正在检测该节点是否有可新增的 1-hop 邻居…"
-                      : `追加该节点 1-hop 邻居到当前图；新增节点前 ${EXPAND_AUTO_REVEAL_TOPK} 个自动显示`
-                  }
-                >
-                  {expandButtonText}
-                </button>
-
-                <button
-                  onClick={() => collapseExpandFromNode(sel.vid)}
-                  disabled={!selectedNodeExpandClosable || loadingGraph}
-                  style={{ padding: "8px 12px" }}
-                  title={
-                    selectedNodeExpandClosable
-                      ? "关闭以该节点为来源的 Expand 展开（撤销该批节点渲染）"
-                      : "该节点尚未执行 Expand 或已关闭"
-                  }
-                >
-                  关闭Expand
-                </button>
-
-                <button
-                  onClick={() => unrevealNode(sel.vid)}
-                  disabled={!selectedNodeIsVisible || selectedNodeIsRoot}
-                  style={{ padding: "8px 12px" }}
-                  title={selectedNodeIsRoot ? "Root 节点不允许隐藏" : "将该节点从图谱中隐藏（可撤销）"}
-                >
-                  隐藏节点（可撤销）
-                </button>
-              </div>
-
-              <div style={{ fontSize: 12, color: "#666" }}>
-                {selectedNodeIsRoot
-                  ? "当前节点是 Root（不可隐藏）"
-                  : selectedNodeIsAutoTop
-                  ? "当前节点属于 TopN 默认显示（可隐藏并在右侧列表恢复）"
-                  : "当前节点为低优先级节点（可在右侧列表恢复/取消渲染）"}
-                {selectedNodeExpandClosable ? " ｜该节点存在可关闭的 Expand 展开内容" : ""}
-                {selectedNodeProbeState === "noextra" ? " ｜Expand：无多余相关节点" : ""}
-              </div>
-            </>
-          ) : (
-            <div style={{ fontSize: 12, color: "#666" }}>统一关系发现结果视图下禁用 Root/Expand/隐藏节点等 drill-down 子图操作。</div>
-          )}
-
-          <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>
-
-          <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, padding: 10, background: "#fff" }}>
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
-              <div style={{ fontWeight: 600 }}>Description</div>
-              {canToggleDescription ? (
-                <button onClick={() => setDescriptionExpanded((v) => !v)} style={{ padding: "5px 8px", fontSize: 12 }}>
-                  {descriptionExpanded ? "收起描述" : "展开完整描述"}
-                </button>
-              ) : null}
-            </div>
-            <div style={{ fontSize: 12, whiteSpace: "pre-wrap", lineHeight: 1.5, color: nodeDescriptionText ? "#222" : "#999" }}>
-              {nodeDescriptionText || "暂无描述"}
-            </div>
-          </div>
-
-          {nodeDetail?.props ? (
-            <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
-              <button
-                onClick={() => setNodePropertiesOpen((v) => !v)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  border: "none",
-                  background: "#fafafa",
-                  padding: "10px 12px",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                {nodePropertiesOpen ? "▼" : "▶"} Properties
-              </button>
-              {nodePropertiesOpen ? (
-                <div style={{ borderTop: "1px solid #f0f0f0", padding: 10 }}>
-                  <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(nodeDetail.props, null, 2)}</pre>
+                <div style={{ fontSize: 12, color: "#666" }}>
+                  {selectedNodeIsRoot
+                    ? "当前节点是 Root（不可隐藏）"
+                    : selectedNodeIsAutoTop
+                      ? "当前节点属于 TopN 默认显示（可隐藏并在右侧列表恢复）"
+                      : "当前节点为低优先级节点（可在右侧列表恢复/取消渲染）"}
+                  {selectedNodeExpandClosable ? " ｜该节点存在可关闭的 Expand 展开内容" : ""}
+                  {selectedNodeProbeState === "noextra" ? " ｜Expand：无多余相关节点" : ""}
                 </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      ) : (
-        <div data-testid="selected-edge-detail" style={{ display: "grid", gap: 10 }}>
-          <div style={{ fontWeight: 700 }}>Edge</div>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            src={sel.src} → dst={sel.dst}
-          </div>
-          <div style={{ fontSize: 12, color: "#666" }}>
-            rank={sel.rank} | relation={relationDisplay(sel.relation)} | source_db={sel.source_db || "-"}
-          </div>
+              </>
+            ) : (
+              <div style={{ fontSize: 12, color: "#666" }}>统一关系发现结果视图下禁用 Root/Expand/隐藏节点等 drill-down 子图操作。</div>
+            )}
 
-          <div style={{ fontSize: 12, color: "#666" }}>{detailLoading ? "加载详情中…" : ""}</div>
-
-          {edgeDetail?.props ? (
-            <div style={{ marginTop: 8, border: "1px solid #f0f0f0", borderRadius: 8, overflow: "hidden", background: "#fff" }}>
-              <button
-                onClick={() => setEdgePropertiesOpen((v) => !v)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  border: "none",
-                  background: "#fafafa",
-                  padding: "10px 12px",
-                  cursor: "pointer",
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                {edgePropertiesOpen ? "▼" : "▶"} Properties
-              </button>
-              {edgePropertiesOpen ? (
-                <div style={{ borderTop: "1px solid #f0f0f0", padding: 10 }}>
-                  <pre style={{ fontSize: 12, whiteSpace: "pre-wrap", margin: 0 }}>{JSON.stringify(edgeDetail.props, null, 2)}</pre>
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      )
+            <NodeDetailView
+              detail={nodeDetail}
+              selectedNodeBrief={selectedNodeBrief}
+              hopLevel={visibleNodeHopLevelMap.get(sel.vid) ?? null}
+              detailLoading={detailLoading}
+            />
+          </div>
+        ) : (
+          <EdgeDetailView
+            detail={edgeDetail}
+            selection={sel}
+            detailLoading={detailLoading}
+          />
+        )
       ) : (
         <EditWritebackPanel
           mode={editorTab === "edit" ? "edit" : "direct"}

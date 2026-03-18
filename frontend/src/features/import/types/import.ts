@@ -13,6 +13,26 @@ export type JobStatus =
   | "failed_postprocess"
   | "cancelled";
 export type IntegrationLevel = "fully_integrated" | "import_only" | "partially_integrated";
+export type ImportBatchSourceType = "import_ui" | "team_ingestion";
+export type ImportBatchCleanupStatus =
+  | "not_requested"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "partial_succeeded"
+  | "failed"
+  | "not_supported";
+export type CleanupJobStatus = "queued" | "running" | "succeeded" | "partial_succeeded" | "failed";
+export type CleanupJobPhase =
+  | "planning"
+  | "deleting_relations"
+  | "deleting_entities"
+  | "deleting_es_docs"
+  | "refreshing_metadata"
+  | "reconciling"
+  | "verifying"
+  | "completed"
+  | "failed";
 
 export type ImportFileUploadResp = {
   file_id: string;
@@ -38,6 +58,7 @@ export type ImportSource = {
   warnings: string[];
   alias_hints: ImportSourceAliasHint[];
   recommended_object_type?: ImportObjectType | null;
+  default_edge_kind?: string | null;
 };
 
 export type ImportPreviewResp = {
@@ -75,6 +96,7 @@ export type ImportPropertyMapping = {
   source_column: string;
   target_field: string;
   logical_field?: string | null;
+  default_value?: string | null;
 };
 
 export type ImportRowSelector = {
@@ -220,6 +242,7 @@ export type ImportJobArtifact = {
 export type ImportJobResp = {
   job_id: string;
   draft_id: string;
+  batch_id: string;
   space_name: string;
   template_type: string;
   status: JobStatus;
@@ -277,4 +300,176 @@ export type ImportJobResp = {
 export type ImportJobLogsResp = {
   job_id: string;
   lines: string[];
+};
+
+export type ImportBatchItem = {
+  item_id: string;
+  batch_id: string;
+  space_id: string;
+  job_id: string;
+  created_at: number;
+  item_type: "entity" | "relation";
+  created_by_batch: boolean;
+  vid?: number | null;
+  entity_raw_id?: string | null;
+  entity_name?: string | null;
+  src_vid?: number | null;
+  dst_vid?: number | null;
+  relation?: string | null;
+  rank?: number | null;
+  edge_type?: string | null;
+  row_index?: number | null;
+  item_key?: string | null;
+};
+
+export type ImportBatchResp = {
+  batch_id: string;
+  space_id: string;
+  source_type: ImportBatchSourceType;
+  created_at: number;
+  updated_at: number;
+  is_test_data: boolean;
+  draft_id: string;
+  job_id: string;
+  submission_id?: string | null;
+  status: "queued" | "running" | "succeeded" | "failed_import" | "failed_postprocess" | "cancelled";
+  entity_count: number;
+  relation_count: number;
+  searchable?: boolean | null;
+  cleanup_status: ImportBatchCleanupStatus;
+  tags: string[];
+  notes?: string | null;
+  ledger_summary: Record<string, unknown>;
+  warning_messages: string[];
+};
+
+export type CleanupConflict = {
+  vid?: number | null;
+  item_type: "entity" | "relation";
+  source?: "ledger" | "live_graph";
+  reason: string;
+  blocking_batch_ids: string[];
+  blocking_relations: number;
+  details: Record<string, unknown>;
+};
+
+export type CleanupPhaseEntry = {
+  phase: CleanupJobPhase;
+  at: number;
+};
+
+export type CleanupArtifact = {
+  kind:
+    | "summary"
+    | "conflicts"
+    | "skipped_entities"
+    | "skipped_relations"
+    | "verify_summary"
+    | "plan_summary"
+    | "blocked_entities"
+    | "deletable_entities"
+    | "deletable_relations";
+  filename: string;
+  path: string;
+};
+
+export type CleanupPlanSummary = {
+  requested_entity_count: number;
+  requested_relation_count: number;
+  ledger_blocked_entity_count: number;
+  live_graph_blocked_entity_count: number;
+  blocked_entity_count: number;
+  deletable_entity_count: number;
+  deletable_relation_count: number;
+  conflict_count: number;
+  warnings: string[];
+  verification_scope_note: string;
+  generated_at: number;
+};
+
+export type CleanupBlockedEntityDetail = {
+  vid?: number | null;
+  entity_name?: string | null;
+  entity_raw_id?: string | null;
+  item_key?: string | null;
+  conflict_sources: Array<"ledger" | "live_graph">;
+  conflicts: CleanupConflict[];
+};
+
+export type CleanupDeletableEntityDetail = {
+  vid?: number | null;
+  entity_name?: string | null;
+  entity_raw_id?: string | null;
+  item_key?: string | null;
+};
+
+export type CleanupDeletableRelationDetail = {
+  edge_type?: string | null;
+  src_vid?: number | null;
+  dst_vid?: number | null;
+  rank?: number | null;
+  relation?: string | null;
+  item_key?: string | null;
+};
+
+export type CleanupPlanPreviewResp = {
+  batch_ids: string[];
+  scope: "full_batch" | "relations_only";
+  plan_summary: CleanupPlanSummary;
+  conflicts: CleanupConflict[];
+  blocked_entities: {
+    total_count: number;
+    sample: CleanupBlockedEntityDetail[];
+  };
+  deletable_entities: {
+    total_count: number;
+    sample: CleanupDeletableEntityDetail[];
+  };
+  deletable_relations: {
+    total_count: number;
+    sample: CleanupDeletableRelationDetail[];
+  };
+  warning_messages: string[];
+  verification_scope_note: string;
+  has_plan_artifacts: boolean;
+  artifacts: CleanupArtifact[];
+  consistency_note: string;
+};
+
+export type CleanupJobResp = {
+  cleanup_job_id: string;
+  space_id: string;
+  batch_ids: string[];
+  scope: "full_batch" | "relations_only";
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  started_at?: number | null;
+  finished_at?: number | null;
+  status: CleanupJobStatus;
+  phase: CleanupJobPhase;
+  final_phase?: CleanupJobPhase | null;
+  phase_history: CleanupPhaseEntry[];
+  requested_relation_count: number;
+  requested_entity_count: number;
+  deleted_relation_count: number;
+  deleted_entity_count: number;
+  skipped_relation_count: number;
+  skipped_entity_count: number;
+  deduplicated_relation_count: number;
+  deduplicated_entity_count: number;
+  conflict_count: number;
+  warning_messages: string[];
+  error_message?: string | null;
+  failure_phase?: string | null;
+  failure_kind?: string | null;
+  failure_detail: Record<string, unknown>;
+  duration_ms?: number | null;
+  conflicts: CleanupConflict[];
+  plan_summary?: CleanupPlanSummary | null;
+  has_plan_artifacts?: boolean;
+  verify_summary: Record<string, unknown>;
+  metadata_summary: Record<string, unknown>;
+  reconcile_summary: Record<string, unknown>;
+  artifacts: CleanupArtifact[];
 };

@@ -1,0 +1,9 @@
+fastapi==0.133.1
+uvicorn==0.41.0
+pydantic==2.12.5
+python-dotenv==1.2.1
+PyYAML==6.0.3
+python-multipart==0.0.22
+nebula3-python==3.8.3
+httpx==0.28.1
+pytest==9.0.2

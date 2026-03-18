@@ -18,7 +18,7 @@
 - 标准化 API smoke 已落地，可在当前机器执行。
 - `relation_types` 已从大列表固定返回改为 `q + limit + offset` 模式，前端改为 searchable / incremental 交互。
 - 前端大 chunk warning 已收敛，`npm run build` 不再报 `>500kB` 警告。
-- 浏览器级 E2E 仍未恢复：当前机器缺少浏览器依赖，且仓库内尚未正式入库 Playwright/E2E 套件。
+- Playwright/E2E 已正式入库在 `frontend/e2e/`，并已覆盖 discovery candidate search -> formal drill-down -> edit 主链；运行时仍要求宿主机具备 Chromium 依赖。
 - 前端全量 lint 仍未全部通过，但已完成 touched-files 与历史遗留问题拆分，历史基线见 `docs/STAGEA_FRONTEND_LINT_BASELINE.md`。
 
 ## 2. 架构变更说明
@@ -180,16 +180,15 @@ bash scripts/stop_stack.sh
 - 浏览器自动化 E2E
 - 浏览器级 UI 主链路回归
 
-当前状态：**未完成**
+当前状态：**部分完成**
 
 说明：
 
-- 当前机器缺少 `libnspr4`，且未确认 `libnss3`
-- 仓库内当前没有正式入库的 Playwright/E2E 测试套件
-- 可执行替代路径为：
-  - `verify_stack.sh`
-  - `smoke_api.sh`
-  - 手工 UI 检查清单（见 `docs/STAGE_E_E2E_FALLBACK.md`）
+- Playwright 套件已正式入库在 `frontend/e2e/`
+- 已实跑通过 discovery 主链最小回归：
+  - discovery candidate load subgraph enters formal drilldown without legacy fallback
+  - discovery detail and edit stay reachable in unified workflow
+- 若宿主机缺少 Chromium 依赖，仍需先补齐 `libnspr4`、`libnss3`、`libasound.so.2`
 
 ## 5. 当前遗留问题清单
 
@@ -214,22 +213,22 @@ bash scripts/stop_stack.sh
   - `frontend/src/components/RelationFilter/RelationFilterPanel.tsx`
   - `frontend/src/hooks/useRelationFilter.ts`
 
-### 5.2 浏览器级 E2E 未恢复
+### 5.2 浏览器级 E2E 依赖仍需显式准备
 
 现状：
 
-- 当前机器浏览器依赖不完整
-- 仓库内也还没有正式入库 E2E 套件
+- Playwright/E2E 套件已入库
+- 不同机器上是否能直接运行，取决于 Chromium 依赖是否齐备
 
 影响：
 
-- 无法做浏览器级自动化回归
-- 当前只能做到 L2 + 手工 UI 检查
+- 若依赖不齐，浏览器级自动化回归会在浏览器启动阶段失败
+- 一旦依赖齐备，可直接执行仓库内现成 E2E
 
 建议：
 
 - 先补系统依赖
-- 再补 Playwright 配置与 smoke 用例
+- 再按 `frontend/README.md` 中的命令执行 `npm run e2e` / `npm run e2e:smoke`
 
 ### 5.3 根目录 `frontend/App.tsx` 仍是 lint 历史负担
 
@@ -397,7 +396,7 @@ npx eslint .
 已知未完成：
 
 - `cd frontend && npx eslint .` 仍会因为历史基线问题失败
-- 浏览器级 E2E 未恢复
+- 浏览器级 E2E 仍依赖宿主机 Chromium 运行库完整
 
 ## 8. 相关文档索引
 
@@ -407,6 +406,6 @@ npx eslint .
 
 ## 9. 诚实结论
 
-- 当前仓库**适合进入提交与交接阶段**，前提是接受“L2 完成、L3 未完成”的现状。
-- 当前仓库**不适合宣称为完整回归闭环**，因为浏览器自动化 E2E 尚未恢复，前端全量 lint 仍有历史遗留。
+- 当前仓库**适合进入提交与交接阶段**，前提是接受“L2 完成、L3 已恢复最小主链但未做全量套件”的现状。
+- 当前仓库**不适合宣称为完整回归闭环**，因为前端全量 lint 仍有历史遗留，且浏览器 E2E 仍受宿主机依赖约束。
 - 若本次目标是“可交接、风险明确、后续可继续优化”，当前状态已经满足。

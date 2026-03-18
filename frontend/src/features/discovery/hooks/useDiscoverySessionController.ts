@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from "react";
 
+import { panelDefaults } from "../../objectMeta/config/panelDefaults";
 import { useDiscoveryCandidateResults } from "../../../hooks/useDiscoveryCandidateResults";
 import { useDiscoveryCandidateSearch } from "../../../hooks/useDiscoveryCandidateSearch";
 import { useDiscoverySeeds } from "../../../hooks/useDiscoverySeeds";
@@ -76,7 +77,9 @@ export function useDiscoverySessionController({
     relationTypes: [],
   });
   const [discoveryRenderedPanelCollapsed, setDiscoveryRenderedPanelCollapsed] = useState(true);
-  const [discoveryDroppedPanelCollapsed, setDiscoveryDroppedPanelCollapsed] = useState(false);
+  const [discoveryDroppedPanelCollapsed, setDiscoveryDroppedPanelCollapsed] = useState(
+    panelDefaults.discoveryDroppedPanelCollapsed,
+  );
 
   const resetForSpaceChange = useCallback(() => {
     discoveryAbortRef.current?.abort();
@@ -92,7 +95,7 @@ export function useDiscoverySessionController({
     setDiscoveryRuntimeFilters({ entityTypes: [], relationTypes: [] });
     setDiscoveryExpandFilters({ entityTypes: [], relationTypes: [] });
     setDiscoveryRenderedPanelCollapsed(true);
-    setDiscoveryDroppedPanelCollapsed(false);
+    setDiscoveryDroppedPanelCollapsed(panelDefaults.discoveryDroppedPanelCollapsed);
   }, [discoveryCandidateResults, discoveryCandidateSearch, discoverySeedsState]);
 
   return {

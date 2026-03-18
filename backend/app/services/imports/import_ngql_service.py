@@ -50,11 +50,46 @@ def _fetch_edge_exists(
     return bool(result.rows())
 
 
+def vertex_exists(
+    tag: str,
+    vid: int,
+    *,
+    space_name: str | None = None,
+) -> bool:
+    result = execute_ngql_safe(
+        f"FETCH PROP ON `{tag}` {int(vid)} YIELD vertex AS v;",
+        space_name=space_name,
+    )
+    return bool(result.rows())
+
+
+def edge_exists(
+    edge_type: str,
+    src: int,
+    dst: int,
+    rank: int,
+    *,
+    space_name: str | None = None,
+) -> bool:
+    return _fetch_edge_exists(edge_type, src, dst, rank, space_name=space_name)
+
+
+def _mapped_value(mapping, row: dict[str, str]) -> str:
+    source_column = str(mapping.source_column or "").strip()
+    if source_column:
+        value = str(row.get(source_column, "") or "")
+        if value != "":
+            return value
+    if mapping.default_value is not None:
+        return str(mapping.default_value)
+    return ""
+
+
 def _vertex_payload(target: CompiledTargetPlan, row: dict[str, str], actor: str) -> tuple[int, dict[str, str]]:
     if not target.identity_mapping.id_column:
         raise HTTPException(status_code=422, detail="vertex mapping requires identity_mapping.id_column")
     vid = int(str(row.get(target.identity_mapping.id_column, "")).strip())
-    payload = {item.target_field: str(row.get(item.source_column, "") or "") for item in target.property_mappings}
+    payload = {item.target_field: _mapped_value(item, row) for item in target.property_mappings}
     payload["updated_by"] = actor
     payload["updated_at"] = str(int(time.time()))
     return vid, payload
@@ -70,10 +105,31 @@ def _edge_payload(target: CompiledTargetPlan, row: dict[str, str], row_index: in
         if target.identity_mapping.rank_column and str(row.get(target.identity_mapping.rank_column, "")).strip()
         else _generated_rank(src, dst, row_index)
     )
-    payload = {item.target_field: str(row.get(item.source_column, "") or "") for item in target.property_mappings}
+    payload = {item.target_field: _mapped_value(item, row) for item in target.property_mappings}
     payload["updated_by"] = actor
     payload["updated_at"] = str(int(time.time()))
     return src, dst, rank, payload
+
+
+def vertex_identity_snapshot(
+    target: CompiledTargetPlan,
+    row: dict[str, str],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    vid, payload = _vertex_payload(target, row, validate_updated_by(actor))
+    return {"kind": "vertex", "vid": vid, "payload": payload}
+
+
+def edge_identity_snapshot(
+    target: CompiledTargetPlan,
+    row: dict[str, str],
+    *,
+    row_index: int,
+    actor: str,
+) -> dict[str, Any]:
+    src, dst, rank, payload = _edge_payload(target, row, row_index, validate_updated_by(actor))
+    return {"kind": "edge", "src": src, "dst": dst, "rank": rank, "payload": payload}
 
 
 def _vertex_statement(target: CompiledTargetPlan, row: dict[str, str], *, row_index: int, actor: str) -> tuple[str, dict[str, Any]]:
@@ -229,4 +285,22 @@ def import_batch(
         failures=failures,
         batch_statement_count=len(rows),
         used_fallback=True,
+    )
+
+
+def delete_vertex(vid: int, *, space_name: str | None = None) -> None:
+    execute_ngql_safe(f"DELETE VERTEX {int(vid)};", space_name=space_name)
+
+
+def delete_edge(
+    edge_type: str,
+    src: int,
+    dst: int,
+    rank: int,
+    *,
+    space_name: str | None = None,
+) -> None:
+    execute_ngql_safe(
+        f"DELETE EDGE `{edge_type}` {int(src)}->{int(dst)}@{int(rank)};",
+        space_name=space_name,
     )

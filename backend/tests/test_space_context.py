@@ -3,12 +3,13 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services.spaces import registry_service
-from app.services.spaces.models import SpaceSummary
+from app.services.spaces.models import SpaceIndexStatus, SpaceSummary
 
 
 class SpaceContextTest(unittest.TestCase):
@@ -74,6 +75,42 @@ class SpaceContextTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["space_name"], "test_space_a")
         self.assertEqual(resp.json()["source"], "header")
+
+    def test_create_space_returns_readiness_fields(self):
+        summary = SpaceSummary(
+            space_name="space_create_a",
+            display_name="Space Create A",
+            description="",
+            template_type="entity_rel2_default",
+            template_version="entity_rel2_default.v1",
+            integration_scope="entity_rel2_core",
+            status="ready",
+            internal_status="ready",
+            created_by="tester",
+            created_at="2026-03-18T00:00:00Z",
+            ready_at="2026-03-18T00:00:01Z",
+            index_status=SpaceIndexStatus(status="verified_empty", doc_count=0, coverage_pct=100.0),
+        )
+        with (
+            self._client() as client,
+            mock.patch("app.services.spaces.provisioning_service.create_space", return_value=(summary, ["warn"])),
+        ):
+            resp = client.post(
+                "/api/spaces",
+                json={
+                    "space_name": "space_create_a",
+                    "display_name": "Space Create A",
+                    "description": "",
+                    "template_type": "entity_rel2_default",
+                    "created_by": "tester",
+                },
+            )
+
+        self.assertEqual(resp.status_code, 200, resp.text)
+        payload = resp.json()
+        self.assertEqual(payload["space"]["graph_status"], "ready")
+        self.assertEqual(payload["space"]["search_status"], "empty")
+        self.assertEqual(payload["status"], "ready")
 
 
 if __name__ == "__main__":

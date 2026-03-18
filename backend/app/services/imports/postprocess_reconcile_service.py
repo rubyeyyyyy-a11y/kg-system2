@@ -164,7 +164,11 @@ def reconcile_postprocess(
                 raise RuntimeError(f"es_sync_failed: fail_count={sync_summary['fail_count']}")
 
         verify_vids = affected_vids if resolved_sync_scope == "job" else []
-        verify_summary = es_postprocess_service.post_verify_index(verify_vids, space_name=resolved_space)
+        verify_summary = es_postprocess_service.post_verify_index(
+            verify_vids,
+            space_name=resolved_space,
+            batch_id=None if job_state is None else (job_state.batch_id or None),
+        )
         completion_summary = ImportCompletionSummary.model_validate(verify_summary["completion_summary"])
         raw_index_status_snapshot = verify_summary.get("index_status_snapshot")
         index_status_snapshot = (

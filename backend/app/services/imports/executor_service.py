@@ -3,7 +3,6 @@ import os
 import time
 import traceback
 import csv
-from threading import Lock, Thread
 
 from app.core.space_context import use_space
 from app.services.imports import (
@@ -11,17 +10,24 @@ from app.services.imports import (
     es_postprocess_service,
     file_store,
     import_ngql_service,
+    job_runtime,
     job_service,
     metadata_postprocess_service,
     schema_service,
 )
-from app.services.imports.models import CompiledImportPlan, DraftSource, ImportCompletionSummary, ImportJobState, JobEvent
+from app.services.imports.models import (
+    CompiledImportPlan,
+    DraftSource,
+    ImportBatchItemRecord,
+    ImportCompletionSummary,
+    ImportJobState,
+    JobEvent,
+)
+from app.services.imports.state_repository import import_job_states
 from app.services.spaces.models import SpaceIndexStatus
 
 logger = logging.getLogger(__name__)
 
-_WORKER_LOCK = Lock()
-_WORKER_THREAD: Thread | None = None
 _BATCH_SIZE = int(os.getenv("IMPORT_EXEC_BATCH_SIZE", "500"))
 _MAX_FAILED_ROWS_WRITTEN = int(os.getenv("IMPORT_MAX_FAILED_ROWS_WRITTEN", "3000"))
 _POSTPROCESS_FAILURE_STAGES = {"metadata_failed", "es_sync_failed", "verify_failed", "registry_write_failed"}
@@ -31,8 +37,116 @@ def _update_state(state: ImportJobState, **changes) -> ImportJobState:
     for key, value in changes.items():
         setattr(state, key, value)
     state.updated_at = int(time.time())
-    file_store.save_job_state(state)
+    import_job_states.save(state)
     return state
+
+
+def _update_batch_for_job(state: ImportJobState, **changes):
+    if not state.batch_id:
+        return None
+    return file_store.update_batch_record(state.batch_id, **changes)
+
+
+def _batch_entity_item(
+    *,
+    state: ImportJobState,
+    success: dict,
+    payload: dict[str, str],
+    created_by_batch: bool,
+) -> dict:
+    return {
+        "batch_id": state.batch_id,
+        "space_id": state.space_name,
+        "job_id": state.job_id,
+        "item_type": "entity",
+        "created_by_batch": created_by_batch,
+        "vid": int(success["vid"]),
+        "entity_raw_id": str(payload.get("entity_raw_id") or ""),
+        "entity_name": str(payload.get("entity_name") or ""),
+        "row_index": int(success["row_index"]),
+    }
+
+
+def _batch_relation_item(
+    *,
+    state: ImportJobState,
+    target_object: str,
+    success: dict,
+    payload: dict[str, str],
+    created_by_batch: bool,
+) -> dict:
+    return {
+        "batch_id": state.batch_id,
+        "space_id": state.space_name,
+        "job_id": state.job_id,
+        "item_type": "relation",
+        "created_by_batch": created_by_batch,
+        "src_vid": int(success["src"]),
+        "dst_vid": int(success["dst"]),
+        "relation": str(payload.get("relation") or ""),
+        "rank": int(success["rank"]),
+        "edge_type": target_object,
+        "row_index": int(success["row_index"]),
+    }
+
+
+def _append_batch_ledger_item(
+    *,
+    state: ImportJobState,
+    item_kind: str,
+    item_payload: dict[str, object],
+    ledger_counts: dict[str, dict[str, int]],
+) -> tuple[int, int]:
+    append_result = file_store.append_batch_item_if_absent(ImportBatchItemRecord.model_validate(item_payload))
+    ledger_counts[item_kind]["requested_count"] += 1
+    if append_result.appended:
+        ledger_counts[item_kind]["appended_count"] += 1
+    else:
+        ledger_counts[item_kind]["skipped_existing_count"] += 1
+    return append_result.entity_count, append_result.relation_count
+
+
+def _build_ledger_summary(
+    *,
+    state: ImportJobState,
+    ledger_counts: dict[str, dict[str, int]],
+) -> tuple[dict[str, object], list[str]]:
+    if not state.batch_id:
+        return {}, []
+    consistency = file_store.get_batch_ledger_consistency(state.batch_id)
+    warnings = list(consistency.get("warnings") or [])
+    summary = {
+        "entity": dict(ledger_counts["entity"]),
+        "relation": dict(ledger_counts["relation"]),
+        "consistency": consistency,
+    }
+    return summary, warnings
+
+
+def _persist_batch_ledger_summary(
+    state: ImportJobState,
+    *,
+    batch_entity_count: int,
+    batch_relation_count: int,
+    ledger_summary: dict[str, object],
+    ledger_warnings: list[str],
+    **extra_changes,
+):
+    if not state.batch_id:
+        return None
+    current_batch = file_store.load_batch_record(state.batch_id)
+    warning_messages = list(current_batch.warning_messages or [])
+    for warning in ledger_warnings:
+        if warning not in warning_messages:
+            warning_messages.append(warning)
+    return file_store.update_batch_record(
+        state.batch_id,
+        entity_count=batch_entity_count,
+        relation_count=batch_relation_count,
+        ledger_summary=ledger_summary,
+        warning_messages=warning_messages,
+        **extra_changes,
+    )
 
 
 def _failure_stage_from_error(error_message: str, *, current_status: str) -> str | None:
@@ -195,13 +309,20 @@ def _finalize_cancelled(
 
 
 def run_job(job_id: str) -> ImportJobState:
-    state = file_store.load_job_state(job_id)
-    with use_space(state.space_name):
-        plan = _compiled_plan(state)
+    state = import_job_states.load(job_id)
+    plan = _compiled_plan(state)
+    resolved_space_name = str(state.space_name or plan.space_name or "")
+    if resolved_space_name and state.space_name != resolved_space_name:
+        state = _update_state(state, space_name=resolved_space_name)
+    with use_space(resolved_space_name):
+        if plan.space_name != resolved_space_name:
+            plan = plan.model_copy(update={"space_name": resolved_space_name})
         sources_by_id = {source.source_id: source for source in plan.sources}
         if state.cancel_requested:
+            _update_batch_for_job(state, status="cancelled")
             return _update_state(state, status="cancelled", failure_stage="cancelled", finished_at=int(time.time()))
         _update_state(state, status="running", started_at=int(time.time()))
+        _update_batch_for_job(state, status="running")
         file_store.append_job_event(job_id, JobEvent(event_type="job_started", message="job started"))
         file_store.append_job_event(
             job_id,
@@ -213,6 +334,14 @@ def run_job(job_id: str) -> ImportJobState:
         )
         file_store.append_job_log(job_id, f"job started space={state.space_name} plan={plan.plan_id} batch_size={_BATCH_SIZE}")
         affected_entity_vids: set[int] = set()
+        batch_entity_count = 0
+        batch_relation_count = 0
+        ledger_counts = {
+            "entity": {"requested_count": 0, "appended_count": 0, "skipped_existing_count": 0},
+            "relation": {"requested_count": 0, "appended_count": 0, "skipped_existing_count": 0},
+        }
+        ledger_summary: dict[str, object] = {}
+        ledger_warnings: list[str] = []
         total_rows = 0
         processed_rows = 0
         success_rows = 0
@@ -285,8 +414,40 @@ def run_job(job_id: str) -> ImportJobState:
                     nonlocal total_rows, processed_rows, success_rows, failed_rows, failed_rows_truncated
                     nonlocal target_scanned, target_processed, target_success, target_failed
                     nonlocal target_failed_written, target_batches, target_successful_batches, target_failed_batches, target_fallback_batches
+                    nonlocal batch_entity_count, batch_relation_count
                     if not batch_items:
                         return
+                    row_ledger_meta: dict[int, dict] = {}
+                    for item in batch_items:
+                        if target.object_type == "tag":
+                            snapshot = import_ngql_service.vertex_identity_snapshot(target, item.row, actor=state.created_by)
+                            row_ledger_meta[item.row_index] = {
+                                "item_type": "entity",
+                                "payload": snapshot["payload"],
+                                "created_by_batch": not import_ngql_service.vertex_exists(
+                                    target.object_name,
+                                    int(snapshot["vid"]),
+                                    space_name=state.space_name,
+                                ),
+                            }
+                        else:
+                            snapshot = import_ngql_service.edge_identity_snapshot(
+                                target,
+                                item.row,
+                                row_index=item.row_index,
+                                actor=state.created_by,
+                            )
+                            row_ledger_meta[item.row_index] = {
+                                "item_type": "relation",
+                                "payload": snapshot["payload"],
+                                "created_by_batch": not import_ngql_service.edge_exists(
+                                    target.object_name,
+                                    int(snapshot["src"]),
+                                    int(snapshot["dst"]),
+                                    int(snapshot["rank"]),
+                                    space_name=state.space_name,
+                                ),
+                            }
                     target_batches += 1
                     batch_result = import_ngql_service.import_batch(
                         target,
@@ -328,6 +489,32 @@ def run_job(job_id: str) -> ImportJobState:
                         normalized_rows_payload.append(normalized)
                         if success.get("kind") == "vertex" and target.object_name == "Entity":
                             affected_entity_vids.add(int(success["vid"]))
+                        ledger_meta = row_ledger_meta.get(int(success["row_index"])) or {}
+                        if success.get("kind") == "vertex" and state.batch_id:
+                            batch_entity_count, batch_relation_count = _append_batch_ledger_item(
+                                state=state,
+                                item_kind="entity",
+                                item_payload=_batch_entity_item(
+                                    state=state,
+                                    success=success,
+                                    payload=dict(ledger_meta.get("payload") or {}),
+                                    created_by_batch=bool(ledger_meta.get("created_by_batch")),
+                                ),
+                                ledger_counts=ledger_counts,
+                            )
+                        elif success.get("kind") == "edge" and state.batch_id:
+                            batch_entity_count, batch_relation_count = _append_batch_ledger_item(
+                                state=state,
+                                item_kind="relation",
+                                item_payload=_batch_relation_item(
+                                    state=state,
+                                    target_object=target.object_name,
+                                    success=success,
+                                    payload=dict(ledger_meta.get("payload") or {}),
+                                    created_by_batch=bool(ledger_meta.get("created_by_batch")),
+                                ),
+                                ledger_counts=ledger_counts,
+                            )
                     file_store.append_csv_rows(normalized_path, normalized_headers, normalized_rows_payload)
                     file_store.append_csv_rows(
                         file_store.job_normalized_rows_path(job_id),
@@ -401,7 +588,7 @@ def run_job(job_id: str) -> ImportJobState:
                         },
                     )
 
-                    current_state = file_store.load_job_state(job_id)
+                    current_state = import_job_states.load(job_id)
                     if current_state.cancel_requested:
                         raise KeyboardInterrupt("cancel requested")
                     _update_state(
@@ -446,7 +633,7 @@ def run_job(job_id: str) -> ImportJobState:
                     },
                 )
 
-            state = file_store.load_job_state(job_id)
+            state = import_job_states.load(job_id)
             state = _update_state(
                 state,
                 total_rows=total_rows,
@@ -456,10 +643,37 @@ def run_job(job_id: str) -> ImportJobState:
                 failed_rows_truncated=failed_rows_truncated,
                 affected_entity_vids=sorted(affected_entity_vids),
             )
+            ledger_summary, ledger_warnings = _build_ledger_summary(state=state, ledger_counts=ledger_counts)
+            if ledger_warnings:
+                file_store.append_job_event(
+                    job_id,
+                    JobEvent(
+                        event_type="batch_ledger_consistency_warning",
+                        level="warn",
+                        message="batch ledger consistency warning",
+                        context={"warnings": ledger_warnings, "batch_id": state.batch_id},
+                    ),
+                )
+                file_store.append_job_log(job_id, f"batch ledger consistency warning batch_id={state.batch_id} warnings={ledger_warnings}")
+            _persist_batch_ledger_summary(
+                state,
+                batch_entity_count=batch_entity_count,
+                batch_relation_count=batch_relation_count,
+                ledger_summary=ledger_summary,
+                ledger_warnings=ledger_warnings,
+            )
             if failed_rows > 0:
                 file_store.append_job_event(
                     job_id,
                     JobEvent(event_type="job_failed_rows_generated", level="warn", message="job completed with failed rows"),
+                )
+                _persist_batch_ledger_summary(
+                    state,
+                    batch_entity_count=batch_entity_count,
+                    batch_relation_count=batch_relation_count,
+                    ledger_summary=ledger_summary,
+                    ledger_warnings=ledger_warnings,
+                    status="failed_import",
                 )
                 return _update_state(
                     state,
@@ -498,7 +712,11 @@ def run_job(job_id: str) -> ImportJobState:
             file_store.append_job_event(job_id, JobEvent(event_type="job_verifying_search_index", message="verifying search index"))
             file_store.append_job_log(job_id, f"post_verify_index space={state.space_name}")
             try:
-                verify_summary = es_postprocess_service.post_verify_index(sorted(affected_entity_vids), space_name=state.space_name)
+                verify_summary = es_postprocess_service.post_verify_index(
+                    sorted(affected_entity_vids),
+                    space_name=state.space_name,
+                    batch_id=state.batch_id or None,
+                )
             except Exception as exc:
                 raise RuntimeError(str(exc)) from exc
             completion_summary = ImportCompletionSummary.model_validate(verify_summary["completion_summary"])
@@ -515,6 +733,15 @@ def run_job(job_id: str) -> ImportJobState:
                 raise RuntimeError(f"{failure_stage}: {completion_summary.note or 'post_verify_index failed'}")
 
             state = _update_state(state, status="succeeded", finished_at=int(time.time()), failure_stage=None)
+            _persist_batch_ledger_summary(
+                state,
+                batch_entity_count=batch_entity_count,
+                batch_relation_count=batch_relation_count,
+                ledger_summary=ledger_summary,
+                ledger_warnings=ledger_warnings,
+                status="succeeded",
+                searchable=bool(state.completion_summary.searchable) if state.completion_summary else None,
+            )
             audit_service.write_import_audit(
                 "job_finish",
                 {
@@ -530,7 +757,15 @@ def run_job(job_id: str) -> ImportJobState:
             file_store.append_job_log(job_id, f"job succeeded space={state.space_name}")
             return state
         except KeyboardInterrupt:
-            state = file_store.load_job_state(job_id)
+            state = import_job_states.load(job_id)
+            _persist_batch_ledger_summary(
+                state,
+                batch_entity_count=batch_entity_count,
+                batch_relation_count=batch_relation_count,
+                ledger_summary=ledger_summary,
+                ledger_warnings=ledger_warnings,
+                status="cancelled",
+            )
             return _finalize_cancelled(
                 state,
                 total_rows=total_rows,
@@ -540,7 +775,7 @@ def run_job(job_id: str) -> ImportJobState:
                 failed_rows_truncated=failed_rows_truncated,
             )
         except Exception as exc:
-            state = file_store.load_job_state(job_id)
+            state = import_job_states.load(job_id)
             failure_stage = _failure_stage_from_error(str(exc), current_status=state.status)
             failure_status = (
                 "failed_postprocess"
@@ -565,6 +800,14 @@ def run_job(job_id: str) -> ImportJobState:
                 failure_stage,
                 str(exc),
             )
+            _persist_batch_ledger_summary(
+                state,
+                batch_entity_count=batch_entity_count,
+                batch_relation_count=batch_relation_count,
+                ledger_summary=ledger_summary,
+                ledger_warnings=ledger_warnings,
+                status=failure_status,
+            )
             return _update_state(
                 state,
                 status=failure_status,
@@ -580,47 +823,27 @@ def run_job(job_id: str) -> ImportJobState:
             )
 
 
-def _next_queued_job() -> ImportJobState | None:
-    for state in sorted(file_store.list_job_states(), key=lambda item: (item.created_at, item.job_id)):
-        if state.status == "queued":
-            return state
-    return None
+_RUNTIME = job_runtime.QueuedWorkerRuntime[ImportJobState](
+    worker_name="import-job-worker",
+    list_records=import_job_states.list,
+    run_record=lambda record: run_job(record.job_id),
+    record_id=lambda record: record.job_id,
+    sort_key=lambda record: (record.created_at, record.job_id),
+)
 
 
 def drain_queue() -> None:
-    if not _WORKER_LOCK.acquire(blocking=False):
-        return
-    try:
-        while True:
-            next_job = _next_queued_job()
-            if next_job is None:
-                return
-            run_job(next_job.job_id)
-    finally:
-        _WORKER_LOCK.release()
-
-
-def _worker_main() -> None:
-    while True:
-        queued = [state for state in file_store.list_job_states() if state.status == "queued"]
-        if not queued:
-            return
-        drain_queue()
-        time.sleep(0.3)
+    _RUNTIME.drain_queue()
 
 
 def ensure_worker_running() -> None:
-    global _WORKER_THREAD
-    if _WORKER_THREAD and _WORKER_THREAD.is_alive():
-        return
-    _WORKER_THREAD = Thread(target=_worker_main, name="import-job-worker", daemon=True)
-    _WORKER_THREAD.start()
+    _RUNTIME.ensure_worker_running()
 
 
 def startup_recover_and_start() -> None:
     removed_staging = file_store.cleanup_staging_files()
     removed_artifacts = file_store.cleanup_job_artifacts()
-    repaired = job_service.mark_interrupted_jobs()
+    repaired = _RUNTIME.startup_recover_and_start(recover_interrupted=job_service.mark_interrupted_jobs)
     if removed_staging or removed_artifacts or repaired:
         logger.info(
             "imports_startup_reconcile repaired_jobs=%d removed_staging=%d removed_job_artifacts=%d",
@@ -628,5 +851,3 @@ def startup_recover_and_start() -> None:
             len(removed_staging),
             len(removed_artifacts),
         )
-    if any(state.status == "queued" for state in file_store.list_job_states()):
-        ensure_worker_running()

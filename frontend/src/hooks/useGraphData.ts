@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import { expand, subgraph } from "../api/kg";
 import { EXPAND_AUTO_REVEAL_TOPK, SUBGRAPH_BUDGET_PRESETS } from "../constants/kg";
+import { panelDefaults } from "../features/objectMeta/config/panelDefaults";
 import type { GraphRenderMutation } from "../graph/renderControl";
 import { createGraphRenderMutation } from "../graph/renderControl";
 import type { EdgeBrief, ExpandProbeState, NodeBrief } from "../types/kg";
@@ -12,7 +13,7 @@ type GraphStats = Record<string, unknown> | null;
 
 type UseGraphDataParams = {
   spaceName?: string;
-  scopeKey?: string;
+  drilldownScopeKey?: string;
   selectedNodeVid: number | null;
   onSelectNode: (vid: number) => void;
   onClearSelection: () => void;
@@ -33,14 +34,14 @@ type UseGraphDataResult = {
   manualRevealedNodeIds: Set<number>;
   manualHiddenNodeIds: Set<number>;
   nodeGroupRootById: Record<number, number>;
-  expandedSourceNodeIds: Set<number>;
+  drilldownExpandedNodeIds: Set<number>;
   hiddenNodesCollapsed: boolean;
   setHiddenNodesCollapsed: Dispatch<SetStateAction<boolean>>;
   panelGroupCollapsed: Record<string, boolean>;
   setPanelGroupCollapsed: Dispatch<SetStateAction<Record<string, boolean>>>;
-  expandProbeByVid: Record<number, ExpandProbeState>;
-  loadSubgraphWithParams: (nextRoot: number, nextHop: number, nextRelations: string[]) => Promise<boolean>;
-  loadSubgraph: (nextRoot: number) => Promise<boolean>;
+  drilldownExpandStateByVid: Record<number, ExpandProbeState>;
+  loadDrilldownWithParams: (nextRoot: number, nextHop: number, nextRelations: string[]) => Promise<boolean>;
+  loadDrilldown: (nextRoot: number) => Promise<boolean>;
   expand1hop: (fromVid: number) => Promise<void>;
   reroot1hop: (vid: number) => Promise<void>;
   revealNode: (vid: number, autoSelect?: boolean) => void;
@@ -48,13 +49,13 @@ type UseGraphDataResult = {
   collapseExpandFromNode: (fromVid: number) => void;
   resetExpandProbeCache: () => void;
   probeExpand1hop: (fromVid: number) => Promise<void>;
-  clearGraphData: () => void;
-  mergeGraphData: (params: {
+  clearDrilldownData: () => void;
+  mergeDrilldownData: (params: {
     nodes?: NodeBrief[];
     edges?: EdgeBrief[];
     stats?: Record<string, unknown> | null;
   }) => void;
-  replaceGraphData: (params: {
+  replaceDrilldownData: (params: {
     rootVid: number;
     nodes: NodeBrief[];
     edges: EdgeBrief[];
@@ -76,7 +77,7 @@ type UseGraphDataResult = {
 
 export function useGraphData({
   spaceName,
-  scopeKey,
+  drilldownScopeKey,
   selectedNodeVid,
   onSelectNode,
   onClearSelection,
@@ -94,11 +95,11 @@ export function useGraphData({
   const [manualRevealedNodeIds, setManualRevealedNodeIds] = useState<Set<number>>(new Set());
   const [manualHiddenNodeIds, setManualHiddenNodeIds] = useState<Set<number>>(new Set());
   const [nodeGroupRootById, setNodeGroupRootById] = useState<Record<number, number>>({});
-  const [expandedSourceNodeIds, setExpandedSourceNodeIds] = useState<Set<number>>(new Set());
+  const [drilldownExpandedNodeIds, setDrilldownExpandedNodeIds] = useState<Set<number>>(new Set());
 
-  const [hiddenNodesCollapsed, setHiddenNodesCollapsed] = useState(false);
+  const [hiddenNodesCollapsed, setHiddenNodesCollapsed] = useState(panelDefaults.hiddenNodesCollapsed);
   const [panelGroupCollapsed, setPanelGroupCollapsed] = useState<Record<string, boolean>>({});
-  const [expandProbeByVid, setExpandProbeByVid] = useState<Record<number, ExpandProbeState>>({});
+  const [drilldownExpandStateByVid, setDrilldownExpandStateByVid] = useState<Record<number, ExpandProbeState>>({});
   const [budgetTier, setBudgetTier] = useState(0);
   const renderMutationSequenceRef = useRef(0);
   const [renderMutation, setRenderMutation] = useState<GraphRenderMutation>(() =>
@@ -109,15 +110,15 @@ export function useGraphData({
   const relationsRef = useRef<string[]>([]);
   const graphNodesRef = useRef<NodeBrief[]>([]);
   const expandProbeTokenByVidRef = useRef<Record<number, number>>({});
-  const scopeVersionRef = useRef(0);
-  const subgraphAbortRef = useRef<AbortController | null>(null);
-  const expandAbortRef = useRef<AbortController | null>(null);
+  const drilldownSessionVersionRef = useRef(0);
+  const drilldownLoadAbortRef = useRef<AbortController | null>(null);
+  const drilldownExpandAbortRef = useRef<AbortController | null>(null);
 
-  function abortGraphRequests() {
-    subgraphAbortRef.current?.abort();
-    subgraphAbortRef.current = null;
-    expandAbortRef.current?.abort();
-    expandAbortRef.current = null;
+  function abortDrilldownRequests() {
+    drilldownLoadAbortRef.current?.abort();
+    drilldownLoadAbortRef.current = null;
+    drilldownExpandAbortRef.current?.abort();
+    drilldownExpandAbortRef.current = null;
   }
 
   function commitRenderMutation(
@@ -165,7 +166,7 @@ export function useGraphData({
     graphNodesRef.current = graphNodes;
   }, [graphNodes]);
 
-  function replaceGraphData(params: {
+  function replaceDrilldownData(params: {
     rootVid: number;
     nodes: NodeBrief[];
     edges: EdgeBrief[];
@@ -180,8 +181,8 @@ export function useGraphData({
 
     setManualRevealedNodeIds(new Set());
     setManualHiddenNodeIds(new Set());
-    setExpandedSourceNodeIds(new Set());
-    setHiddenNodesCollapsed(false);
+    setDrilldownExpandedNodeIds(new Set());
+    setHiddenNodesCollapsed(panelDefaults.hiddenNodesCollapsed);
 
     resetExpandProbeCache();
     resetPanelGroupingForNewRoot(params.nodes, params.rootVid);
@@ -192,8 +193,8 @@ export function useGraphData({
     });
   }
 
-  function clearGraphData() {
-    abortGraphRequests();
+  function clearDrilldownData() {
+    abortDrilldownRequests();
     setRootVid(null);
     setGraphNodes([]);
     setGraphEdges([]);
@@ -201,14 +202,14 @@ export function useGraphData({
     setManualRevealedNodeIds(new Set());
     setManualHiddenNodeIds(new Set());
     setNodeGroupRootById({});
-    setExpandedSourceNodeIds(new Set());
-    setHiddenNodesCollapsed(false);
+    setDrilldownExpandedNodeIds(new Set());
+    setHiddenNodesCollapsed(panelDefaults.hiddenNodesCollapsed);
     setPanelGroupCollapsed({});
     resetExpandProbeCache();
     onClearSelection();
   }
 
-  function mergeGraphData(params: {
+  function mergeDrilldownData(params: {
     nodes?: NodeBrief[];
     edges?: EdgeBrief[];
     stats?: Record<string, unknown> | null;
@@ -272,24 +273,24 @@ export function useGraphData({
   }
 
   function resetExpandProbeCache() {
-    setExpandProbeByVid({});
+    setDrilldownExpandStateByVid({});
     expandProbeTokenByVidRef.current = {};
   }
 
-  async function loadSubgraphWithParams(
+  async function loadDrilldownWithParams(
     nextRoot: number,
     nextHop: number,
     nextRelations: string[],
     overrideTier?: number
   ) {
-    const requestScopeVersion = scopeVersionRef.current;
+    const requestScopeVersion = drilldownSessionVersionRef.current;
     const tier = Number.isFinite(overrideTier as number)
       ? Math.max(0, Math.min(Number(overrideTier), SUBGRAPH_BUDGET_PRESETS.length - 1))
       : budgetTier;
     const budget = SUBGRAPH_BUDGET_PRESETS[tier];
-    subgraphAbortRef.current?.abort();
+    drilldownLoadAbortRef.current?.abort();
     const controller = new AbortController();
-    subgraphAbortRef.current = controller;
+    drilldownLoadAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const json = await subgraph({
@@ -301,7 +302,7 @@ export function useGraphData({
         signal: controller.signal,
         spaceName,
       });
-      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return false;
+      if (controller.signal.aborted || requestScopeVersion !== drilldownSessionVersionRef.current) return false;
 
       setHop(nextHop);
       setRelations(nextRelations);
@@ -312,7 +313,7 @@ export function useGraphData({
 
       setManualRevealedNodeIds(new Set());
       setManualHiddenNodeIds(new Set());
-      setExpandedSourceNodeIds(new Set());
+      setDrilldownExpandedNodeIds(new Set());
       setHiddenNodesCollapsed(false);
 
       resetExpandProbeCache();
@@ -327,24 +328,24 @@ export function useGraphData({
       notify("error", `子图加载失败：${parsed.message}`);
       return false;
     } finally {
-      if (subgraphAbortRef.current === controller) {
-        subgraphAbortRef.current = null;
+      if (drilldownLoadAbortRef.current === controller) {
+        drilldownLoadAbortRef.current = null;
         setLoadingGraph(false);
       }
     }
   }
 
-  async function loadSubgraph(nextRoot: number) {
-    return await loadSubgraphWithParams(nextRoot, hop, relations);
+  async function loadDrilldown(nextRoot: number) {
+    return await loadDrilldownWithParams(nextRoot, hop, relations);
   }
 
   async function expand1hop(fromVid: number) {
     if (!rootVid) return;
-    const requestScopeVersion = scopeVersionRef.current;
+    const requestScopeVersion = drilldownSessionVersionRef.current;
     const budget = currentBudgetPreset();
-    expandAbortRef.current?.abort();
+    drilldownExpandAbortRef.current?.abort();
     const controller = new AbortController();
-    expandAbortRef.current = controller;
+    drilldownExpandAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const existingIds = graphNodes.map((n) => n.id);
@@ -357,14 +358,14 @@ export function useGraphData({
         signal: controller.signal,
         spaceName,
       });
-      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
+      if (controller.signal.aborted || requestScopeVersion !== drilldownSessionVersionRef.current) return;
 
       if ((json.added_nodes?.length || 0) === 0 && (json.added_edges?.length || 0) === 0) {
-        setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "noextra" }));
+        setDrilldownExpandStateByVid((prev) => ({ ...prev, [fromVid]: "noextra" }));
         notify("info", "该节点暂无可扩展的 1-hop 邻居，或邻居已全部在当前图中。");
         return;
       }
-      setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
+      setDrilldownExpandStateByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
 
       const nodeMap = new Map<number, NodeBrief>();
       for (const n of graphNodes) nodeMap.set(n.id, n);
@@ -415,7 +416,7 @@ export function useGraphData({
         return { ...prev, [k]: fromVid === rootVid ? false : true };
       });
 
-      setExpandedSourceNodeIds((prev) => {
+      setDrilldownExpandedNodeIds((prev) => {
         const next = new Set(prev);
         next.add(fromVid);
         return next;
@@ -454,19 +455,19 @@ export function useGraphData({
       const parsed = parseApiError(e);
       notify("error", `Expand 失败：${parsed.message}`);
     } finally {
-      if (expandAbortRef.current === controller) {
-        expandAbortRef.current = null;
+      if (drilldownExpandAbortRef.current === controller) {
+        drilldownExpandAbortRef.current = null;
         setLoadingGraph(false);
       }
     }
   }
 
   async function reroot1hop(vid: number) {
-    const requestScopeVersion = scopeVersionRef.current;
+    const requestScopeVersion = drilldownSessionVersionRef.current;
     const budget = currentBudgetPreset();
-    subgraphAbortRef.current?.abort();
+    drilldownLoadAbortRef.current?.abort();
     const controller = new AbortController();
-    subgraphAbortRef.current = controller;
+    drilldownLoadAbortRef.current = controller;
     setLoadingGraph(true);
     try {
       const json = await subgraph({
@@ -478,7 +479,7 @@ export function useGraphData({
         signal: controller.signal,
         spaceName,
       });
-      if (controller.signal.aborted || requestScopeVersion !== scopeVersionRef.current) return;
+      if (controller.signal.aborted || requestScopeVersion !== drilldownSessionVersionRef.current) return;
 
       setHop(1);
       setRootVid(vid);
@@ -488,7 +489,7 @@ export function useGraphData({
 
       setManualRevealedNodeIds(new Set());
       setManualHiddenNodeIds(new Set());
-      setExpandedSourceNodeIds(new Set());
+      setDrilldownExpandedNodeIds(new Set());
       setHiddenNodesCollapsed(false);
 
       resetExpandProbeCache();
@@ -506,8 +507,8 @@ export function useGraphData({
       const parsed = parseApiError(e);
       notify("error", `切换 root 失败：${parsed.message}`);
     } finally {
-      if (subgraphAbortRef.current === controller) {
-        subgraphAbortRef.current = null;
+      if (drilldownLoadAbortRef.current === controller) {
+        drilldownLoadAbortRef.current = null;
         setLoadingGraph(false);
       }
     }
@@ -583,7 +584,7 @@ export function useGraphData({
 
     if (selectedNodeVid != null && targetIds.includes(selectedNodeVid)) onClearSelection();
 
-    setExpandedSourceNodeIds((prev) => {
+    setDrilldownExpandedNodeIds((prev) => {
       const next = new Set(prev);
       next.delete(fromVid);
       return next;
@@ -602,7 +603,7 @@ export function useGraphData({
   }
 
   async function probeExpand1hop(fromVid: number) {
-    const requestScopeVersion = scopeVersionRef.current;
+    const requestScopeVersion = drilldownSessionVersionRef.current;
     const curRoot = rootVidRef.current;
     const curGraphNodes = graphNodesRef.current;
     const curRelations = relationsRef.current;
@@ -613,7 +614,7 @@ export function useGraphData({
 
     const nextToken = (expandProbeTokenByVidRef.current[fromVid] || 0) + 1;
     expandProbeTokenByVidRef.current[fromVid] = nextToken;
-    setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "loading" }));
+    setDrilldownExpandStateByVid((prev) => ({ ...prev, [fromVid]: "loading" }));
 
     try {
       const existingIds = curGraphNodes.map((n) => n.id);
@@ -625,7 +626,7 @@ export function useGraphData({
         max_edges: 120,
         spaceName,
       });
-      if (requestScopeVersion !== scopeVersionRef.current) return;
+      if (requestScopeVersion !== drilldownSessionVersionRef.current) return;
 
       if (expandProbeTokenByVidRef.current[fromVid] !== nextToken) return;
 
@@ -637,20 +638,20 @@ export function useGraphData({
       const state: ExpandProbeState =
         addedN === 0 && addedE === 0 && dropped === 0 ? "noextra" : "hasextra";
 
-      setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: state }));
+      setDrilldownExpandStateByVid((prev) => ({ ...prev, [fromVid]: state }));
     } catch {
-      if (requestScopeVersion !== scopeVersionRef.current) return;
+      if (requestScopeVersion !== drilldownSessionVersionRef.current) return;
       if (expandProbeTokenByVidRef.current[fromVid] !== nextToken) return;
-      setExpandProbeByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
+      setDrilldownExpandStateByVid((prev) => ({ ...prev, [fromVid]: "hasextra" }));
     }
   }
 
   useEffect(() => {
-    scopeVersionRef.current += 1;
-    abortGraphRequests();
+    drilldownSessionVersionRef.current += 1;
+    abortDrilldownRequests();
     setLoadingGraph(false);
     resetExpandProbeCache();
-  }, [scopeKey]);
+  }, [drilldownScopeKey]);
 
   useEffect(() => {
     if (selectedNodeVid == null) return;
@@ -670,7 +671,7 @@ export function useGraphData({
     const nextTier = budgetTier + 1;
     setBudgetTier(nextTier);
     notify("info", `图预算已提升到 ${SUBGRAPH_BUDGET_PRESETS[nextTier].label}，正在重载子图…`);
-    await loadSubgraphWithParams(curRoot, hop, relations, nextTier);
+    await loadDrilldownWithParams(curRoot, hop, relations, nextTier);
   }
 
   return {
@@ -687,14 +688,14 @@ export function useGraphData({
     manualRevealedNodeIds,
     manualHiddenNodeIds,
     nodeGroupRootById,
-    expandedSourceNodeIds,
+    drilldownExpandedNodeIds,
     hiddenNodesCollapsed,
     setHiddenNodesCollapsed,
     panelGroupCollapsed,
     setPanelGroupCollapsed,
-    expandProbeByVid,
-    loadSubgraphWithParams,
-    loadSubgraph,
+    drilldownExpandStateByVid,
+    loadDrilldownWithParams,
+    loadDrilldown,
     expand1hop,
     reroot1hop,
     revealNode,
@@ -702,9 +703,9 @@ export function useGraphData({
     collapseExpandFromNode,
     resetExpandProbeCache,
     probeExpand1hop,
-    clearGraphData,
-    mergeGraphData,
-    replaceGraphData,
+    clearDrilldownData,
+    mergeDrilldownData,
+    replaceDrilldownData,
     updateNodeInGraph,
     updateEdgeInGraph,
     budgetTier,

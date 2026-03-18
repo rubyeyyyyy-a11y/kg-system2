@@ -2,6 +2,7 @@ from typing import Any
 
 from app.clients.es_client import ElasticsearchClient
 from app.core.space_context import get_current_space
+from app.services.imports import file_store
 from app.services.search_v2 import indexing_service
 from app.services.spaces.index_status_service import (
     calculate_space_index_status_summary,
@@ -117,7 +118,13 @@ def sync_entities(vids: list[int], *, space_name: str | None = None) -> dict[str
     return indexing_service.sync_entities(vids, space_name=resolved_space, refresh="wait_for")
 
 
-def post_verify_index(vids: list[int], *, space_name: str | None = None) -> dict[str, Any]:
+def delete_entities_from_index(vids: list[int], *, space_name: str | None = None) -> dict[str, Any]:
+    resolved_space = str(space_name or get_current_space())
+    client = ElasticsearchClient()
+    return client.delete_documents_by_ids(resolved_space, vids, refresh="wait_for")
+
+
+def post_verify_index(vids: list[int], *, space_name: str | None = None, batch_id: str | None = None) -> dict[str, Any]:
     resolved_space = str(space_name or get_current_space())
     try:
         imported_visibility = _verify_imported_entities_visible(vids, space_name=resolved_space)
@@ -169,6 +176,11 @@ def post_verify_index(vids: list[int], *, space_name: str | None = None) -> dict
         "completed_at": registry_service._now_iso(),
         "failure_stage": failure_stage,
     }
+    if batch_id:
+        try:
+            file_store.update_batch_record(batch_id, searchable=bool(searchable))
+        except Exception:
+            pass
     return {
         "space_name": resolved_space,
         "space_meta": space_meta,

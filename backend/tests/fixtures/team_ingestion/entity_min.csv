@@ -1,0 +1,2 @@
+ID,entity_type,entity_name,entity_raw_id,description,source,version,updated_at,updated_by
+1,disease,Alpha,MONDO:1,Alpha desc,manual,0,0,importer

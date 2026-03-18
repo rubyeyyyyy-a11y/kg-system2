@@ -46,7 +46,7 @@ def create_space(req: CreateSpaceRequest):
         created_by=req.created_by,
     )
     return {
-        "space": summary.model_dump(),
+        "space": readiness_service.build_space_summary_payload(summary),
         "status": summary.status,
         "integration_scope": summary.integration_scope,
         "warnings": warnings,

@@ -10,10 +10,10 @@ from app.core.space_context import get_current_space
 from app.core.escape import (
     escape_ngql_string,
     raise_validation_error,
-    validate_text,
     validate_updated_by,
 )
 from app.db.nebula_client import NebulaExecutionError, execute_ngql_safe
+from app.object_meta import validation_service
 from app.schemas.edit import EdgePatchRequest, NodePatchRequest
 from app.services import metadata_service
 from app.services.common import vw
@@ -103,40 +103,26 @@ def _node_snapshot(vid: int) -> Dict[str, Any]:
     ngql = f"""
     FETCH PROP ON `Entity` {int(vid)}
     YIELD id(vertex) AS vid,
-          properties(vertex).entity_name AS entity_name,
-          properties(vertex).entity_type AS entity_type,
-          properties(vertex).source AS source,
-          properties(vertex).description AS description,
-          properties(vertex).entity_raw_id AS entity_raw_id,
-          properties(vertex).version AS version,
-          properties(vertex).updated_at AS updated_at,
-          properties(vertex).updated_by AS updated_by;
+          properties(vertex) AS props;
     """
     res = execute_ngql_safe(ngql)
     if len(res.rows()) == 0:
         raise HTTPException(status_code=404, detail="node not found")
-    cols = {
-        "vid": res.column_values("vid"),
-        "entity_name": res.column_values("entity_name"),
-        "entity_type": res.column_values("entity_type"),
-        "source": res.column_values("source"),
-        "description": res.column_values("description"),
-        "entity_raw_id": res.column_values("entity_raw_id"),
-        "version": res.column_values("version"),
-        "updated_at": res.column_values("updated_at"),
-        "updated_by": res.column_values("updated_by"),
-    }
-    return {
-        "vid": _as_int(cols["vid"][0]),
-        "entity_name": _as_text(cols["entity_name"][0]),
-        "entity_type": _as_text(cols["entity_type"][0]),
-        "source": _as_text(cols["source"][0]),
-        "description": _as_text(cols["description"][0]),
-        "entity_raw_id": _as_text(cols["entity_raw_id"][0]),
-        "version": _as_int(cols["version"][0]),
-        "updated_at": _as_int(cols["updated_at"][0]),
-        "updated_by": _as_text(cols["updated_by"][0]),
-    }
+    vid_value = _as_int(res.column_values("vid")[0])
+    props = vw(res.column_values("props")[0]) or {}
+    snapshot: Dict[str, Any] = {"vid": vid_value}
+    if isinstance(props, dict):
+        for key, value in props.items():
+            snapshot[str(key)] = vw(value)
+    snapshot["entity_name"] = _as_text(snapshot.get("entity_name"))
+    snapshot["entity_type"] = _as_text(snapshot.get("entity_type"))
+    snapshot["source"] = _as_text(snapshot.get("source"))
+    snapshot["description"] = _as_text(snapshot.get("description"))
+    snapshot["entity_raw_id"] = _as_text(snapshot.get("entity_raw_id"))
+    snapshot["version"] = _as_int(snapshot.get("version"))
+    snapshot["updated_at"] = _as_int(snapshot.get("updated_at"))
+    snapshot["updated_by"] = _as_text(snapshot.get("updated_by"))
+    return snapshot
 
 
 def _edge_snapshot(src: int, dst: int, rank: int) -> Dict[str, Any]:
@@ -146,40 +132,29 @@ def _edge_snapshot(src: int, dst: int, rank: int) -> Dict[str, Any]:
     RETURN id(a) AS src,
            id(b) AS dst,
            rank(e) AS rank,
-           coalesce(properties(e).relation, "") AS relation,
-           coalesce(properties(e).source, "") AS source,
-           coalesce(properties(e).evidence, "") AS evidence,
-           coalesce(properties(e).version, 0) AS version,
-           coalesce(properties(e).updated_at, 0) AS updated_at,
-           coalesce(properties(e).updated_by, "") AS updated_by
+           properties(e) AS props
     LIMIT 1;
     """
     res = execute_ngql_safe(ngql)
     if len(res.rows()) == 0:
         raise HTTPException(status_code=404, detail="edge not found")
-    cols = {
-        "src": res.column_values("src"),
-        "dst": res.column_values("dst"),
-        "rank": res.column_values("rank"),
-        "relation": res.column_values("relation"),
-        "source": res.column_values("source"),
-        "evidence": res.column_values("evidence"),
-        "version": res.column_values("version"),
-        "updated_at": res.column_values("updated_at"),
-        "updated_by": res.column_values("updated_by"),
-    }
-    return {
-        "src": int(vw(cols["src"][0])),
-        "dst": int(vw(cols["dst"][0])),
-        "rank": str(int(vw(cols["rank"][0]) or 0)),
-        "relation": str(vw(cols["relation"][0]) or ""),
-        "source": str(vw(cols["source"][0]) or ""),
-        "evidence": str(vw(cols["evidence"][0]) or ""),
-        "version": int(vw(cols["version"][0]) or 0),
-        "updated_at": int(vw(cols["updated_at"][0]) or 0),
-        "updated_by": str(vw(cols["updated_by"][0]) or ""),
+    snapshot: Dict[str, Any] = {
+        "src": int(vw(res.column_values("src")[0])),
+        "dst": int(vw(res.column_values("dst")[0])),
+        "rank": str(int(vw(res.column_values("rank")[0]) or 0)),
         "edge_type": config.EDGE_TYPE,
     }
+    props = vw(res.column_values("props")[0]) or {}
+    if isinstance(props, dict):
+        for key, value in props.items():
+            snapshot[validation_service.canonical_field_name("edge", str(key))] = vw(value)
+    snapshot["relation"] = str(snapshot.get("relation") or "")
+    snapshot["source"] = str(snapshot.get("source") or "")
+    snapshot["evidence"] = str(snapshot.get("evidence") or "")
+    snapshot["version"] = int(snapshot.get("version") or 0)
+    snapshot["updated_at"] = int(snapshot.get("updated_at") or 0)
+    snapshot["updated_by"] = str(snapshot.get("updated_by") or "")
+    return snapshot
 
 
 def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
@@ -190,9 +165,9 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
     try:
         actor = validate_updated_by(req.updated_by)
         expected_version = _ensure_expected_version(req.expected_version)
-        incoming_set = field_policy.validate_node_patch_set(req.set)
         phase = "snapshot_before"
         before = _node_snapshot(vid=int(vid))
+        incoming_set = validation_service.validate_patch_set("node", req.set, current_snapshot=before)
         before_version = int(before.get("version") or 0)
         if before_version != expected_version:
             _audit(
@@ -221,17 +196,13 @@ def patch_node(vid: int, req: NodePatchRequest) -> Dict[str, Any]:
         set_clauses = []
         updated_values: Dict[str, str] = {}
         for field_name, raw_value in incoming_set.items():
-            cleaned = validate_text(
-                field_name=field_name,
-                value=raw_value,
-                max_len=config.ENTITY_FIELD_MAX_LEN[field_name],
-                multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
-            )
+            rule = validation_service.get_field_rule("node", field_name, current_snapshot=before)
+            cleaned = raw_value
             escaped = escape_ngql_string(
                 value=cleaned,
                 field_name=field_name,
-                max_len=config.ENTITY_FIELD_MAX_LEN[field_name],
-                multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
+                max_len=rule.max_len,
+                multiline=rule.multiline,
             )
             set_clauses.append(f'`{field_name}` = "{escaped}"')
             updated_values[field_name] = cleaned
@@ -359,7 +330,6 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
         actor = validate_updated_by(req.updated_by)
         expected_version = _ensure_expected_version(req.expected_version)
         rank_int = _parse_rank(req.rank)
-        incoming_set = field_policy.validate_edge_patch_set(req.set)
         identity = {
             "src": int(req.src),
             "dst": int(req.dst),
@@ -368,6 +338,7 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
         }
 
         before = _edge_snapshot(src=int(req.src), dst=int(req.dst), rank=rank_int)
+        incoming_set = validation_service.validate_patch_set("edge", req.set, current_snapshot=before)
         before_version = int(before.get("version") or 0)
         if before_version != expected_version:
             _audit(
@@ -395,17 +366,13 @@ def patch_edge(req: EdgePatchRequest) -> Dict[str, Any]:
         diff: Dict[str, Dict[str, str]] = {}
         set_clauses = []
         for field_name, raw_value in incoming_set.items():
-            cleaned = validate_text(
-                field_name=field_name,
-                value=raw_value,
-                max_len=config.EDGE_FIELD_MAX_LEN[field_name],
-                multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
-            )
+            rule = validation_service.get_field_rule("edge", field_name, current_snapshot=before)
+            cleaned = raw_value
             escaped = escape_ngql_string(
                 value=cleaned,
                 field_name=field_name,
-                max_len=config.EDGE_FIELD_MAX_LEN[field_name],
-                multiline=(field_name in config.ALLOW_MULTILINE_FIELDS),
+                max_len=rule.max_len,
+                multiline=rule.multiline,
             )
             set_clauses.append(f'`{field_name}` = "{escaped}"')
             old_value = str(before.get(field_name) or "")

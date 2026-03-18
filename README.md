@@ -20,9 +20,27 @@
 - `backend/`：后端工程
 - `dev.sh`：一键同时启动前后端（本地开发）
 
+### 当前正式工作流
+
+- 统一关系发现是唯一正式图工作流：`discovery candidate search -> load subgraph -> formal drill-down -> edit`
+- 候选层正式入口：`/api/search`、`/api/suggest`、`/api/suggest_raw_id`、`/api/discovery/entity_candidates`
+- 图层正式入口：`/api/graph/discovery`、`/api/subgraph`、`/api/expand`
+- 已退役入口：`/api/multi_entity_graph*` 与旧 `edge_* suggest/search` 系列不再属于正式能力面
+
 ## 2) 本地启动
 
-### 2.0 标准化启停流程（推荐）
+### 2.0 环境补全（推荐先执行）
+```bash
+bash scripts/bootstrap_env.sh
+```
+
+说明：
+
+- 会创建并补齐 `backend/.venv`
+- 会按 `backend/requirements.txt` 安装后端依赖
+- 会按 `frontend/package-lock.json` 执行 `npm ci`
+
+### 2.1 标准化启停流程（推荐）
 ```bash
 bash scripts/start_stack.sh
 bash scripts/check_stack.sh
@@ -45,6 +63,7 @@ bash scripts/check_stack.sh
 - `check_stack.sh` 组合判断 `pidfile / pid 存活 / 端口监听 / HTTP 可达`，会输出 `running / degraded / stale_pidfile / stopped`
 - `verify_stack.sh` 以真实可达性为准；即使 pidfile 缺失，只要前后端仍可访问，验证仍会继续并显示 `pidfile_missing`
 - `smoke_api.sh` 只依赖后端可达性，不依赖前端或 pidfile
+- `smoke_api.sh` 当前覆盖 `/api/search`、`/api/suggest`、`/api/suggest_raw_id`、`/api/subgraph`、`/api/graph/discovery`
 - `stop_stack.sh` 返回前会等待真实退出与端口释放；若端口被外部进程占用，会输出 `stop_incomplete` 并返回非 0
 
 常见排查：
@@ -58,32 +77,44 @@ bash scripts/check_stack.sh
 
 - 后端虚拟环境已准备：`backend/.venv`
 - 前端依赖已安装：`frontend/node_modules`
+- 若环境未补齐，先执行：`bash scripts/bootstrap_env.sh`
 
-### 2.1 前端启动
+### 2.2 前端启动
 ```bash
 cd frontend
 npm install
 npm run dev -- --host 0.0.0.0 --port 5173
 ```
 
-### 2.2 后端启动
+### 2.3 后端启动
 ```bash
 cd backend
 source .venv/bin/activate
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-### 2.3 一键启动（推荐）
+### 2.4 一键启动（推荐）
 ```bash
 ./dev.sh
 ```
 
-### 2.4 Docker Compose（NebulaGraph）
+### 2.5 Docker Compose（NebulaGraph）
 如果仓库中存在 `docker-compose.yml` / `docker-compose.*.yml`：
 ```bash
 docker compose up -d
 docker compose ps
 ```
+
+### 2.6 后端测试（自动带项目环境）
+```bash
+bash scripts/backend_pytest.sh backend/tests/test_edit_service.py -q
+```
+
+说明：
+
+- 自动使用 `backend/.venv/bin/python`
+- 自动注入 `PYTHONPATH=backend`
+- 适合解决系统 python 与项目 venv 错位的问题
 
 ## 3) 配置说明（`.env.example`）
 在项目根目录复制：

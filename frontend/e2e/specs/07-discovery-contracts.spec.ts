@@ -172,12 +172,18 @@ function nodeDetailResponse(vid: number) {
       entity_name: "Unified Discovery Node",
       entity_type: "gene",
       source: "mock",
-      description: "Editable discovery node",
+      description:
+        "Editable discovery node with a longer text block that should initially render in summary mode until the user expands it from the detail panel.",
       entity_raw_id: "HGNC:20",
       version: 3,
       updated_at: 0,
       updated_by: "system",
-      props: { entity_name: "Unified Discovery Node" },
+      props: {
+        entity_name: "Unified Discovery Node",
+        description:
+          "Editable discovery node with a longer text block that should initially render in summary mode until the user expands it from the detail panel.",
+        custom_flag: "delivery1",
+      },
     };
   }
   return {
@@ -407,8 +413,8 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
         },
         edge: {
           fields: [
-            { name: "relation", required: true, maxLen: 120, multiline: false },
             { name: "source", required: false, maxLen: 120, multiline: false },
+            { name: "evidence", required: false, maxLen: 500, multiline: true },
           ],
         },
       }),
@@ -447,14 +453,19 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
         src: demoSpace.expected.vid,
         dst: 20,
         rank: "0",
-        relation: edgeDetailCount > 1 ? "treats_updated" : "treats",
-        source_db: "mock",
-        evidence: "",
+        relation: "treats",
+        source_db: edgeDetailCount > 1 ? "mock_updated" : "mock",
+        evidence: "Evidence line for testing expandable edge text behavior in Delivery 1.",
         version: edgeDetailCount > 1 ? 6 : 5,
         updated_at: 1,
         updated_by: edgeDetailCount > 1 ? "playwright" : "system",
         updated: false,
-        props: { relation: edgeDetailCount > 1 ? "treats_updated" : "treats" },
+        props: {
+          relation: "treats",
+          source: edgeDetailCount > 1 ? "mock_updated" : "mock",
+          evidence: "Evidence line for testing expandable edge text behavior in Delivery 1.",
+          edge_kind: "treats",
+        },
       }),
     });
   });
@@ -471,7 +482,7 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
         version: 6,
         updated_at: 1,
         updated_by: String(edgePatchBody.updated_by || ""),
-        updated: { relation: String((edgePatchBody.set as Record<string, unknown>).relation || "") },
+        updated: { source: String((edgePatchBody.set as Record<string, unknown>).source || "") },
       }),
     });
   });
@@ -487,6 +498,12 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
   await page.getByText("Rendered Nodes").click();
   await page.getByTestId("managed-node-view-detail-20").click();
   await expect(page.getByTestId("selected-node-detail")).toContainText("Unified Discovery Node");
+  await expect(page.getByTestId("selected-node-detail")).toContainText("Custom Flag");
+  await expect(page.getByTestId("detail-raw-json-content")).toHaveCount(0);
+  await page.getByTestId("detail-expand-description").click();
+  await expect(page.getByTestId("selected-node-detail")).toContainText("until the user expands it from the detail panel");
+  await page.getByTestId("detail-raw-json-toggle").click();
+  await expect(page.getByTestId("detail-raw-json-content")).toHaveCount(1);
 
   await page.getByTestId("detail-panel-tab-edit").click();
   await page.getByTestId("edit-save-updated-by-input").fill("playwright");
@@ -500,7 +517,9 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
   await page.getByTestId("direct-edge-rank-input").fill("0");
   await page.getByTestId("direct-edge-load-button").click();
   await page.getByTestId("edit-save-updated-by-input").fill("playwright");
-  await page.getByTestId("edit-field-relation").fill("treats_updated");
+  await expect(page.getByTestId("edit-field-relation")).toContainText("treats");
+  await expect(page.getByTestId("edit-field-version")).toContainText("5");
+  await page.getByTestId("edit-field-source").fill("mock_updated");
   await page.getByTestId("direct-edge-save-button").click();
   await expect(page.getByText("边保存成功，version=6")).toHaveCount(1);
 
@@ -517,6 +536,6 @@ test("discovery detail and edit stay reachable in unified workflow", async ({ pa
     rank: "0",
     expected_version: 5,
     updated_by: "playwright",
-    set: { relation: "treats_updated" },
+    set: { source: "mock_updated" },
   });
 });

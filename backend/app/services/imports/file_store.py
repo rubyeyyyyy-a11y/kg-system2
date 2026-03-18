@@ -4,22 +4,36 @@ import logging
 import os
 import shutil
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Iterable, Optional
 
 from fastapi import HTTPException
 from fastapi import UploadFile
 
 from app.services.imports.errors import raise_import_http_error
-from app.services.imports.models import ImportDraft, ImportFileRecord, ImportJobState, JobEvent
+from app.services.imports.models import (
+    CleanupJobArtifactRecord,
+    CleanupJobRecord,
+    ImportBatchItemRecord,
+    ImportBatchRecord,
+    ImportDraft,
+    ImportFileRecord,
+    ImportJobState,
+    JobEvent,
+)
 
 logger = logging.getLogger(__name__)
+_BATCH_ITEM_LOCKS: dict[str, Lock] = {}
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 RUN_ROOT = Path(__import__("os").getenv("IMPORT_RUN_ROOT", str(REPO_ROOT / ".run")))
 STAGING_FILES_DIR = RUN_ROOT / "import-staging" / "files"
 DRAFTS_DIR = RUN_ROOT / "import-drafts"
 JOBS_DIR = RUN_ROOT / "import-jobs"
+IMPORT_BATCHES_DIR = RUN_ROOT / "import-batches"
+IMPORT_CLEANUP_JOBS_DIR = RUN_ROOT / "import-cleanup-jobs"
 MAX_UPLOAD_BYTES = int(os.getenv("IMPORT_MAX_UPLOAD_BYTES", str(100 * 1024 * 1024)))
 MAX_DRAFT_TOTAL_BYTES = int(os.getenv("IMPORT_MAX_DRAFT_TOTAL_BYTES", str(200 * 1024 * 1024)))
 MAX_DRAFT_FILES = int(os.getenv("IMPORT_MAX_DRAFT_FILES", "5"))
@@ -40,10 +54,22 @@ ALLOWED_UPLOAD_MIME_TYPES = {
 }
 
 
+@dataclass
+class BatchItemAppendResult:
+    appended: bool
+    item_key: str
+    item_count: int
+    entity_count: int
+    relation_count: int
+    items_jsonl_key_count: int
+
+
 def ensure_import_dirs() -> None:
     STAGING_FILES_DIR.mkdir(parents=True, exist_ok=True)
     DRAFTS_DIR.mkdir(parents=True, exist_ok=True)
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    IMPORT_BATCHES_DIR.mkdir(parents=True, exist_ok=True)
+    IMPORT_CLEANUP_JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def new_id(prefix: str) -> str:
@@ -112,6 +138,38 @@ def job_input_dir(job_id: str) -> Path:
 
 def job_artifacts_dir(job_id: str) -> Path:
     return job_dir(job_id) / "artifacts"
+
+
+def batch_dir(batch_id: str) -> Path:
+    return IMPORT_BATCHES_DIR / batch_id
+
+
+def batch_state_path(batch_id: str) -> Path:
+    return IMPORT_BATCHES_DIR / f"{batch_id}.json"
+
+
+def batch_items_path(batch_id: str) -> Path:
+    return batch_dir(batch_id) / "items.jsonl"
+
+
+def batch_item_keys_path(batch_id: str) -> Path:
+    return batch_dir(batch_id) / "item_keys.json"
+
+
+def cleanup_job_path(cleanup_job_id: str) -> Path:
+    return IMPORT_CLEANUP_JOBS_DIR / f"{cleanup_job_id}.json"
+
+
+def cleanup_job_dir(cleanup_job_id: str) -> Path:
+    return IMPORT_CLEANUP_JOBS_DIR / cleanup_job_id
+
+
+def cleanup_job_artifacts_dir(cleanup_job_id: str) -> Path:
+    return cleanup_job_dir(cleanup_job_id) / "artifacts"
+
+
+def cleanup_job_artifact_path(cleanup_job_id: str, filename: str) -> Path:
+    return cleanup_job_artifacts_dir(cleanup_job_id) / filename
 
 
 def _detect_encoding(raw: bytes) -> str:
@@ -293,9 +351,23 @@ def sum_file_sizes(file_ids: list[str]) -> int:
     return sum(load_file_record(file_id).size_bytes for file_id in file_ids)
 
 
-def write_json(path: Path, payload: Any) -> None:
+def _batch_item_lock(batch_id: str) -> Lock:
+    lock = _BATCH_ITEM_LOCKS.get(batch_id)
+    if lock is None:
+        lock = Lock()
+        _BATCH_ITEM_LOCKS[batch_id] = lock
+    return lock
+
+
+def _write_text_atomic(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp_path = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    tmp_path.write_text(payload, encoding="utf-8")
+    tmp_path.replace(path)
+
+
+def write_json(path: Path, payload: Any) -> None:
+    _write_text_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def read_json(path: Path) -> Any:
@@ -317,6 +389,230 @@ def save_job_state(state: ImportJobState) -> None:
 
 def load_job_state(job_id: str) -> ImportJobState:
     return ImportJobState.model_validate(read_json(job_state_path(job_id)))
+
+
+def save_batch_record(record: ImportBatchRecord) -> None:
+    ensure_import_dirs()
+    write_json(batch_state_path(record.batch_id), record.model_dump())
+
+
+def load_batch_record(batch_id: str) -> ImportBatchRecord:
+    return ImportBatchRecord.model_validate(read_json(batch_state_path(batch_id)))
+
+
+def batch_items_exist(batch_id: str) -> bool:
+    return batch_items_path(batch_id).exists()
+
+
+def _batch_item_index_payload(items: list[ImportBatchItemRecord]) -> dict[str, Any]:
+    keys = sorted({str(item.item_key or "") for item in items if str(item.item_key or "").strip()})
+    return {
+        "keys": keys,
+        "entity_count": sum(1 for item in items if item.item_type == "entity"),
+        "relation_count": sum(1 for item in items if item.item_type == "relation"),
+        "updated_at": int(__import__("time").time()),
+    }
+
+
+def _read_batch_items_file(batch_id: str) -> list[ImportBatchItemRecord]:
+    path = batch_items_path(batch_id)
+    if not path.exists():
+        return []
+    items: list[ImportBatchItemRecord] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        items.append(ImportBatchItemRecord.model_validate(json.loads(line)))
+    return items
+
+
+def load_batch_item_keys(batch_id: str, *, repair: bool = True) -> dict[str, Any]:
+    items = _read_batch_items_file(batch_id)
+    item_payload = _batch_item_index_payload(items)
+    path = batch_item_keys_path(batch_id)
+    if not path.exists():
+        if repair:
+            write_json(path, item_payload)
+        return item_payload
+    try:
+        stored = dict(read_json(path) or {})
+    except Exception:
+        if repair:
+            write_json(path, item_payload)
+        return item_payload
+    stored_keys = {str(item) for item in list(stored.get("keys") or []) if str(item).strip()}
+    computed_keys = set(item_payload["keys"])
+    merged = {
+        "keys": sorted(stored_keys | computed_keys),
+        "entity_count": max(int(stored.get("entity_count") or 0), int(item_payload["entity_count"] or 0)),
+        "relation_count": max(int(stored.get("relation_count") or 0), int(item_payload["relation_count"] or 0)),
+        "updated_at": int(__import__("time").time()),
+    }
+    if repair and (
+        merged["keys"] != list(stored.get("keys") or [])
+        or int(stored.get("entity_count") or 0) != merged["entity_count"]
+        or int(stored.get("relation_count") or 0) != merged["relation_count"]
+    ):
+        write_json(path, merged)
+    return merged
+
+
+def get_batch_ledger_consistency(batch_id: str) -> dict[str, Any]:
+    items = _read_batch_items_file(batch_id)
+    keys_payload = load_batch_item_keys(batch_id, repair=False)
+    items_jsonl_keys = [str(item.item_key or "") for item in items if str(item.item_key or "").strip()]
+    unique_item_keys = sorted(set(items_jsonl_keys))
+    index_keys = sorted({str(item) for item in list(keys_payload.get("keys") or []) if str(item).strip()})
+    entity_count = sum(1 for item in items if item.item_type == "entity")
+    relation_count = sum(1 for item in items if item.item_type == "relation")
+    return {
+        "ok": len(items_jsonl_keys) == len(index_keys) == len(unique_item_keys),
+        "items_jsonl_count": len(items_jsonl_keys),
+        "items_jsonl_unique_key_count": len(unique_item_keys),
+        "item_key_count": len(index_keys),
+        "entity_count": entity_count,
+        "relation_count": relation_count,
+        "warnings": [
+            warning
+            for warning in [
+                None if len(items_jsonl_keys) == len(unique_item_keys) else "items.jsonl contains duplicate item keys",
+                None if len(index_keys) == len(unique_item_keys) else "item key index count does not match items.jsonl unique keys",
+            ]
+            if warning
+        ],
+    }
+
+
+def append_batch_item(record: ImportBatchItemRecord) -> None:
+    ensure_import_dirs()
+    path = batch_items_path(record.batch_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record.model_dump(), ensure_ascii=False) + "\n")
+
+
+def append_batch_item_if_absent(record: ImportBatchItemRecord) -> BatchItemAppendResult:
+    ensure_import_dirs()
+    normalized = ImportBatchItemRecord.model_validate(record.model_dump())
+    with _batch_item_lock(normalized.batch_id):
+        items = _read_batch_items_file(normalized.batch_id)
+        keys_payload = load_batch_item_keys(normalized.batch_id, repair=False)
+        existing_keys = {str(item.item_key or "") for item in items if str(item.item_key or "").strip()}
+        existing_keys.update({str(item) for item in list(keys_payload.get("keys") or []) if str(item).strip()})
+        if normalized.item_key in existing_keys:
+            repaired_payload = _batch_item_index_payload(items)
+            if sorted(existing_keys) != list(keys_payload.get("keys") or []):
+                write_json(
+                    batch_item_keys_path(normalized.batch_id),
+                    {
+                        "keys": sorted(existing_keys),
+                        "entity_count": repaired_payload["entity_count"],
+                        "relation_count": repaired_payload["relation_count"],
+                        "updated_at": int(__import__("time").time()),
+                    },
+                )
+            return BatchItemAppendResult(
+                appended=False,
+                item_key=str(normalized.item_key or ""),
+                item_count=len(existing_keys),
+                entity_count=repaired_payload["entity_count"],
+                relation_count=repaired_payload["relation_count"],
+                items_jsonl_key_count=len({str(item.item_key or "") for item in items if str(item.item_key or "").strip()}),
+            )
+        path = batch_items_path(normalized.batch_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(normalized.model_dump(), ensure_ascii=False) + "\n")
+        items.append(normalized)
+        payload = _batch_item_index_payload(items)
+        write_json(batch_item_keys_path(normalized.batch_id), payload)
+        return BatchItemAppendResult(
+            appended=True,
+            item_key=str(normalized.item_key or ""),
+            item_count=len(payload["keys"]),
+            entity_count=int(payload["entity_count"] or 0),
+            relation_count=int(payload["relation_count"] or 0),
+            items_jsonl_key_count=len({str(item.item_key or "") for item in items if str(item.item_key or "").strip()}),
+        )
+
+
+def load_batch_items(batch_id: str) -> list[ImportBatchItemRecord]:
+    return _read_batch_items_file(batch_id)
+
+
+def list_batch_ids() -> list[str]:
+    ensure_import_dirs()
+    return sorted([path.stem for path in IMPORT_BATCHES_DIR.glob("*.json") if path.is_file()])
+
+
+def list_batch_records() -> list[ImportBatchRecord]:
+    records: list[ImportBatchRecord] = []
+    for batch_id in list_batch_ids():
+        try:
+            records.append(load_batch_record(batch_id))
+        except Exception:
+            continue
+    records.sort(key=lambda item: (item.created_at, item.batch_id), reverse=True)
+    return records
+
+
+def update_batch_record(batch_id: str, **changes) -> ImportBatchRecord:
+    record = load_batch_record(batch_id)
+    for key, value in changes.items():
+        setattr(record, key, value)
+    record.updated_at = int(__import__("time").time())
+    save_batch_record(record)
+    return record
+
+
+def save_cleanup_job(record: CleanupJobRecord) -> None:
+    ensure_import_dirs()
+    write_json(cleanup_job_path(record.cleanup_job_id), record.model_dump())
+
+
+def load_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
+    return CleanupJobRecord.model_validate(read_json(cleanup_job_path(cleanup_job_id)))
+
+
+def list_cleanup_job_ids() -> list[str]:
+    ensure_import_dirs()
+    return sorted([path.stem for path in IMPORT_CLEANUP_JOBS_DIR.glob("*.json") if path.is_file()])
+
+
+def list_cleanup_jobs() -> list[CleanupJobRecord]:
+    records: list[CleanupJobRecord] = []
+    for cleanup_job_id in list_cleanup_job_ids():
+        try:
+            records.append(load_cleanup_job(cleanup_job_id))
+        except Exception:
+            continue
+    records.sort(key=lambda item: (item.created_at, item.cleanup_job_id), reverse=True)
+    return records
+
+
+def write_cleanup_job_artifact(cleanup_job_id: str, filename: str, payload: Any) -> CleanupJobArtifactRecord:
+    ensure_import_dirs()
+    path = cleanup_job_artifact_path(cleanup_job_id, filename)
+    write_json(path, payload)
+    kind = "summary"
+    if filename == "conflicts.json":
+        kind = "conflicts"
+    elif filename == "skipped_entities.json":
+        kind = "skipped_entities"
+    elif filename == "skipped_relations.json":
+        kind = "skipped_relations"
+    elif filename == "verify_summary.json":
+        kind = "verify_summary"
+    elif filename == "plan_summary.json":
+        kind = "plan_summary"
+    elif filename == "blocked_entities.json":
+        kind = "blocked_entities"
+    elif filename == "deletable_entities.json":
+        kind = "deletable_entities"
+    elif filename == "deletable_relations.json":
+        kind = "deletable_relations"
+    return CleanupJobArtifactRecord(kind=kind, filename=filename, path=str(path))
 
 
 def list_job_ids() -> list[str]:

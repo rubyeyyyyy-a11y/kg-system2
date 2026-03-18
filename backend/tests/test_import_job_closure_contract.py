@@ -53,6 +53,8 @@ class ImportJobClosureContractTest(unittest.TestCase):
         file_store.STAGING_FILES_DIR = root_path / "import-staging" / "files"
         file_store.DRAFTS_DIR = root_path / "import-drafts"
         file_store.JOBS_DIR = root_path / "import-jobs"
+        file_store.IMPORT_BATCHES_DIR = root_path / "import-batches"
+        file_store.IMPORT_CLEANUP_JOBS_DIR = root_path / "import-cleanup-jobs"
 
     def _patch_registry_root(self, root: str):
         root_path = Path(root) / "space-registry"

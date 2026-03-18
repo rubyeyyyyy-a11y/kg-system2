@@ -1,5 +1,6 @@
 import time
 
+from app.object_meta import import_rules
 from app.services.imports import mapping_service, schema_service
 from app.services.imports.models import CompiledImportPlan, ImportDraft
 from app.services.spaces import registry_service, template_service
@@ -29,6 +30,7 @@ def compile_plan(draft: ImportDraft) -> tuple[CompiledImportPlan, list[str], lis
             target.source_id = source.source_id
         if source is None:
             raise KeyError(f"missing source for target {target.target_id}")
+        target = import_rules.apply_target_import_rules(source=source, target=target)
         compiled = mapping_service.compile_target(
             target=target,
             source_columns=source.columns,

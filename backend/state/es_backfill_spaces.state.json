@@ -1,0 +1,90 @@
+{
+  "format_version": "es-backfill-v1",
+  "spaces": {
+    "it_space_218024": {
+      "cursor": 2,
+      "indexed_total": 2,
+      "updated_at": 1773286108
+    },
+    "it_space_218182": {
+      "cursor": 2,
+      "indexed_total": 2,
+      "updated_at": 1773286108
+    },
+    "it_space_218354": {
+      "cursor": 2,
+      "indexed_total": 2,
+      "updated_at": 1773286108
+    },
+    "demo_kg": {
+      "cursor": 5059789,
+      "indexed_total": 5059789,
+      "last_vid": 5059789,
+      "updated_at": 1773375161,
+      "phase": "full_complete",
+      "note": "space documents match the canonical ES contract",
+      "nebula_entity_count": 5059789,
+      "status": "verified_nonempty",
+      "es_doc_count": 5059789,
+      "coverage_pct": 100.0,
+      "full_completion": true,
+      "remaining_docs": 0,
+      "verify": {
+        "ok": true,
+        "space_name": "demo_kg",
+        "doc_count": 5059789,
+        "sample_count": 3,
+        "sample_ids_ok": true,
+        "sample_space_ok": true,
+        "sample_query_ok": true,
+        "query_mode": "raw_id_exact",
+        "matched_vids": [
+          1
+        ],
+        "timings_ms": {
+          "count_ms": 10.955,
+          "sample_ms": 16.181,
+          "query_ms": 25.604
+        },
+        "samples": [
+          {
+            "_id": "demo_kg:1",
+            "_source": {
+              "vid": 1,
+              "entity_raw_id": "MONDO:0000001",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "disease",
+              "raw_id_norm": "mondo0000001",
+              "source": "KG|UMLS"
+            }
+          },
+          {
+            "_id": "demo_kg:2",
+            "_source": {
+              "vid": 2,
+              "entity_raw_id": "MONDO:0000002",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "obsolete 46,XX sex reversal",
+              "raw_id_norm": "mondo0000002",
+              "source": "KG"
+            }
+          },
+          {
+            "_id": "demo_kg:3",
+            "_source": {
+              "vid": 3,
+              "entity_raw_id": "MONDO:0000003",
+              "entity_type": "disease",
+              "space_name": "demo_kg",
+              "entity_name": "obsolete 17-hydroxysteroid dehydrogenase deficiency",
+              "raw_id_norm": "mondo0000003",
+              "source": "KG"
+            }
+          }
+        ]
+      }
+    }
+  }
+}
