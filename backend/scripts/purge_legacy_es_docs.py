@@ -19,7 +19,7 @@ from app.clients.es_client import ElasticsearchClient
 from app.config import settings
 from app.services.spaces import index_status_service
 
-DEFAULT_REGISTRY = REPO_ROOT / ".run" / "space-registry" / "spaces.json"
+DEFAULT_REGISTRY = REPO_ROOT / "runtime" / ".run" / "space-registry" / "spaces.json"
 DEFAULT_STATE_DIR = ROOT / "state"
 
 

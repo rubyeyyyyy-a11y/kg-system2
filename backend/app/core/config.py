@@ -8,7 +8,7 @@ EDGE_TYPE = os.getenv("EDGE_TYPE", "REL2").strip() or "REL2"
 UPDATED_AT_UNIT = "seconds"
 
 # Relative to backend/ working directory.
-AUDIT_LOG_PATH = os.getenv("AUDIT_LOG_PATH", "logs/edit_audit.jsonl")
+AUDIT_LOG_PATH = settings.audit_log_path
 
 ENTITY_FIELD_MAX_LEN = {
     "entity_name": 256,

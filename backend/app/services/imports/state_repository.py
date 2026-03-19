@@ -1,17 +1,62 @@
 from __future__ import annotations
 
-from typing import Any, Protocol
+import csv
+import time
+from typing import Any, Iterable, Protocol
 
 from app.services.imports import file_store
-from app.services.imports.models import CleanupJobArtifactRecord, CleanupJobRecord, ImportBatchItemRecord, ImportBatchRecord, ImportJobState
+from app.services.imports.models import (
+    CleanupJobArtifactRecord,
+    CleanupJobRecord,
+    CompiledTargetPlan,
+    DraftSource,
+    ImportBatchItemRecord,
+    ImportBatchRecord,
+    ImportJobState,
+    JobArtifact,
+    JobEvent,
+)
 
 
 class ImportJobStateRepository(Protocol):
+    def next_job_id(self) -> str: ...
+
+    def next_batch_id(self) -> str: ...
+
     def list(self) -> list[ImportJobState]: ...
 
     def load(self, job_id: str) -> ImportJobState: ...
 
     def save(self, state: ImportJobState) -> None: ...
+
+    def update(self, job_id: str, **changes) -> ImportJobState: ...
+
+    def compiled_plan_path(self, job_id: str) -> str: ...
+
+    def failed_rows_path(self, job_id: str) -> str: ...
+
+    def normalized_rows_path(self, job_id: str) -> str: ...
+
+    def write_execution_snapshot(
+        self,
+        job_id: str,
+        *,
+        file_ids: list[str],
+        draft_payload: dict[str, Any],
+        compiled_plan: dict[str, Any],
+    ) -> None: ...
+
+    def load_compiled_plan_payload(self, job_id: str) -> dict[str, Any]: ...
+
+    def build_job_artifacts(self, job_id: str, targets: list[CompiledTargetPlan]) -> list[JobArtifact]: ...
+
+    def append_event(self, job_id: str, event: JobEvent) -> None: ...
+
+    def append_log(self, job_id: str, message: str) -> None: ...
+
+    def load_input_source(self, job_id: str, file_id: str, source_id: str) -> DraftSource: ...
+
+    def iter_input_rows(self, job_id: str, file_id: str) -> Iterable[tuple[dict[str, str], list[str]]]: ...
 
 
 class ImportBatchRepository(Protocol):
@@ -32,6 +77,21 @@ class ImportBatchRepository(Protocol):
     def list_relation_items_for_space(self, space_id: str) -> list[ImportBatchItemRecord]: ...
 
     def batch_items_exist(self, batch_id: str) -> bool: ...
+
+    def append_item_if_absent(self, record: ImportBatchItemRecord) -> file_store.BatchItemAppendResult: ...
+
+    def get_ledger_consistency(self, batch_id: str) -> dict[str, Any]: ...
+
+    def persist_ledger_summary(
+        self,
+        batch_id: str,
+        *,
+        entity_count: int,
+        relation_count: int,
+        ledger_summary: dict[str, Any],
+        ledger_warnings: list[str],
+        **changes,
+    ) -> ImportBatchRecord: ...
 
 
 class CleanupJobRepository(Protocol):
@@ -84,6 +144,12 @@ class CleanupStateRepository(Protocol):
 
 
 class FileImportJobStateRepository:
+    def next_job_id(self) -> str:
+        return file_store.new_id("job")
+
+    def next_batch_id(self) -> str:
+        return file_store.new_id("batch")
+
     def list(self) -> list[ImportJobState]:
         return file_store.list_job_states()
 
@@ -92,6 +158,106 @@ class FileImportJobStateRepository:
 
     def save(self, state: ImportJobState) -> None:
         file_store.save_job_state(state)
+
+    def update(self, job_id: str, **changes) -> ImportJobState:
+        state = self.load(job_id)
+        for key, value in changes.items():
+            setattr(state, key, value)
+        state.updated_at = int(time.time())
+        self.save(state)
+        return state
+
+    def compiled_plan_path(self, job_id: str) -> str:
+        return str(file_store.job_compiled_plan_path(job_id))
+
+    def failed_rows_path(self, job_id: str) -> str:
+        return str(file_store.job_failed_rows_path(job_id))
+
+    def normalized_rows_path(self, job_id: str) -> str:
+        return str(file_store.job_normalized_rows_path(job_id))
+
+    def write_execution_snapshot(
+        self,
+        job_id: str,
+        *,
+        file_ids: list[str],
+        draft_payload: dict[str, Any],
+        compiled_plan: dict[str, Any],
+    ) -> None:
+        file_store.copy_inputs_to_job(job_id, file_ids, draft_payload, compiled_plan)
+
+    def load_compiled_plan_payload(self, job_id: str) -> dict[str, Any]:
+        return file_store.read_compiled_plan_copy(job_id)
+
+    def build_job_artifacts(self, job_id: str, targets: list[CompiledTargetPlan]) -> list[JobArtifact]:
+        artifacts: list[JobArtifact] = []
+        for target in targets:
+            artifacts.extend(
+                [
+                    JobArtifact(
+                        target_id=target.target_id,
+                        source_id=target.source_id,
+                        kind="normalized_rows",
+                        filename=file_store.job_target_normalized_rows_path(job_id, target.target_id).name,
+                        path=str(file_store.job_target_normalized_rows_path(job_id, target.target_id)),
+                    ),
+                    JobArtifact(
+                        target_id=target.target_id,
+                        source_id=target.source_id,
+                        kind="failed_rows",
+                        filename=file_store.job_target_failed_rows_path(job_id, target.target_id).name,
+                        path=str(file_store.job_target_failed_rows_path(job_id, target.target_id)),
+                    ),
+                    JobArtifact(
+                        target_id=target.target_id,
+                        source_id=target.source_id,
+                        kind="summary",
+                        filename=file_store.job_target_summary_path(job_id, target.target_id).name,
+                        path=str(file_store.job_target_summary_path(job_id, target.target_id)),
+                    ),
+                ]
+            )
+        return artifacts
+
+    def append_event(self, job_id: str, event: JobEvent) -> None:
+        file_store.append_job_event(job_id, event)
+
+    def append_log(self, job_id: str, message: str) -> None:
+        file_store.append_job_log(job_id, message)
+
+    def load_input_source(self, job_id: str, file_id: str, source_id: str) -> DraftSource:
+        meta = file_store.read_json(file_store.job_input_dir(job_id) / file_id / "meta.json")
+        path = file_store.job_input_dir(job_id) / file_id / "source.csv"
+        with path.open("r", encoding=str(meta.get("detected_encoding") or "utf-8"), errors="replace", newline="") as handle:
+            reader = csv.DictReader(handle, delimiter=str(meta.get("detected_delimiter") or ","))
+            columns = list(reader.fieldnames or [])
+        return DraftSource(
+            source_id=source_id,
+            file_id=file_id,
+            filename=str(meta.get("original_name") or f"{file_id}.csv"),
+            columns=columns,
+            sample_rows=[],
+            header_hash="",
+            inferred_kind="unknown",
+            warnings=[],
+            alias_hints=[],
+            recommended_object_type=None,
+        )
+
+    def iter_input_rows(self, job_id: str, file_id: str) -> Iterable[tuple[dict[str, str], list[str]]]:
+        meta = file_store.read_json(file_store.job_input_dir(job_id) / file_id / "meta.json")
+        path = file_store.job_input_dir(job_id) / file_id / "source.csv"
+        handle = path.open("r", encoding=str(meta.get("detected_encoding") or "utf-8"), errors="replace", newline="")
+        reader = csv.DictReader(handle, delimiter=str(meta.get("detected_delimiter") or ","))
+
+        def _iter() -> Iterable[tuple[dict[str, str], list[str]]]:
+            try:
+                for row in reader:
+                    yield {str(k or ""): str(v or "") for k, v in row.items()}, list(reader.fieldnames or [])
+            finally:
+                handle.close()
+
+        return _iter()
 
 
 class FileImportBatchRepository:
@@ -124,6 +290,36 @@ class FileImportBatchRepository:
 
     def batch_items_exist(self, batch_id: str) -> bool:
         return file_store.batch_items_exist(batch_id)
+
+    def append_item_if_absent(self, record: ImportBatchItemRecord) -> file_store.BatchItemAppendResult:
+        return file_store.append_batch_item_if_absent(record)
+
+    def get_ledger_consistency(self, batch_id: str) -> dict[str, Any]:
+        return file_store.get_batch_ledger_consistency(batch_id)
+
+    def persist_ledger_summary(
+        self,
+        batch_id: str,
+        *,
+        entity_count: int,
+        relation_count: int,
+        ledger_summary: dict[str, Any],
+        ledger_warnings: list[str],
+        **changes,
+    ) -> ImportBatchRecord:
+        record = self.load(batch_id)
+        warning_messages = list(record.warning_messages or [])
+        for warning in ledger_warnings:
+            if warning not in warning_messages:
+                warning_messages.append(warning)
+        return self.update(
+            batch_id,
+            entity_count=entity_count,
+            relation_count=relation_count,
+            ledger_summary=ledger_summary,
+            warning_messages=warning_messages,
+            **changes,
+        )
 
 
 class FileCleanupJobRepository:

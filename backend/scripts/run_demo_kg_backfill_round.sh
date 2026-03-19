@@ -6,7 +6,7 @@ BACKEND_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd "${BACKEND_ROOT}/.." && pwd)"
 
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-LOG_DIR="${DEMO_KG_BACKFILL_LOG_DIR:-${BACKEND_ROOT}/logs/demo_kg_backfill}"
+LOG_DIR="${DEMO_KG_BACKFILL_LOG_DIR:-${REPO_ROOT}/runtime/logs/demo_kg_backfill}"
 STATE_FILE="${DEMO_KG_BACKFILL_STATE_FILE:-${BACKEND_ROOT}/state/es_backfill_spaces.state.json}"
 SUMMARY_DIR="${DEMO_KG_BACKFILL_SUMMARY_DIR:-${BACKEND_ROOT}/state/demo_kg_backfill_runs}"
 LATEST_SUMMARY="${DEMO_KG_BACKFILL_LATEST_SUMMARY:-${BACKEND_ROOT}/state/demo_kg_backfill_summary_latest.json}"

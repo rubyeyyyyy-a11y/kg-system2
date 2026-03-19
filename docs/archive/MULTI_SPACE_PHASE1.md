@@ -53,7 +53,7 @@ There is no global mutable current-space singleton.
 - Imports entity sync writes `space_name` on every upsert.
 - Edge-only imports still skip ES sync.
 - Historical spaces may still require controlled ES backfill if their documents were created before the multi-space contract landed.
-- Backfill/readiness rules are documented in `docs/MULTI_SPACE_ES_ALIGNMENT.md`.
+- Backfill/readiness rules are documented in `docs/archive/MULTI_SPACE_ES_ALIGNMENT.md`.
 
 ### Metadata cache
 

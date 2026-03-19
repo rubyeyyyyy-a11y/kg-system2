@@ -18,8 +18,8 @@ from app.clients.es_client import ElasticsearchClient
 
 DEFAULT_STATE_FILE = ROOT / "state" / "es_backfill_spaces.state.json"
 DEFAULT_LATEST_SUMMARY = ROOT / "state" / "demo_kg_backfill_summary_latest.json"
-DEFAULT_REGISTRY = REPO_ROOT / ".run" / "space-registry" / "spaces.json"
-DEFAULT_LOG_DIR = ROOT / "logs" / "demo_kg_backfill"
+DEFAULT_REGISTRY = REPO_ROOT / "runtime" / ".run" / "space-registry" / "spaces.json"
+DEFAULT_LOG_DIR = REPO_ROOT / "runtime" / "logs" / "demo_kg_backfill"
 DEFAULT_STATE_DIR = ROOT / "state"
 
 

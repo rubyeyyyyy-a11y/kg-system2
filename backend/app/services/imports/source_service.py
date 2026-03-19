@@ -16,6 +16,7 @@ VERTEX_PROPERTY_FIELDS = set(import_rules.VERTEX_FIXED_PROPERTY_FIELDS)
 EDGE_PROPERTY_FIELDS = set(import_rules.EDGE_FIXED_PROPERTY_FIELDS) | {"edge_kind"}
 VERTEX_IDENTITY_FIELDS = set(import_rules.VERTEX_IDENTITY_FIELDS)
 EDGE_IDENTITY_FIELDS = set(import_rules.EDGE_IDENTITY_FIELDS)
+MAX_SOURCE_SAMPLE_ROWS = file_store.MAX_SAMPLE_ROWS
 
 
 def normalize_token(value: str) -> str:
@@ -76,10 +77,10 @@ def build_source_snapshot(file_id: str, *, sample_rows: int) -> DraftSource:
     columns, sample, record, sample_capped = file_store.read_csv_sample(file_id, sample_rows)
     inferred_kind = infer_kind(columns)
     warnings: list[str] = []
-    if sample_rows > file_store.MAX_SAMPLE_ROWS:
-        warnings.append(f"sample_rows capped at {file_store.MAX_SAMPLE_ROWS}")
+    if sample_rows > MAX_SOURCE_SAMPLE_ROWS:
+        warnings.append(f"sample_rows capped at {MAX_SOURCE_SAMPLE_ROWS}")
     if sample_capped:
-        warnings.append(f"preview limited to the first {min(sample_rows, file_store.MAX_SAMPLE_ROWS)} rows")
+        warnings.append(f"preview limited to the first {min(sample_rows, MAX_SOURCE_SAMPLE_ROWS)} rows")
     return DraftSource(
         source_id=source_id_for_file(file_id),
         file_id=file_id,

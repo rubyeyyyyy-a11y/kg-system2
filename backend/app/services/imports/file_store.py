@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional
 from fastapi import HTTPException
 from fastapi import UploadFile
 
+from app.config import settings
 from app.services.imports.errors import raise_import_http_error
 from app.services.imports.models import (
     CleanupJobArtifactRecord,
@@ -27,8 +28,7 @@ from app.services.imports.models import (
 logger = logging.getLogger(__name__)
 _BATCH_ITEM_LOCKS: dict[str, Lock] = {}
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-RUN_ROOT = Path(__import__("os").getenv("IMPORT_RUN_ROOT", str(REPO_ROOT / ".run")))
+RUN_ROOT = Path(os.getenv("IMPORT_RUN_ROOT", str(settings.runtime_run_dir)))
 STAGING_FILES_DIR = RUN_ROOT / "import-staging" / "files"
 DRAFTS_DIR = RUN_ROOT / "import-drafts"
 JOBS_DIR = RUN_ROOT / "import-jobs"
@@ -345,6 +345,21 @@ def read_csv_rows(file_id: str) -> tuple[list[str], list[dict[str, str]], Import
         for row in reader:
             rows.append({str(k or ""): str(v or "") for k, v in row.items()})
     return columns, rows, record
+
+
+def read_csv_headers_from_path(path: Path, *, encoding: str, delimiter: str = ",") -> list[str]:
+    with path.open("r", encoding=encoding, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        return list(reader.fieldnames or [])
+
+
+def read_csv_rows_from_path(path: Path, *, encoding: str, delimiter: str = ",") -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    with path.open("r", encoding=encoding, newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=delimiter)
+        for row in reader:
+            rows.append({str(key or ""): str(value or "") for key, value in row.items()})
+    return rows
 
 
 def sum_file_sizes(file_ids: list[str]) -> int:

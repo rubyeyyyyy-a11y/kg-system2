@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -17,6 +18,28 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _resolve_repo_path(raw: str, repo_root: Path) -> Path:
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    return repo_root / path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+RUN_ROOT = "./runtime"
+_RUNTIME_ROOT = _resolve_repo_path(os.getenv("RUN_ROOT", RUN_ROOT), REPO_ROOT)
+_RUNTIME_RUN_DIR = _resolve_repo_path(os.getenv("RUNTIME_RUN_DIR", str(_RUNTIME_ROOT / ".run")), REPO_ROOT)
+_RUNTIME_LOGS_DIR = _resolve_repo_path(os.getenv("RUNTIME_LOGS_DIR", str(_RUNTIME_ROOT / "logs")), REPO_ROOT)
+_RUNTIME_ARTIFACTS_DIR = _resolve_repo_path(
+    os.getenv("RUNTIME_ARTIFACTS_DIR", str(_RUNTIME_ROOT / "artifacts")),
+    REPO_ROOT,
+)
+_AUDIT_LOG_PATH = _resolve_repo_path(
+    os.getenv("AUDIT_LOG_PATH", str(_RUNTIME_LOGS_DIR / "edit_audit.jsonl")),
+    REPO_ROOT,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +71,11 @@ class Settings:
     es_topk: int
 
     dev_instance_trace: bool
+    runtime_root: Path
+    runtime_run_dir: Path
+    runtime_logs_dir: Path
+    runtime_artifacts_dir: Path
+    audit_log_path: Path
 
 
 settings = Settings(
@@ -74,4 +102,9 @@ settings = Settings(
     es_bulk_upsert_max_bytes=max(16 * 1024, _env_int("ES_BULK_UPSERT_MAX_BYTES", 2 * 1024 * 1024)),
     es_topk=max(1, min(_env_int("ES_TOPK", _env_int("TOPK", 100)), 500)),
     dev_instance_trace=_env_bool("DEV_INSTANCE_TRACE", True),
+    runtime_root=_RUNTIME_ROOT,
+    runtime_run_dir=_RUNTIME_RUN_DIR,
+    runtime_logs_dir=_RUNTIME_LOGS_DIR,
+    runtime_artifacts_dir=_RUNTIME_ARTIFACTS_DIR,
+    audit_log_path=_AUDIT_LOG_PATH,
 )

@@ -13,6 +13,8 @@ def node_detail(vid: int):
 
 @router.get("/node_detail", response_model=NodeDetailResp)
 def node_detail_alias(vid: int):
+    # COMPAT(2026-03): retain the legacy `/api/node_detail` alias while clients
+    # migrate to `/api/node/{vid}`, remove after no callers depend on it.
     return detail_service.node_detail(vid)
 
 

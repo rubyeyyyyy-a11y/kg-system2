@@ -5,24 +5,40 @@ from typing import Any
 
 from app.clients.es_client import ElasticsearchClient
 from app.core.space_context import get_current_space
-from app.services.imports import es_postprocess_service, file_store, metadata_postprocess_service
+from app.services.imports import es_postprocess_service, metadata_postprocess_service
 from app.services.imports.models import ImportCompletionSummary, ImportJobState, JobEvent
+from app.services.imports.state_repository import import_batches, import_job_states
 from app.services.search_v2 import indexing_service
 from app.services.spaces.models import SpaceIndexStatus
 
 
+_POSTPROCESS_FAILURE_STAGES = ("metadata_failed", "es_sync_failed", "verify_failed", "registry_write_failed")
+
+
 def _update_job_state(state: ImportJobState, **changes) -> ImportJobState:
-    for key, value in changes.items():
-        setattr(state, key, value)
-    state.updated_at = int(time.time())
-    file_store.save_job_state(state)
-    return state
+    return import_job_states.update(state.job_id, **changes)
 
 
 def _resolve_job_state(job_id: str | None) -> ImportJobState | None:
     if not job_id:
         return None
-    return file_store.load_job_state(job_id)
+    return import_job_states.load(job_id)
+
+
+def _append_job_event(job_id: str, event: JobEvent) -> None:
+    import_job_states.append_event(job_id, event)
+
+
+def _append_job_log(job_id: str, message: str) -> None:
+    import_job_states.append_log(job_id, message)
+
+
+def _failure_stage_from_message(message: str) -> str | None:
+    text = str(message or "")
+    for candidate in _POSTPROCESS_FAILURE_STAGES:
+        if text.startswith(f"{candidate}:"):
+            return candidate
+    return None
 
 
 def _resolve_sync_scope(job_state: ImportJobState | None, requested_scope: str) -> str:
@@ -106,15 +122,98 @@ def _sync_full_space(space_name: str) -> dict[str, Any]:
     }
 
 
-def reconcile_postprocess(
+def _finalize_job_postprocess(
+    job_state: ImportJobState,
     *,
-    space_name: str | None = None,
-    job_id: str | None = None,
-    actor: str = "postprocess_reconcile",
-    refresh_metadata: bool | None = None,
-    sync_scope: str = "auto",
+    resolved_space: str,
+    resolved_refresh_metadata: bool,
+    completion_summary: ImportCompletionSummary,
+    index_status_snapshot: SpaceIndexStatus | None,
+    event_type: str,
+    message: str,
+) -> ImportJobState:
+    next_status = "succeeded" if completion_summary.searchable else "failed_postprocess"
+    updated = _update_job_state(
+        job_state,
+        status=next_status,
+        metadata_refreshed=job_state.metadata_refreshed or resolved_refresh_metadata,
+        completion_summary=completion_summary,
+        index_status_snapshot=index_status_snapshot,
+        error_message=None if completion_summary.searchable else completion_summary.note,
+        failure_stage=completion_summary.failure_stage,
+        finished_at=int(time.time()),
+    )
+    if updated.batch_id:
+        import_batches.update(updated.batch_id, searchable=bool(completion_summary.searchable))
+    _append_job_event(
+        updated.job_id,
+        JobEvent(
+            event_type=event_type,
+            message=message,
+            context={
+                "space_name": resolved_space,
+                "searchable": completion_summary.searchable,
+                "failure_stage": completion_summary.failure_stage,
+            },
+        ),
+    )
+    _append_job_log(
+        updated.job_id,
+        f"postprocess_reconcile done space={resolved_space} searchable={completion_summary.searchable} failure_stage={completion_summary.failure_stage or '-'}",
+    )
+    return updated
+
+
+def _mark_postprocess_failure(
+    job_state: ImportJobState,
+    *,
+    resolved_space: str,
+    error: Exception,
+    event_type: str,
+    message: str,
+) -> ImportJobState:
+    error_message = str(error)
+    failure_stage = _failure_stage_from_message(error_message)
+    updated = _update_job_state(
+        job_state,
+        status="failed_postprocess",
+        error_message=error_message,
+        failure_stage=failure_stage,
+        finished_at=int(time.time()),
+    )
+    _append_job_event(
+        updated.job_id,
+        JobEvent(
+            event_type=event_type,
+            level="error",
+            message=message,
+            context={"space_name": resolved_space, "error": error_message, "failure_stage": failure_stage},
+        ),
+    )
+    _append_job_log(
+        updated.job_id,
+        f"postprocess_reconcile failed space={resolved_space} failure_stage={failure_stage or '-'} error={error_message}",
+    )
+    return updated
+
+
+def _run_postprocess(
+    *,
+    space_name: str | None,
+    job_state: ImportJobState | None,
+    actor: str,
+    refresh_metadata: bool | None,
+    sync_scope: str,
+    metadata_service,
+    es_service,
+    manage_job_status: bool,
+    start_event_type: str,
+    start_message: str,
+    success_event_type: str,
+    success_message: str,
+    failure_event_type: str,
+    failure_message: str,
 ) -> dict[str, Any]:
-    job_state = _resolve_job_state(job_id)
     resolved_space = str(space_name or (job_state.space_name if job_state is not None else get_current_space())).strip()
     if not resolved_space:
         raise ValueError("space_name is required")
@@ -124,11 +223,11 @@ def reconcile_postprocess(
     affected_vids = [] if job_state is None else sorted({int(vid) for vid in job_state.affected_entity_vids if int(vid) > 0})
 
     if job_state is not None:
-        file_store.append_job_event(
+        _append_job_event(
             job_state.job_id,
             JobEvent(
-                event_type="job_reconcile_started",
-                message="reconciling import postprocess",
+                event_type=start_event_type,
+                message=start_message,
                 context={
                     "space_name": resolved_space,
                     "refresh_metadata": resolved_refresh_metadata,
@@ -136,7 +235,7 @@ def reconcile_postprocess(
                 },
             ),
         )
-        file_store.append_job_log(
+        _append_job_log(
             job_state.job_id,
             f"postprocess_reconcile start space={resolved_space} refresh_metadata={resolved_refresh_metadata} sync_scope={resolved_sync_scope}",
         )
@@ -149,22 +248,35 @@ def reconcile_postprocess(
 
     try:
         if resolved_refresh_metadata:
-            metadata_summary = metadata_postprocess_service.refresh_from_db(actor=actor, space_name=resolved_space)
+            if job_state is not None and manage_job_status:
+                job_state = _update_job_state(job_state, status="post_metadata_refresh", failure_stage=None)
+            metadata_summary = metadata_service.refresh_from_db(actor=actor, space_name=resolved_space)
+            if job_state is not None:
+                job_state = _update_job_state(job_state, metadata_refreshed=True)
+
         if resolved_sync_scope == "job":
+            if job_state is not None and manage_job_status:
+                job_state = _update_job_state(job_state, status="post_es_sync", failure_stage=None)
             sync_summary = (
                 {"skipped": True, "reason": "no_affected_entity_vids", "space_name": resolved_space}
                 if not affected_vids
-                else es_postprocess_service.sync_entities(affected_vids, space_name=resolved_space)
+                else es_service.sync_entities(affected_vids, space_name=resolved_space)
             )
             if int(sync_summary.get("fail_count") or 0) > 0:
                 raise RuntimeError(f"es_sync_failed: fail_count={sync_summary['fail_count']}")
         elif resolved_sync_scope == "space":
+            if job_state is not None and manage_job_status:
+                job_state = _update_job_state(job_state, status="post_es_sync", failure_stage=None)
             sync_summary = _sync_full_space(resolved_space)
             if int(sync_summary.get("fail_count") or 0) > 0:
                 raise RuntimeError(f"es_sync_failed: fail_count={sync_summary['fail_count']}")
+        elif job_state is not None:
+            job_state = _update_job_state(job_state, es_sync_skipped=True)
 
+        if job_state is not None and manage_job_status:
+            job_state = _update_job_state(job_state, status="post_verify_index", failure_stage=None)
         verify_vids = affected_vids if resolved_sync_scope == "job" else []
-        verify_summary = es_postprocess_service.post_verify_index(
+        verify_summary = es_service.post_verify_index(
             verify_vids,
             space_name=resolved_space,
             batch_id=None if job_state is None else (job_state.batch_id or None),
@@ -189,60 +301,83 @@ def reconcile_postprocess(
         }
 
         if job_state is not None:
-            next_status = "succeeded" if completion_summary.searchable else "failed_postprocess"
-            _update_job_state(
+            _finalize_job_postprocess(
                 job_state,
-                status=next_status,
-                metadata_refreshed=job_state.metadata_refreshed or resolved_refresh_metadata,
+                resolved_space=resolved_space,
+                resolved_refresh_metadata=resolved_refresh_metadata,
                 completion_summary=completion_summary,
                 index_status_snapshot=index_status_snapshot,
-                error_message=None if completion_summary.searchable else completion_summary.note,
-                failure_stage=completion_summary.failure_stage,
-                finished_at=int(time.time()),
-            )
-            file_store.append_job_event(
-                job_state.job_id,
-                JobEvent(
-                    event_type="job_reconciled" if completion_summary.searchable else "job_reconcile_failed",
-                    message="postprocess reconcile finished",
-                    context={
-                        "space_name": resolved_space,
-                        "searchable": completion_summary.searchable,
-                        "failure_stage": completion_summary.failure_stage,
-                    },
-                ),
-            )
-            file_store.append_job_log(
-                job_state.job_id,
-                f"postprocess_reconcile done space={resolved_space} searchable={completion_summary.searchable} failure_stage={completion_summary.failure_stage or '-'}",
+                event_type=success_event_type,
+                message=success_message,
             )
         return result
     except Exception as exc:
         if job_state is not None:
-            failure_stage = None
-            message = str(exc)
-            for candidate in ("metadata_failed", "es_sync_failed", "verify_failed", "registry_write_failed"):
-                if message.startswith(f"{candidate}:"):
-                    failure_stage = candidate
-                    break
-            _update_job_state(
+            _mark_postprocess_failure(
                 job_state,
-                status="failed_postprocess",
-                error_message=message,
-                failure_stage=failure_stage,
-                finished_at=int(time.time()),
-            )
-            file_store.append_job_event(
-                job_state.job_id,
-                JobEvent(
-                    event_type="job_reconcile_failed",
-                    level="error",
-                    message="postprocess reconcile failed",
-                    context={"space_name": resolved_space, "error": message, "failure_stage": failure_stage},
-                ),
-            )
-            file_store.append_job_log(
-                job_state.job_id,
-                f"postprocess_reconcile failed space={resolved_space} failure_stage={failure_stage or '-'} error={message}",
+                resolved_space=resolved_space,
+                error=exc,
+                event_type=failure_event_type,
+                message=failure_message,
             )
         raise
+
+
+def run_job_postprocess(
+    *,
+    job_id: str,
+    actor: str,
+    refresh_metadata: bool,
+    sync_entity_es: bool,
+    metadata_service=metadata_postprocess_service,
+    es_service=es_postprocess_service,
+) -> ImportJobState:
+    job_state = import_job_states.load(job_id)
+    sync_scope = "job" if sync_entity_es and job_state.affected_entity_vids else "none"
+    try:
+        _run_postprocess(
+            space_name=job_state.space_name,
+            job_state=job_state,
+            actor=actor,
+            refresh_metadata=refresh_metadata,
+            sync_scope=sync_scope,
+            metadata_service=metadata_service,
+            es_service=es_service,
+            manage_job_status=True,
+            start_event_type="job_postprocess_started",
+            start_message="running import postprocess",
+            success_event_type="job_succeeded",
+            success_message="import job completed",
+            failure_event_type="job_postprocess_failed",
+            failure_message="import postprocess failed",
+        )
+    except Exception:
+        return import_job_states.load(job_id)
+    return import_job_states.load(job_id)
+
+
+def reconcile_postprocess(
+    *,
+    space_name: str | None = None,
+    job_id: str | None = None,
+    actor: str = "postprocess_reconcile",
+    refresh_metadata: bool | None = None,
+    sync_scope: str = "auto",
+) -> dict[str, Any]:
+    job_state = _resolve_job_state(job_id)
+    return _run_postprocess(
+        space_name=space_name,
+        job_state=job_state,
+        actor=actor,
+        refresh_metadata=refresh_metadata,
+        sync_scope=sync_scope,
+        metadata_service=metadata_postprocess_service,
+        es_service=es_postprocess_service,
+        manage_job_status=False,
+        start_event_type="job_reconcile_started",
+        start_message="reconciling import postprocess",
+        success_event_type="job_reconciled",
+        success_message="postprocess reconcile finished",
+        failure_event_type="job_reconcile_failed",
+        failure_message="postprocess reconcile failed",
+    )

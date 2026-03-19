@@ -1,6 +1,7 @@
 import hashlib
 import json
 import time
+from pathlib import Path
 
 from app.core.space_context import get_current_space
 from app.services.imports import audit_service, cleanup_planning_service
@@ -86,6 +87,27 @@ def list_cleanup_jobs() -> list[CleanupJobRecord]:
 
 def get_cleanup_job(cleanup_job_id: str) -> CleanupJobRecord:
     return _validate_cleanup_job_access(_require_cleanup_job(cleanup_job_id))
+
+
+def resolve_cleanup_artifact_download(cleanup_job_id: str, artifact_name: str) -> tuple[Path, str, str]:
+    record = get_cleanup_job(cleanup_job_id)
+    artifact = next((item for item in record.artifacts if item.filename == artifact_name), None)
+    if artifact is None:
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
+            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
+            field="artifact_name",
+        )
+    path = Path(artifact.path)
+    if not path.exists():
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
+            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
+            field="artifact_name",
+        )
+    return path, artifact.filename, "application/json"
 
 
 def create_cleanup_job(*, batch_ids: list[str], scope: str, created_by: str) -> CleanupJobRecord:

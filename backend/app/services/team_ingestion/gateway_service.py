@@ -68,6 +68,8 @@ def _searchable_from_job(job: ImportJobState | None) -> bool:
 async def _stream_upload_to_import_staging(upload: UploadFile) -> StreamedUpload:
     contract_service.validate_upload_metadata(upload)
     file_store.ensure_import_dirs()
+    # TODO(2026-03): extract this streaming write into a repository helper so the
+    # service layer no longer owns raw file persistence details.
     file_id = file_store.new_id("file")
     file_dir = file_store._file_dir(file_id)
     file_dir.mkdir(parents=True, exist_ok=True)

@@ -2,7 +2,8 @@ import logging
 import os
 import time
 import traceback
-import csv
+from dataclasses import dataclass
+from pathlib import Path
 
 from app.core.space_context import use_space
 from app.services.imports import (
@@ -13,18 +14,16 @@ from app.services.imports import (
     job_runtime,
     job_service,
     metadata_postprocess_service,
+    postprocess_reconcile_service,
     schema_service,
 )
 from app.services.imports.models import (
     CompiledImportPlan,
-    DraftSource,
     ImportBatchItemRecord,
-    ImportCompletionSummary,
     ImportJobState,
     JobEvent,
 )
-from app.services.imports.state_repository import import_job_states
-from app.services.spaces.models import SpaceIndexStatus
+from app.services.imports.state_repository import import_batches, import_job_states
 
 logger = logging.getLogger(__name__)
 
@@ -34,17 +33,21 @@ _POSTPROCESS_FAILURE_STAGES = {"metadata_failed", "es_sync_failed", "verify_fail
 
 
 def _update_state(state: ImportJobState, **changes) -> ImportJobState:
-    for key, value in changes.items():
-        setattr(state, key, value)
-    state.updated_at = int(time.time())
-    import_job_states.save(state)
-    return state
+    return import_job_states.update(state.job_id, **changes)
+
+
+def _append_job_event(job_id: str, event: JobEvent) -> None:
+    import_job_states.append_event(job_id, event)
+
+
+def _append_job_log(job_id: str, message: str) -> None:
+    import_job_states.append_log(job_id, message)
 
 
 def _update_batch_for_job(state: ImportJobState, **changes):
     if not state.batch_id:
         return None
-    return file_store.update_batch_record(state.batch_id, **changes)
+    return import_batches.update(state.batch_id, **changes)
 
 
 def _batch_entity_item(
@@ -97,7 +100,7 @@ def _append_batch_ledger_item(
     item_payload: dict[str, object],
     ledger_counts: dict[str, dict[str, int]],
 ) -> tuple[int, int]:
-    append_result = file_store.append_batch_item_if_absent(ImportBatchItemRecord.model_validate(item_payload))
+    append_result = import_batches.append_item_if_absent(ImportBatchItemRecord.model_validate(item_payload))
     ledger_counts[item_kind]["requested_count"] += 1
     if append_result.appended:
         ledger_counts[item_kind]["appended_count"] += 1
@@ -113,7 +116,7 @@ def _build_ledger_summary(
 ) -> tuple[dict[str, object], list[str]]:
     if not state.batch_id:
         return {}, []
-    consistency = file_store.get_batch_ledger_consistency(state.batch_id)
+    consistency = import_batches.get_ledger_consistency(state.batch_id)
     warnings = list(consistency.get("warnings") or [])
     summary = {
         "entity": dict(ledger_counts["entity"]),
@@ -134,17 +137,12 @@ def _persist_batch_ledger_summary(
 ):
     if not state.batch_id:
         return None
-    current_batch = file_store.load_batch_record(state.batch_id)
-    warning_messages = list(current_batch.warning_messages or [])
-    for warning in ledger_warnings:
-        if warning not in warning_messages:
-            warning_messages.append(warning)
-    return file_store.update_batch_record(
+    return import_batches.persist_ledger_summary(
         state.batch_id,
         entity_count=batch_entity_count,
         relation_count=batch_relation_count,
         ledger_summary=ledger_summary,
-        warning_messages=warning_messages,
+        ledger_warnings=ledger_warnings,
         **extra_changes,
     )
 
@@ -163,34 +161,14 @@ def _failure_stage_from_error(error_message: str, *, current_status: str) -> str
     return None
 
 
-def _load_job_input_source(job_id: str, file_id: str, source_id: str) -> DraftSource:
-    meta = file_store.read_json(file_store.job_input_dir(job_id) / file_id / "meta.json")
-    path = file_store.job_input_dir(job_id) / file_id / "source.csv"
-    with path.open("r", encoding=str(meta.get("detected_encoding") or "utf-8"), errors="replace", newline="") as handle:
-        reader = csv.DictReader(handle, delimiter=str(meta.get("detected_delimiter") or ","))
-        columns = list(reader.fieldnames or [])
-    return DraftSource(
-        source_id=source_id,
-        file_id=file_id,
-        filename=str(meta.get("original_name") or f"{file_id}.csv"),
-        columns=columns,
-        sample_rows=[],
-        header_hash="",
-        inferred_kind="unknown",
-        warnings=[],
-        alias_hints=[],
-        recommended_object_type=None,
-    )
-
-
 def _compiled_plan(state: ImportJobState) -> CompiledImportPlan:
-    plan = CompiledImportPlan.model_validate(file_store.read_compiled_plan_copy(state.job_id))
+    plan = CompiledImportPlan.model_validate(import_job_states.load_compiled_plan_payload(state.job_id))
     sources = list(plan.sources or state.sources)
     if not sources:
         file_ids = list(plan.file_ids or state.file_ids)
         known_target_source_ids = [target.source_id for target in plan.targets if target.source_id]
         sources = [
-            _load_job_input_source(
+            import_job_states.load_input_source(
                 state.job_id,
                 file_id,
                 known_target_source_ids[index] if index < len(known_target_source_ids) else f"compat_source_{index + 1}",
@@ -230,20 +208,6 @@ def _compiled_plan(state: ImportJobState) -> CompiledImportPlan:
     )
 
 
-def _iter_job_csv_rows(job_id: str, file_id: str):
-    meta = file_store.read_json(file_store.job_input_dir(job_id) / file_id / "meta.json")
-    path = file_store.job_input_dir(job_id) / file_id / "source.csv"
-    import csv
-
-    handle = path.open("r", encoding=str(meta.get("detected_encoding") or "utf-8"), errors="replace", newline="")
-    reader = csv.DictReader(handle, delimiter=str(meta.get("detected_delimiter") or ","))
-    try:
-        for row in reader:
-            yield {str(k or ""): str(v or "") for k, v in row.items()}, list(reader.fieldnames or [])
-    finally:
-        handle.close()
-
-
 def _row_matches_selector(row: dict[str, str], selector) -> bool:
     if selector is None:
         return True
@@ -266,23 +230,92 @@ def _headers_for_normalized_rows(base_headers: list[str]) -> list[str]:
     return headers
 
 
-def _write_target_summary(summary_path, summary: dict) -> None:
-    file_store.write_json(summary_path, summary)
+@dataclass
+class _TargetArtifactBundle:
+    normalized_path: Path
+    failed_path: Path
+    summary_path: Path
+    normalized_headers: list[str]
+    failed_headers: list[str]
 
 
-def _sync_fail_count(sync_summary: object) -> int:
-    if not isinstance(sync_summary, dict):
-        return 0
-    raw = sync_summary.get("fail_count", 0)
-    if isinstance(raw, bool):
-        return int(raw)
-    if isinstance(raw, (int, float)):
-        return int(raw)
-    if isinstance(raw, str):
-        text = raw.strip()
-        if text.lstrip("-").isdigit():
-            return int(text)
-    return 0
+class _ExecutionArtifactStore:
+    def __init__(self, state: ImportJobState, *, aggregate_normalized_headers: list[str], aggregate_failed_headers: list[str]):
+        self._state = state
+        self._aggregate_normalized_headers = aggregate_normalized_headers
+        self._aggregate_failed_headers = aggregate_failed_headers
+
+    def initialize_job_outputs(self) -> None:
+        normalized_path = Path(self._state.normalized_rows_path or import_job_states.normalized_rows_path(self._state.job_id))
+        failed_path = Path(self._state.failed_rows_path or import_job_states.failed_rows_path(self._state.job_id))
+        file_store.touch_job_csv(normalized_path, self._aggregate_normalized_headers)
+        file_store.touch_job_csv(failed_path, self._aggregate_failed_headers)
+
+    def prepare_target(self, *, target, source) -> _TargetArtifactBundle:
+        bundle = _TargetArtifactBundle(
+            normalized_path=self._artifact_path(target.target_id, "normalized_rows", file_store.job_target_normalized_rows_path(self._state.job_id, target.target_id)),
+            failed_path=self._artifact_path(target.target_id, "failed_rows", file_store.job_target_failed_rows_path(self._state.job_id, target.target_id)),
+            summary_path=self._artifact_path(target.target_id, "summary", file_store.job_target_summary_path(self._state.job_id, target.target_id)),
+            normalized_headers=_headers_for_normalized_rows(list(source.columns)),
+            failed_headers=_headers_for_failed_rows(list(source.columns)),
+        )
+        file_store.touch_job_csv(bundle.normalized_path, bundle.normalized_headers)
+        file_store.touch_job_csv(bundle.failed_path, bundle.failed_headers)
+        self.write_target_summary(
+            bundle,
+            {
+                "target_id": target.target_id,
+                "source_id": source.source_id,
+                "file_id": source.file_id,
+                "filename": source.filename,
+                "object_type": target.object_type,
+                "object_name": target.object_name,
+                "batch_size": _BATCH_SIZE,
+                "batches_total": 0,
+                "batches_succeeded": 0,
+                "batches_failed": 0,
+                "fallback_batches": 0,
+                "scanned_rows": 0,
+                "processed_rows": 0,
+                "success_rows": 0,
+                "failed_rows": 0,
+                "failed_rows_truncated": False,
+                "status": "running",
+            },
+        )
+        return bundle
+
+    def write_target_summary(self, bundle: _TargetArtifactBundle, payload: dict) -> None:
+        file_store.write_json(bundle.summary_path, payload)
+
+    def append_normalized_rows(self, bundle: _TargetArtifactBundle, rows: list[dict[str, str]]) -> None:
+        file_store.append_csv_rows(bundle.normalized_path, bundle.normalized_headers, rows)
+        file_store.append_csv_rows(
+            Path(self._state.normalized_rows_path or import_job_states.normalized_rows_path(self._state.job_id)),
+            self._aggregate_normalized_headers,
+            rows,
+        )
+
+    def append_failed_rows(self, bundle: _TargetArtifactBundle, rows: list[dict[str, str]]) -> None:
+        file_store.append_csv_rows(bundle.failed_path, bundle.failed_headers, rows)
+        file_store.append_csv_rows(
+            Path(self._state.failed_rows_path or import_job_states.failed_rows_path(self._state.job_id)),
+            self._aggregate_failed_headers,
+            rows,
+        )
+
+    def _artifact_path(self, target_id: str, kind: str, fallback_path: Path) -> Path:
+        artifact = next(
+            (
+                item
+                for item in self._state.artifacts
+                if str(item.target_id or "") == str(target_id or "") and str(item.kind or "") == kind
+            ),
+            None,
+        )
+        if artifact is None or not str(artifact.path or "").strip():
+            return fallback_path
+        return Path(str(artifact.path))
 
 
 def _finalize_cancelled(
@@ -321,10 +354,10 @@ def run_job(job_id: str) -> ImportJobState:
         if state.cancel_requested:
             _update_batch_for_job(state, status="cancelled")
             return _update_state(state, status="cancelled", failure_stage="cancelled", finished_at=int(time.time()))
-        _update_state(state, status="running", started_at=int(time.time()))
+        state = _update_state(state, status="running", started_at=int(time.time()))
         _update_batch_for_job(state, status="running")
-        file_store.append_job_event(job_id, JobEvent(event_type="job_started", message="job started"))
-        file_store.append_job_event(
+        _append_job_event(job_id, JobEvent(event_type="job_started", message="job started"))
+        _append_job_event(
             job_id,
             JobEvent(
                 event_type="job_importing_rows",
@@ -332,7 +365,7 @@ def run_job(job_id: str) -> ImportJobState:
                 context={"batch_size": _BATCH_SIZE},
             ),
         )
-        file_store.append_job_log(job_id, f"job started space={state.space_name} plan={plan.plan_id} batch_size={_BATCH_SIZE}")
+        _append_job_log(job_id, f"job started space={state.space_name} plan={plan.plan_id} batch_size={_BATCH_SIZE}")
         affected_entity_vids: set[int] = set()
         batch_entity_count = 0
         batch_relation_count = 0
@@ -354,21 +387,19 @@ def run_job(job_id: str) -> ImportJobState:
                     aggregate_source_columns.append(column)
         aggregate_normalized_headers = _headers_for_normalized_rows(aggregate_source_columns)
         aggregate_failed_headers = _headers_for_failed_rows(aggregate_source_columns)
-        file_store.touch_job_csv(file_store.job_normalized_rows_path(job_id), aggregate_normalized_headers)
-        file_store.touch_job_csv(file_store.job_failed_rows_path(job_id), aggregate_failed_headers)
+        artifact_store = _ExecutionArtifactStore(
+            state,
+            aggregate_normalized_headers=aggregate_normalized_headers,
+            aggregate_failed_headers=aggregate_failed_headers,
+        )
+        artifact_store.initialize_job_outputs()
         try:
             schema_service.apply_schema_plan(plan.schema_create_plan, space_name=state.space_name)
             for target in plan.targets:
                 source = sources_by_id.get(target.source_id)
                 if source is None:
                     raise RuntimeError(f"compiled target `{target.target_id}` references missing source `{target.source_id}`")
-                normalized_path = file_store.job_target_normalized_rows_path(job_id, target.target_id)
-                failed_path = file_store.job_target_failed_rows_path(job_id, target.target_id)
-                summary_path = file_store.job_target_summary_path(job_id, target.target_id)
-                normalized_headers = _headers_for_normalized_rows(list(source.columns))
-                failed_headers = _headers_for_failed_rows(list(source.columns))
-                file_store.touch_job_csv(normalized_path, normalized_headers)
-                file_store.touch_job_csv(failed_path, failed_headers)
+                artifact_bundle = artifact_store.prepare_target(target=target, source=source)
                 target_scanned = 0
                 target_processed = 0
                 target_success = 0
@@ -386,28 +417,6 @@ def run_job(job_id: str) -> ImportJobState:
                     target.source_id,
                     target.object_name,
                     _BATCH_SIZE,
-                )
-                _write_target_summary(
-                    summary_path,
-                    {
-                        "target_id": target.target_id,
-                        "source_id": source.source_id,
-                        "file_id": source.file_id,
-                        "filename": source.filename,
-                        "object_type": target.object_type,
-                        "object_name": target.object_name,
-                        "batch_size": _BATCH_SIZE,
-                        "batches_total": 0,
-                        "batches_succeeded": 0,
-                        "batches_failed": 0,
-                        "fallback_batches": 0,
-                        "scanned_rows": 0,
-                        "processed_rows": 0,
-                        "success_rows": 0,
-                        "failed_rows": 0,
-                        "failed_rows_truncated": False,
-                        "status": "running",
-                    },
                 )
 
                 def process_batch(batch_items: list[import_ngql_service.BatchRowItem]) -> None:
@@ -459,7 +468,7 @@ def run_job(job_id: str) -> ImportJobState:
                         target_fallback_batches += 1
                     if batch_result.failures:
                         target_failed_batches += 1
-                        file_store.append_job_event(
+                        _append_job_event(
                             job_id,
                             JobEvent(
                                 event_type="batch_failed",
@@ -515,12 +524,7 @@ def run_job(job_id: str) -> ImportJobState:
                                 ),
                                 ledger_counts=ledger_counts,
                             )
-                    file_store.append_csv_rows(normalized_path, normalized_headers, normalized_rows_payload)
-                    file_store.append_csv_rows(
-                        file_store.job_normalized_rows_path(job_id),
-                        aggregate_normalized_headers,
-                        normalized_rows_payload,
-                    )
+                    artifact_store.append_normalized_rows(artifact_bundle, normalized_rows_payload)
 
                     failed_rows_payload: list[dict[str, str]] = []
                     for failed_item, exc in batch_result.failures:
@@ -549,12 +553,7 @@ def run_job(job_id: str) -> ImportJobState:
                             )
                             target_failed_written += 1
                             failed_rows_truncated = True
-                    file_store.append_csv_rows(failed_path, failed_headers, failed_rows_payload)
-                    file_store.append_csv_rows(
-                        file_store.job_failed_rows_path(job_id),
-                        aggregate_failed_headers,
-                        failed_rows_payload,
-                    )
+                    artifact_store.append_failed_rows(artifact_bundle, failed_rows_payload)
 
                     batch_count = len(batch_items)
                     total_rows += batch_count
@@ -565,8 +564,8 @@ def run_job(job_id: str) -> ImportJobState:
                     target_success += len(batch_result.successes)
                     failed_rows += len(batch_result.failures)
                     target_failed += len(batch_result.failures)
-                    _write_target_summary(
-                        summary_path,
+                    artifact_store.write_target_summary(
+                        artifact_bundle,
                         {
                             "target_id": target.target_id,
                             "source_id": source.source_id,
@@ -601,7 +600,7 @@ def run_job(job_id: str) -> ImportJobState:
                     )
 
                 batch_items: list[import_ngql_service.BatchRowItem] = []
-                for row_index, (row, _columns) in enumerate(_iter_job_csv_rows(job_id, source.file_id), start=1):
+                for row_index, (row, _columns) in enumerate(import_job_states.iter_input_rows(job_id, source.file_id), start=1):
                     if not _row_matches_selector(row, target.row_selector):
                         continue
                     batch_items.append(import_ngql_service.BatchRowItem(row_index=row_index, row=row))
@@ -610,8 +609,8 @@ def run_job(job_id: str) -> ImportJobState:
                         batch_items = []
                 if batch_items:
                     process_batch(batch_items)
-                _write_target_summary(
-                    summary_path,
+                artifact_store.write_target_summary(
+                    artifact_bundle,
                     {
                         "target_id": target.target_id,
                         "source_id": source.source_id,
@@ -645,7 +644,7 @@ def run_job(job_id: str) -> ImportJobState:
             )
             ledger_summary, ledger_warnings = _build_ledger_summary(state=state, ledger_counts=ledger_counts)
             if ledger_warnings:
-                file_store.append_job_event(
+                _append_job_event(
                     job_id,
                     JobEvent(
                         event_type="batch_ledger_consistency_warning",
@@ -654,7 +653,7 @@ def run_job(job_id: str) -> ImportJobState:
                         context={"warnings": ledger_warnings, "batch_id": state.batch_id},
                     ),
                 )
-                file_store.append_job_log(job_id, f"batch ledger consistency warning batch_id={state.batch_id} warnings={ledger_warnings}")
+                _append_job_log(job_id, f"batch ledger consistency warning batch_id={state.batch_id} warnings={ledger_warnings}")
             _persist_batch_ledger_summary(
                 state,
                 batch_entity_count=batch_entity_count,
@@ -663,7 +662,7 @@ def run_job(job_id: str) -> ImportJobState:
                 ledger_warnings=ledger_warnings,
             )
             if failed_rows > 0:
-                file_store.append_job_event(
+                _append_job_event(
                     job_id,
                     JobEvent(event_type="job_failed_rows_generated", level="warn", message="job completed with failed rows"),
                 )
@@ -682,66 +681,25 @@ def run_job(job_id: str) -> ImportJobState:
                     finished_at=int(time.time()),
                 )
 
-            if plan.postprocess_options.refresh_metadata:
-                state = _update_state(state, status="post_metadata_refresh", failure_stage=None)
-                file_store.append_job_event(job_id, JobEvent(event_type="job_refreshing_metadata", message="refreshing metadata"))
-                file_store.append_job_log(job_id, f"post_metadata_refresh space={state.space_name}")
-                try:
-                    metadata_postprocess_service.refresh_from_db(actor=state.created_by, space_name=state.space_name)
-                except Exception as exc:
-                    raise RuntimeError(f"metadata_failed: {exc}") from exc
-                state = _update_state(state, metadata_refreshed=True)
-
-            if plan.postprocess_options.sync_entity_es and affected_entity_vids:
-                state = _update_state(state, status="post_es_sync", failure_stage=None)
-                file_store.append_job_event(job_id, JobEvent(event_type="job_syncing_search_index", message="syncing search index"))
-                file_store.append_job_log(
-                    job_id,
-                    f"post_es_sync space={state.space_name} affected_entity_vids={len(affected_entity_vids)}",
-                )
-                try:
-                    sync_summary = es_postprocess_service.sync_entities(sorted(affected_entity_vids), space_name=state.space_name)
-                except Exception as exc:
-                    raise RuntimeError(f"es_sync_failed: {exc}") from exc
-                if _sync_fail_count(sync_summary) > 0:
-                    raise RuntimeError(f"es_sync_failed: fail_count={sync_summary['fail_count']}")
-            else:
-                state = _update_state(state, es_sync_skipped=True)
-
-            state = _update_state(state, status="post_verify_index", failure_stage=None)
-            file_store.append_job_event(job_id, JobEvent(event_type="job_verifying_search_index", message="verifying search index"))
-            file_store.append_job_log(job_id, f"post_verify_index space={state.space_name}")
-            try:
-                verify_summary = es_postprocess_service.post_verify_index(
-                    sorted(affected_entity_vids),
-                    space_name=state.space_name,
-                    batch_id=state.batch_id or None,
-                )
-            except Exception as exc:
-                raise RuntimeError(str(exc)) from exc
-            completion_summary = ImportCompletionSummary.model_validate(verify_summary["completion_summary"])
-            index_status_snapshot = verify_summary.get("index_status_snapshot")
-            state = _update_state(
-                state,
-                completion_summary=completion_summary,
-                index_status_snapshot=None
-                if index_status_snapshot is None
-                else SpaceIndexStatus.model_validate(index_status_snapshot),
+            state = postprocess_reconcile_service.run_job_postprocess(
+                job_id=job_id,
+                actor=state.created_by,
+                refresh_metadata=plan.postprocess_options.refresh_metadata,
+                sync_entity_es=plan.postprocess_options.sync_entity_es,
+                metadata_service=metadata_postprocess_service,
+                es_service=es_postprocess_service,
             )
-            if not completion_summary.searchable:
-                failure_stage = completion_summary.failure_stage or "verify_failed"
-                raise RuntimeError(f"{failure_stage}: {completion_summary.note or 'post_verify_index failed'}")
-
-            state = _update_state(state, status="succeeded", finished_at=int(time.time()), failure_stage=None)
             _persist_batch_ledger_summary(
                 state,
                 batch_entity_count=batch_entity_count,
                 batch_relation_count=batch_relation_count,
                 ledger_summary=ledger_summary,
                 ledger_warnings=ledger_warnings,
-                status="succeeded",
+                status=state.status,
                 searchable=bool(state.completion_summary.searchable) if state.completion_summary else None,
             )
+            if state.status != "succeeded":
+                return state
             audit_service.write_import_audit(
                 "job_finish",
                 {
@@ -753,8 +711,6 @@ def run_job(job_id: str) -> ImportJobState:
                     "searchable": bool(state.completion_summary.searchable) if state.completion_summary else False,
                 },
             )
-            file_store.append_job_event(job_id, JobEvent(event_type="job_succeeded", message="job succeeded"))
-            file_store.append_job_log(job_id, f"job succeeded space={state.space_name}")
             return state
         except KeyboardInterrupt:
             state = import_job_states.load(job_id)
@@ -782,7 +738,7 @@ def run_job(job_id: str) -> ImportJobState:
                 if state.status in {"post_metadata_refresh", "post_es_sync", "post_verify_index"}
                 else "failed_import"
             )
-            file_store.append_job_event(
+            _append_job_event(
                 job_id,
                 JobEvent(
                     event_type="job_failed" if failure_stage is None else f"job_failed_{failure_stage}",
@@ -791,7 +747,7 @@ def run_job(job_id: str) -> ImportJobState:
                     context={"error": str(exc), "failure_stage": failure_stage},
                 ),
             )
-            file_store.append_job_log(job_id, "".join(traceback.format_exception(exc)).rstrip())
+            _append_job_log(job_id, "".join(traceback.format_exception(exc)).rstrip())
             logger.exception(
                 "import_job_step job_id=%s space=%s step=failed status=%s failure_stage=%s error=%s",
                 job_id,

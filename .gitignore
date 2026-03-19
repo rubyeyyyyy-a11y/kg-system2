@@ -20,10 +20,22 @@ backend/.venv*/
 # Logs
 *.log
 *.out
+.run/
 logs/
 backend/*.log
 backend/*.log.*
 frontend/*.log
+frontend/playwright-report/
+frontend/test-results/
+.pw-libs/
+
+# Managed runtime workspace
+runtime/.run/*
+!runtime/.run/.gitkeep
+runtime/logs/*
+!runtime/logs/.gitkeep
+runtime/artifacts/*
+!runtime/artifacts/.gitkeep
 
 # Env
 .env

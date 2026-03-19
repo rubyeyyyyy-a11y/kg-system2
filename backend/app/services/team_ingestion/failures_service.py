@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import json
 import os
 from pathlib import Path
@@ -9,7 +8,7 @@ from fastapi import HTTPException
 
 from app.schemas.team_ingestion import TeamIngestionFailureItem, TeamIngestionFailuresResp
 from app.schemas.team_ingestion import TeamIngestionSubmissionRecord
-from app.services.imports import job_service
+from app.services.imports import file_store, job_service
 
 
 TEAM_INGESTION_MAX_FAILURE_PAYLOAD_BYTES = int(
@@ -74,29 +73,27 @@ def build_failures_response(submission: TeamIngestionSubmissionRecord) -> TeamIn
         )
 
     items: list[TeamIngestionFailureItem] = []
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            payload = {
-                str(key): str(value or "")
-                for key, value in row.items()
-                if str(key or "") not in FAILED_ROW_INTERNAL_COLUMNS and str(value or "") != ""
-            }
-            row_payload, payload_truncated = _truncate_row_payload(payload)
-            raw_error = str(row.get("__error") or "")
-            marker_truncated = "failed_rows truncated after" in raw_error
-            row_number = str(row.get("__row_number") or "").strip()
-            items.append(
-                TeamIngestionFailureItem(
-                    row_number=int(row_number) if row_number.lstrip("-").isdigit() else None,
-                    raw_error=raw_error,
-                    row_payload=row_payload,
-                    target_id=str(row.get("__target_id") or "").strip() or None,
-                    target_object=str(row.get("__target_object") or "").strip() or None,
-                    source_id=str(row.get("__source_id") or "").strip() or None,
-                    truncated=payload_truncated or marker_truncated,
-                )
+    for row in file_store.read_csv_rows_from_path(path, encoding="utf-8", delimiter=","):
+        payload = {
+            str(key): str(value or "")
+            for key, value in row.items()
+            if str(key or "") not in FAILED_ROW_INTERNAL_COLUMNS and str(value or "") != ""
+        }
+        row_payload, payload_truncated = _truncate_row_payload(payload)
+        raw_error = str(row.get("__error") or "")
+        marker_truncated = "failed_rows truncated after" in raw_error
+        row_number = str(row.get("__row_number") or "").strip()
+        items.append(
+            TeamIngestionFailureItem(
+                row_number=int(row_number) if row_number.lstrip("-").isdigit() else None,
+                raw_error=raw_error,
+                row_payload=row_payload,
+                target_id=str(row.get("__target_id") or "").strip() or None,
+                target_object=str(row.get("__target_object") or "").strip() or None,
+                source_id=str(row.get("__source_id") or "").strip() or None,
+                truncated=payload_truncated or marker_truncated,
             )
+        )
 
     return TeamIngestionFailuresResp(
         submission_id=submission.submission_id,

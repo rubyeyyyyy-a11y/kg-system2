@@ -4,7 +4,7 @@
 > 阶段中间文档仍保留，但若与本文冲突，以本文为准。
 >
 > 多空间 import + discovery/search availability 的最终收口，请同时参考：
-> [docs/MULTI_SPACE_DELIVERY_20260312.md](/home/ray/kg-system/docs/MULTI_SPACE_DELIVERY_20260312.md)
+> [docs/archive/MULTI_SPACE_DELIVERY_20260312.md](/home/ray/kg-system/docs/archive/MULTI_SPACE_DELIVERY_20260312.md)
 
 ## 1. 当前结论
 
@@ -19,7 +19,7 @@
 - `relation_types` 已从大列表固定返回改为 `q + limit + offset` 模式，前端改为 searchable / incremental 交互。
 - 前端大 chunk warning 已收敛，`npm run build` 不再报 `>500kB` 警告。
 - Playwright/E2E 已正式入库在 `frontend/e2e/`，并已覆盖 discovery candidate search -> formal drill-down -> edit 主链；运行时仍要求宿主机具备 Chromium 依赖。
-- 前端全量 lint 仍未全部通过，但已完成 touched-files 与历史遗留问题拆分，历史基线见 `docs/STAGEA_FRONTEND_LINT_BASELINE.md`。
+- 前端全量 lint 仍未全部通过，但相关阶段性历史基线文档已在后续文档治理中删除。
 
 ## 2. 架构变更说明
 
@@ -197,7 +197,7 @@ bash scripts/stop_stack.sh
 现状：
 
 - 全量 `eslint .` 仍受历史遗留问题影响。
-- 历史基线已记录在 `docs/STAGEA_FRONTEND_LINT_BASELINE.md`。
+- 历史基线文档已在后续文档治理中删除；本节仅保留结论说明。
 
 影响：
 
@@ -400,9 +400,7 @@ npx eslint .
 
 ## 8. 相关文档索引
 
-- 阶段中期交接：`docs/PHASE5_VALIDATION_HANDOVER.md`
-- lint 历史基线：`docs/STAGEA_FRONTEND_LINT_BASELINE.md`
-- E2E 降级与恢复：`docs/STAGE_E_E2E_FALLBACK.md`
+- 阶段性验证 / lint 基线 / E2E 降级文档已在后续文档治理中按规则删除。
 
 ## 9. 诚实结论
 

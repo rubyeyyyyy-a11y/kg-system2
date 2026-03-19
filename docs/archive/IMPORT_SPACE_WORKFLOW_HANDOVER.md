@@ -175,7 +175,7 @@ Create New Space 使用页内 inline panel，不跳走独立页面。
 - 不等于 fully supported multi-space discovery
 - UI 和文档都必须显式提示，避免用户把“导入成功”误解成“所有 downstream 能力都完整支持”
 - 但 discovery 的候选搜索链路已经要求严格 space-aware；历史 space 若仍使用旧 ES 文档，必须先做受控 backfill，而不是在查询链路加 fallback
-- 受控 backfill 与验收分层说明见 `docs/MULTI_SPACE_ES_ALIGNMENT.md`
+- 受控 backfill 与验收分层说明见 `docs/archive/MULTI_SPACE_ES_ALIGNMENT.md`
 
 更明确地说：
 

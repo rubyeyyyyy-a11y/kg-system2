@@ -1,6 +1,6 @@
 # Import Batch Management + Cleanup Job V1.5
 
-> V2 Phase A/B incremental governance updates are documented in `docs/IMPORT_BATCH_CLEANUP_V2_PHASE_AB.md`.
+> V2 Phase A/B incremental governance updates are documented in `docs/archive/IMPORT_BATCH_CLEANUP_V2_PHASE_AB.md`.
 
 ## Summary
 

@@ -2,11 +2,16 @@ import time
 
 from app.object_meta import import_rules
 from app.core.space_context import get_current_space
+from fastapi import UploadFile
 from app.services.imports import file_store, source_service, validation_service
 from app.services.imports.errors import raise_import_http_error
 from app.services.imports.models import DraftSource, ImportDraft, ImportTargetConfig
 
 _DRAFT_SOURCE_SAMPLE_ROWS = 20
+
+
+async def save_upload(file: UploadFile):
+    return await file_store.save_upload(file)
 
 
 def _build_sources(payload: dict, existing: ImportDraft | None) -> list[DraftSource]:

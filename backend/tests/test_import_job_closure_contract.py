@@ -119,7 +119,7 @@ class ImportJobClosureContractTest(unittest.TestCase):
         return response.json()
 
     def test_import_job_searchable_closure_contract(self):
-        def post_verify_side_effect(vids, *, space_name=None):
+        def post_verify_side_effect(vids, *, space_name=None, batch_id=None):
             doc_count = 1 if str(space_name or "") == "demo_kg" else 2
             return {
                 "completion_summary": {

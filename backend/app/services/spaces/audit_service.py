@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from typing import Any
 
+from app.config import settings
 
-AUDIT_PATH = Path(__file__).resolve().parents[4] / ".run" / "space-registry" / "audit.jsonl"
+AUDIT_PATH = settings.runtime_run_dir / "space-registry" / "audit.jsonl"
 
 
 def write_audit(event_type: str, payload: dict[str, Any]) -> None:
@@ -18,4 +18,3 @@ def write_audit(event_type: str, payload: dict[str, Any]) -> None:
     }
     with AUDIT_PATH.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-

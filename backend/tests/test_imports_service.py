@@ -932,6 +932,7 @@ class ImportServiceTest(unittest.TestCase):
         file_store.save_job_state(state)
         seen_statuses: list[str] = []
         original_update_state = executor_service._update_state
+        original_postprocess_update = postprocess_reconcile_service._update_job_state
 
         def tracking_update(state, **changes):
             next_state = original_update_state(state, **changes)
@@ -939,8 +940,18 @@ class ImportServiceTest(unittest.TestCase):
                 seen_statuses.append(changes["status"])
             return next_state
 
+        def tracking_postprocess_update(state, **changes):
+            next_state = original_postprocess_update(state, **changes)
+            if "status" in changes:
+                seen_statuses.append(changes["status"])
+            return next_state
+
         with (
             mock.patch("app.services.imports.executor_service._update_state", side_effect=tracking_update),
+            mock.patch(
+                "app.services.imports.postprocess_reconcile_service._update_job_state",
+                side_effect=tracking_postprocess_update,
+            ),
             mock.patch("app.services.imports.executor_service.schema_service.apply_schema_plan"),
             mock.patch(
                 "app.services.imports.executor_service.import_ngql_service.import_batch",

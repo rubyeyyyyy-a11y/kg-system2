@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import FileResponse
 
@@ -30,14 +28,12 @@ from app.services.imports import (
     cleanup_service,
     draft_service,
     executor_service,
-    file_store,
     job_service,
     postprocess_reconcile_service,
     preview_service,
     schema_service,
     source_service,
 )
-from app.services.imports.errors import raise_import_http_error
 from app.services.imports.models import ImportTargetConfig, SchemaOptions
 from app.services.spaces import validation_service
 
@@ -53,7 +49,7 @@ def _require_ready_import_space() -> str:
 @router.post("/files", response_model=ImportFileUploadResp)
 async def upload_file(file: UploadFile = File(...)):
     _require_ready_import_space()
-    record = await file_store.save_upload(file)
+    record = await draft_service.save_upload(file)
     return record.model_dump()
 
 
@@ -78,7 +74,7 @@ def import_schema_plan(req: ImportSchemaPlanRequest):
     sources = (
         [item.model_dump() for item in req.sources]
         if req.sources
-        else [item.model_dump() for item in source_service.build_sources(req.file_ids, sample_rows=file_store.MAX_SAMPLE_ROWS)]
+        else [item.model_dump() for item in source_service.build_sources(req.file_ids, sample_rows=source_service.MAX_SOURCE_SAMPLE_ROWS)]
     )
     source_models = {item["source_id"]: item for item in sources}
     mapping_payload = []
@@ -91,7 +87,10 @@ def import_schema_plan(req: ImportSchemaPlanRequest):
     schema_plan, warnings, integration_warnings = schema_service.build_schema_plan(
         schema=schema,
         mapping=[ImportTargetConfig.model_validate(item) for item in mapping_payload],
-        sources_by_id={key: source_service.build_source_snapshot(value["file_id"], sample_rows=file_store.MAX_SAMPLE_ROWS) for key, value in source_models.items()},
+        sources_by_id={
+            key: source_service.build_source_snapshot(value["file_id"], sample_rows=source_service.MAX_SOURCE_SAMPLE_ROWS)
+            for key, value in source_models.items()
+        },
         schema_options=SchemaOptions.model_validate(req.schema_options.model_dump()),
     )
     return {
@@ -222,67 +221,25 @@ def get_import_cleanup_job(cleanup_job_id: str):
 @router.get("/cleanup-jobs/{cleanup_job_id}/artifacts/{artifact_name}")
 def download_import_cleanup_artifact(cleanup_job_id: str, artifact_name: str):
     _require_ready_import_space()
-    record = cleanup_service.get_cleanup_job(cleanup_job_id)
-    artifact = next((item for item in record.artifacts if item.filename == artifact_name), None)
-    if artifact is None:
-        raise_import_http_error(
-            status_code=404,
-            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
-            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
-            field="artifact_name",
-        )
-    path = Path(artifact.path)
-    if not path.exists():
-        raise_import_http_error(
-            status_code=404,
-            error_code="IMPORT_CLEANUP_ARTIFACT_NOT_FOUND",
-            message=f"cleanup artifact `{artifact_name}` not found for job `{cleanup_job_id}`",
-            field="artifact_name",
-        )
-    return FileResponse(path, filename=artifact.filename, media_type="application/json")
+    path, filename, media_type = cleanup_service.resolve_cleanup_artifact_download(cleanup_job_id, artifact_name)
+    return FileResponse(path, filename=filename, media_type=media_type)
 
 
 @router.get("/jobs/{job_id}/logs", response_model=ImportJobLogsResp)
 def get_import_job_logs(job_id: str):
-    job_service.get_job(job_id)
-    return {"job_id": job_id, "lines": file_store.load_job_log_lines(job_id)}
+    return {"job_id": job_id, "lines": job_service.list_job_logs(job_id)}
 
 
 @router.get("/jobs/{job_id}/failed_rows")
 def download_failed_rows(job_id: str):
-    state = job_service.get_job(job_id)
-    path = Path(state.failed_rows_path or "")
-    if not path.exists():
-        raise_import_http_error(
-            status_code=404,
-            error_code="IMPORT_FAILED_ROWS_NOT_FOUND",
-            message="failed_rows artifact not found for this job",
-            field="job_id",
-        )
-    return FileResponse(path, filename=path.name, media_type="text/csv")
+    path, filename, media_type = job_service.resolve_failed_rows_download(job_id)
+    return FileResponse(path, filename=filename, media_type=media_type)
 
 
 @router.get("/jobs/{job_id}/artifacts/{artifact_name}")
 def download_job_artifact(job_id: str, artifact_name: str):
-    state = job_service.get_job(job_id)
-    artifact = next((item for item in state.artifacts if item.filename == artifact_name), None)
-    if artifact is None:
-        raise_import_http_error(
-            status_code=404,
-            error_code="IMPORT_ARTIFACT_NOT_FOUND",
-            message=f"artifact `{artifact_name}` not found for job `{job_id}`",
-            field="artifact_name",
-        )
-    path = Path(artifact.path)
-    if not path.exists():
-        raise_import_http_error(
-            status_code=404,
-            error_code="IMPORT_ARTIFACT_NOT_FOUND",
-            message=f"artifact `{artifact_name}` not found for job `{job_id}`",
-            field="artifact_name",
-        )
-    media_type = "application/json" if artifact.kind == "summary" else "text/csv"
-    return FileResponse(path, filename=artifact.filename, media_type=media_type)
+    path, filename, media_type = job_service.resolve_job_artifact_download(job_id, artifact_name)
+    return FileResponse(path, filename=filename, media_type=media_type)
 
 
 @router.post("/jobs/{job_id}/cancel", response_model=ImportJobResp)

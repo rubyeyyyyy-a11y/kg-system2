@@ -15,7 +15,7 @@ from app.services.spaces.template_service import INTEGRATION_SCOPE, TEMPLATE_TYP
 
 T = TypeVar("T")
 
-REGISTRY_ROOT = Path(__file__).resolve().parents[4] / ".run" / "space-registry"
+REGISTRY_ROOT = settings.runtime_run_dir / "space-registry"
 REGISTRY_PATH = REGISTRY_ROOT / "spaces.json"
 LOCK_PATH = REGISTRY_ROOT / "spaces.lock"
 

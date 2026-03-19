@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# COMPAT(2026-03): keep the historical one-command foreground dev helper for
+# local convenience, remove after the team fully standardizes on
+# `scripts/dev/*` entrypoints.
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # ---------- backend ----------

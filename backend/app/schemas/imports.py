@@ -152,6 +152,8 @@ class ImportSchemaPlanRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_mode(cls, data: Any):
+        # COMPAT(2026-03): accept legacy `mode` while clients migrate to
+        # `workspace_mode`, remove after request payloads stop sending `mode`.
         if not isinstance(data, dict):
             return data
         merged = dict(data)
@@ -200,6 +202,8 @@ class ImportDraftUpsertRequest(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_mode(cls, data: Any):
+        # COMPAT(2026-03): accept legacy `mode` while clients migrate to
+        # `workspace_mode`, remove after request payloads stop sending `mode`.
         if not isinstance(data, dict):
             return data
         merged = dict(data)

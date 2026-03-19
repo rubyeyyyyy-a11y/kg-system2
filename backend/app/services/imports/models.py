@@ -212,6 +212,8 @@ class ImportTargetConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_from_legacy(cls, data: Any):
+        # COMPAT(2026-03): preserve legacy `field_mappings` payloads until all
+        # persisted drafts and callers emit identity/property mappings natively.
         if not isinstance(data, dict):
             return data
         merged = dict(data)
@@ -285,6 +287,8 @@ class CompiledTargetPlan(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_field_map(cls, data: Any):
+        # COMPAT(2026-03): preserve legacy compiled-plan `field_mappings`
+        # snapshots, remove after old plan artifacts are migrated.
         if not isinstance(data, dict):
             return data
         merged = dict(data)
@@ -325,6 +329,8 @@ class CompiledImportPlan(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_mode(cls, data: Any):
+        # COMPAT(2026-03): keep `mode <-> workspace_mode` dual-read for frozen
+        # plans created before the naming contract settled.
         if not isinstance(data, dict):
             return data
         merged = dict(data)
@@ -383,6 +389,8 @@ class ImportDraft(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_mode(cls, data: Any):
+        # COMPAT(2026-03): keep `mode <-> workspace_mode` dual-read for stored
+        # drafts, remove after old draft snapshots are migrated.
         if not isinstance(data, dict):
             return data
         merged = dict(data)
@@ -637,6 +645,8 @@ class ImportJobState(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compat_mode(cls, data: Any):
+        # COMPAT(2026-03): keep `mode <-> workspace_mode` dual-read for stored
+        # job state snapshots created before the field naming settled.
         if not isinstance(data, dict):
             return data
         merged = dict(data)

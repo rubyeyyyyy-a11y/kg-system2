@@ -189,5 +189,5 @@ Backfill / verify output should use these meanings:
 
 Current delivery-state snapshot and operations handover:
 
-- [docs/MULTI_SPACE_DELIVERY_20260312.md](/home/ray/kg-system/docs/MULTI_SPACE_DELIVERY_20260312.md)
-- [docs/DEMO_KG_FULL_BACKFILL_RUNBOOK.md](/home/ray/kg-system/docs/DEMO_KG_FULL_BACKFILL_RUNBOOK.md)
+- [docs/archive/MULTI_SPACE_DELIVERY_20260312.md](/home/ray/kg-system/docs/archive/MULTI_SPACE_DELIVERY_20260312.md)
+- [docs/archive/DEMO_KG_FULL_BACKFILL_RUNBOOK.md](/home/ray/kg-system/docs/archive/DEMO_KG_FULL_BACKFILL_RUNBOOK.md)

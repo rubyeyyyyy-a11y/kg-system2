@@ -7,6 +7,7 @@ from app.core import config
 from app.db.nebula import EDGE_TAG, execute_ngql
 from app.platform.graph.traversal_service import (
     _fetch_entity_nodes as _platform_fetch_entity_nodes,
+    _find_shortest_path_candidates_bfs as _platform_find_shortest_path_candidates_bfs,
     _go_edges_from as _platform_go_edges_from,
 )
 from app.platform.metadata import relation_catalog_service
@@ -81,6 +82,29 @@ def _go_edges_from(
         edge_type=config.EDGE_TYPE,
         value_wrapper=vw,
         uniq_edges_fn=uniq_edges,
+    )
+
+
+def _find_shortest_path_candidates_bfs(
+    src: int,
+    dst: int,
+    max_hop: int,
+    rel_filter: Set[str],
+    query_scan_limit: int,
+    per_root_neighbor_cap: int,
+    ignore_direction: bool,
+    candidate_limit: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    return _platform_find_shortest_path_candidates_bfs(
+        src=src,
+        dst=dst,
+        max_hop=max_hop,
+        rel_filter=rel_filter,
+        query_scan_limit=query_scan_limit,
+        per_root_neighbor_cap=per_root_neighbor_cap,
+        ignore_direction=ignore_direction,
+        candidate_limit=candidate_limit,
+        go_edges_from_fn=_go_edges_from,
     )
 
 

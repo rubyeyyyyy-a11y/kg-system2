@@ -9,9 +9,9 @@ import {
 } from "../api/kg";
 import { WorkspaceShell, type UiNotice } from "./WorkspaceShell";
 import { WorkspaceTabs, type WorkspaceMode } from "./WorkspaceTabs";
-import { DiscoveryWorkspaceSidebar, DiscoveryWorkspaceTopBar } from "../features/discovery/DiscoveryWorkspace";
+import { DiscoveryWorkspaceSidebar, DiscoveryWorkspaceTopBar } from "../features/discovery/container/DiscoveryWorkspace";
 import { useDiscoverySessionController } from "../features/discovery/hooks/useDiscoverySessionController";
-import { ImportWorkspace } from "../features/import/ImportWorkspace";
+import { ImportWorkspace } from "../features/import/container/ImportWorkspace";
 import { useSpaceSessionController } from "../features/space/hooks/useSpaceSessionController";
 import { useDiscoveryEntityDetail } from "../hooks/useDiscoveryEntityDetail";
 import { useDiscoveryGraphState } from "../hooks/useDiscoveryGraphState";

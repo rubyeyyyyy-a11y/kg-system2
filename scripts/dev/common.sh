@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-RUN_DIR="${RUN_DIR:-$ROOT/.run}"
-LOG_DIR="$RUN_DIR/logs"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+RUN_DIR="${RUN_DIR:-$ROOT/runtime/.run}"
+LOG_DIR="${LOG_DIR:-$ROOT/runtime/logs}"
 
 BACKEND_HOST="${BACKEND_HOST:-127.0.0.1}"
 BACKEND_PORT="${BACKEND_PORT:-8000}"

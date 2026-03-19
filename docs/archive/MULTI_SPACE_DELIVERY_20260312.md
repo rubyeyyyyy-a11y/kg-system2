@@ -147,7 +147,7 @@ This backfill must remain outside imports jobs.
 
 Formal runbook:
 
-- [docs/DEMO_KG_FULL_BACKFILL_RUNBOOK.md](/home/ray/kg-system/docs/DEMO_KG_FULL_BACKFILL_RUNBOOK.md)
+- [docs/archive/DEMO_KG_FULL_BACKFILL_RUNBOOK.md](/home/ray/kg-system/docs/archive/DEMO_KG_FULL_BACKFILL_RUNBOOK.md)
 
 ## 7. Current Acceptance Snapshot
 

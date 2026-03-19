@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import os
@@ -135,10 +134,8 @@ def preflight_saved_csv(
             "only utf-8 and utf-8-sig encoded CSV files are supported",
         )
 
-    with path.open("r", encoding=detected_encoding, newline="") as handle:
-        reader = csv.reader(handle)
-        headers = next(reader, None)
-    normalized_headers = [str(item or "").strip() for item in list(headers or [])]
+    headers = file_store.read_csv_headers_from_path(path, encoding=detected_encoding, delimiter=",")
+    normalized_headers = [str(item or "").strip() for item in headers]
     if not normalized_headers:
         raise _contract_error(422, "TEAM_INGESTION_EMPTY_FILE", "uploaded CSV must include a header row")
 

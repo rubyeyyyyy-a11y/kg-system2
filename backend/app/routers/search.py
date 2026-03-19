@@ -2,8 +2,8 @@ from typing import Optional
 
 from fastapi import APIRouter
 
-from app.schemas.search import EntityTypeItem, RawIdSuggestResp, SearchRequest, SearchResp, SuggestResp
 from app.platform.metadata import entity_catalog_service
+from app.schemas.search import EntityTypeItem, RawIdSuggestResp, SearchRequest, SearchResp, SuggestResp
 from app.services import metadata_service
 from app.services.search_v2 import service as search_v2_service
 
@@ -17,10 +17,7 @@ def search(req: SearchRequest):
 
 @router.get("/entity_types", response_model=list[EntityTypeItem])
 def entity_types():
-    return entity_catalog_service.list_entity_types(
-        list_entity_types_fn=metadata_service.list_entity_types,
-        fallback_items=entity_catalog_service.FALLBACK_ENTITY_TYPES,
-    )
+    return entity_catalog_service.list_entity_types(list_entity_types_fn=metadata_service.list_entity_types)
 
 
 @router.get("/suggest", response_model=SuggestResp)

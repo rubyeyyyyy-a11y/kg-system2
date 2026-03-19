@@ -1,7 +1,7 @@
 {
   "generated_at": "2026-03-13",
   "source_priority": [
-    "docs/MULTI_SPACE_CANONICAL_SEARCH_ACCEPTANCE_BASELINE.md",
+    "docs/archive/MULTI_SPACE_CANONICAL_SEARCH_ACCEPTANCE_BASELINE.md",
     ".run/space-registry/spaces.json",
     "live acceptance samples"
   ],

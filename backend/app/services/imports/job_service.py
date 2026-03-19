@@ -1,7 +1,8 @@
 import time
+from pathlib import Path
 
-from app.core.space_context import get_current_space
 from app.core.escape import validate_updated_by
+from app.core.space_context import get_current_space
 from app.services.imports import audit_service, draft_service, file_store, source_service
 from app.services.imports.errors import raise_import_http_error
 from app.services.imports.models import (
@@ -9,9 +10,9 @@ from app.services.imports.models import (
     DraftSource,
     ImportBatchRecord,
     ImportJobState,
-    JobArtifact,
     JobEvent,
 )
+from app.services.imports.state_repository import import_batches, import_job_states
 
 
 INTERRUPTED_IMPORT_STATUSES = {"queued", "running"}
@@ -94,41 +95,15 @@ def create_job(
         draft_snapshot["sources"] = [source.model_dump() for source in sources]
         draft_snapshot["file_ids"] = [source.file_id for source in sources]
     draft_snapshot["space_name"] = effective_space_name
-    job_id = file_store.new_id("job")
-    batch_id = file_store.new_id("batch")
-    file_store.copy_inputs_to_job(
+    job_id = import_job_states.next_job_id()
+    batch_id = import_job_states.next_batch_id()
+    import_job_states.write_execution_snapshot(
         job_id,
-        [source.file_id for source in sources] or list(draft.file_ids or frozen_draft.file_ids),
-        draft_snapshot,
-        compiled_plan.model_dump(),
+        file_ids=[source.file_id for source in sources] or list(draft.file_ids or frozen_draft.file_ids),
+        draft_payload=draft_snapshot,
+        compiled_plan=compiled_plan.model_dump(),
     )
-    artifacts: list[JobArtifact] = []
-    for target in compiled_plan.targets:
-        artifacts.extend(
-            [
-                JobArtifact(
-                    target_id=target.target_id,
-                    source_id=target.source_id,
-                    kind="normalized_rows",
-                    filename=file_store.job_target_normalized_rows_path(job_id, target.target_id).name,
-                    path=str(file_store.job_target_normalized_rows_path(job_id, target.target_id)),
-                ),
-                JobArtifact(
-                    target_id=target.target_id,
-                    source_id=target.source_id,
-                    kind="failed_rows",
-                    filename=file_store.job_target_failed_rows_path(job_id, target.target_id).name,
-                    path=str(file_store.job_target_failed_rows_path(job_id, target.target_id)),
-                ),
-                JobArtifact(
-                    target_id=target.target_id,
-                    source_id=target.source_id,
-                    kind="summary",
-                    filename=file_store.job_target_summary_path(job_id, target.target_id).name,
-                    path=str(file_store.job_target_summary_path(job_id, target.target_id)),
-                ),
-            ]
-        )
+    artifacts = import_job_states.build_job_artifacts(job_id, compiled_plan.targets)
     first_failed = next((item for item in artifacts if item.kind == "failed_rows"), None)
     first_normalized = next((item for item in artifacts if item.kind == "normalized_rows"), None)
     state = ImportJobState(
@@ -144,7 +119,7 @@ def create_job(
         file_ids=[source.file_id for source in sources] or list(draft.file_ids or frozen_draft.file_ids),
         sources=sources,
         targets=compiled_plan.targets,
-        compiled_plan_path=str(file_store.job_compiled_plan_path(job_id)),
+        compiled_plan_path=import_job_states.compiled_plan_path(job_id),
         artifacts=artifacts,
         failed_rows_path=first_failed.path if first_failed else None,
         normalized_rows_path=first_normalized.path if first_normalized else None,
@@ -153,8 +128,8 @@ def create_job(
         integration_level=compiled_plan.integration_level,
         affected_schema_objects=[plan.object_name for plan in compiled_plan.schema_create_plan],
     )
-    file_store.save_job_state(state)
-    file_store.save_batch_record(
+    import_job_states.save(state)
+    import_batches.save(
         ImportBatchRecord(
             batch_id=batch_id,
             space_id=effective_space_name,
@@ -167,8 +142,8 @@ def create_job(
             cleanup_status="not_requested" if is_test_data else "not_supported",
         )
     )
-    file_store.append_job_event(job_id, JobEvent(event_type="job_queued", message="job queued", context={"draft_id": draft_id}))
-    file_store.append_job_log(job_id, "job queued")
+    import_job_states.append_event(job_id, JobEvent(event_type="job_queued", message="job queued", context={"draft_id": draft_id}))
+    import_job_states.append_log(job_id, "job queued")
     audit_service.write_import_audit(
         "job_submit",
         {
@@ -185,7 +160,7 @@ def create_job(
 
 def get_job(job_id: str) -> ImportJobState:
     try:
-        state = file_store.load_job_state(job_id)
+        state = import_job_states.load(job_id)
     except Exception:
         raise_import_http_error(
             status_code=404,
@@ -208,7 +183,7 @@ def get_job(job_id: str) -> ImportJobState:
 def list_jobs() -> list[ImportJobState]:
     current_space = get_current_space()
     states = []
-    for state in file_store.list_job_states():
+    for state in import_job_states.list():
         state_space = str(state.space_name or "")
         if not state_space:
             state.space_name = current_space
@@ -223,24 +198,24 @@ def cancel_job(job_id: str) -> ImportJobState:
     if state.status in {"succeeded", "failed_import", "failed_postprocess", "cancelled"}:
         return state
     if state.status == "queued":
-        state.status = "cancelled"
-        state.failure_stage = "cancelled"
-        state.finished_at = int(time.time())
-        state.updated_at = state.finished_at
-        file_store.save_job_state(state)
+        finished_at = int(time.time())
+        state = import_job_states.update(
+            job_id,
+            status="cancelled",
+            failure_stage="cancelled",
+            finished_at=finished_at,
+        )
         if state.batch_id:
-            file_store.update_batch_record(state.batch_id, status="cancelled")
-        file_store.append_job_event(job_id, JobEvent(event_type="job_cancelled", level="warn", message="job cancelled before start"))
-        file_store.append_job_log(job_id, "job cancelled before start")
+            import_batches.update(state.batch_id, status="cancelled")
+        import_job_states.append_event(job_id, JobEvent(event_type="job_cancelled", level="warn", message="job cancelled before start"))
+        import_job_states.append_log(job_id, "job cancelled before start")
         return state
     if state.status in {"post_metadata_refresh", "post_es_sync"}:
-        file_store.append_job_event(job_id, JobEvent(event_type="cancel_ignored", level="warn", message="cancel ignored during postprocess"))
-        file_store.append_job_log(job_id, "cancel ignored during postprocess")
+        import_job_states.append_event(job_id, JobEvent(event_type="cancel_ignored", level="warn", message="cancel ignored during postprocess"))
+        import_job_states.append_log(job_id, "cancel ignored during postprocess")
         return state
-    state.cancel_requested = True
-    state.updated_at = int(time.time())
-    file_store.save_job_state(state)
-    file_store.append_job_event(
+    state = import_job_states.update(job_id, cancel_requested=True)
+    import_job_states.append_event(
         job_id,
         JobEvent(
             event_type="cancel_requested",
@@ -248,33 +223,77 @@ def cancel_job(job_id: str) -> ImportJobState:
             message="cancel requested; will take effect at next batch boundary",
         ),
     )
-    file_store.append_job_log(job_id, "cancel requested; will take effect at next batch boundary")
+    import_job_states.append_log(job_id, "cancel requested; will take effect at next batch boundary")
     return state
+
+
+def list_job_logs(job_id: str, *, limit: int = 200) -> list[str]:
+    get_job(job_id)
+    return file_store.load_job_log_lines(job_id, limit=limit)
+
+
+def resolve_failed_rows_download(job_id: str) -> tuple[Path, str, str]:
+    state = get_job(job_id)
+    path = Path(state.failed_rows_path or "")
+    if not path.exists():
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_FAILED_ROWS_NOT_FOUND",
+            message="failed_rows artifact not found for this job",
+            field="job_id",
+        )
+    return path, path.name, "text/csv"
+
+
+def resolve_job_artifact_download(job_id: str, artifact_name: str) -> tuple[Path, str, str]:
+    state = get_job(job_id)
+    artifact = next((item for item in state.artifacts if item.filename == artifact_name), None)
+    if artifact is None:
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_ARTIFACT_NOT_FOUND",
+            message=f"artifact `{artifact_name}` not found for job `{job_id}`",
+            field="artifact_name",
+        )
+    path = Path(artifact.path)
+    if not path.exists():
+        raise_import_http_error(
+            status_code=404,
+            error_code="IMPORT_ARTIFACT_NOT_FOUND",
+            message=f"artifact `{artifact_name}` not found for job `{job_id}`",
+            field="artifact_name",
+        )
+    media_type = "application/json" if artifact.kind == "summary" else "text/csv"
+    return path, artifact.filename, media_type
 
 
 def mark_interrupted_jobs() -> list[ImportJobState]:
     repaired: list[ImportJobState] = []
-    for state in file_store.list_job_states():
+    for state in import_job_states.list():
         if state.status in INTERRUPTED_IMPORT_STATUSES:
-            state.status = "failed_import"
-            state.error_message = "interrupted"
-            state.failure_stage = "interrupted"
-            state.interrupted = True
-            state.updated_at = int(time.time())
-            state.finished_at = state.updated_at
-            file_store.save_job_state(state)
+            finished_at = int(time.time())
+            state = import_job_states.update(
+                state.job_id,
+                status="failed_import",
+                error_message="interrupted",
+                failure_stage="interrupted",
+                interrupted=True,
+                finished_at=finished_at,
+            )
             if state.batch_id:
-                file_store.update_batch_record(state.batch_id, status="failed_import")
+                import_batches.update(state.batch_id, status="failed_import")
             repaired.append(state)
         elif state.status in INTERRUPTED_POSTPROCESS_STATUSES:
-            state.status = "failed_postprocess"
-            state.error_message = "interrupted"
-            state.failure_stage = "interrupted"
-            state.interrupted = True
-            state.updated_at = int(time.time())
-            state.finished_at = state.updated_at
-            file_store.save_job_state(state)
+            finished_at = int(time.time())
+            state = import_job_states.update(
+                state.job_id,
+                status="failed_postprocess",
+                error_message="interrupted",
+                failure_stage="interrupted",
+                interrupted=True,
+                finished_at=finished_at,
+            )
             if state.batch_id:
-                file_store.update_batch_record(state.batch_id, status="failed_postprocess")
+                import_batches.update(state.batch_id, status="failed_postprocess")
             repaired.append(state)
     return repaired
