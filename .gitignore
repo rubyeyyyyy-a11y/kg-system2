@@ -74,3 +74,4 @@ data-import/state/
 backend/*.bak*
 backend/*.diff
 backend/*.final.*
+.vercel
