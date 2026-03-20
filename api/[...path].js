@@ -11,6 +11,11 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ])
 
+const RESPONSE_HEADERS_TO_STRIP = new Set([
+  ...HOP_BY_HOP_HEADERS,
+  "content-encoding",
+])
+
 function json(res, statusCode, payload) {
   res.statusCode = statusCode
   res.setHeader("content-type", "application/json; charset=utf-8")
@@ -100,7 +105,7 @@ module.exports = async (req, res) => {
 
   res.statusCode = upstream.status
   upstream.headers.forEach((value, key) => {
-    if (HOP_BY_HOP_HEADERS.has(String(key).toLowerCase())) return
+    if (RESPONSE_HEADERS_TO_STRIP.has(String(key).toLowerCase())) return
     res.setHeader(key, value)
   })
   const body = Buffer.from(await upstream.arrayBuffer())
