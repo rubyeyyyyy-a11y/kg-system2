@@ -21,11 +21,33 @@ function normalizeBaseUrl(raw) {
   return String(raw || "").trim().replace(/\/+$/, "")
 }
 
+function normalizePath(raw) {
+  return String(raw || "")
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+}
+
+function resolveRequestPath(req) {
+  const queryPath = req?.query?.path
+  if (Array.isArray(queryPath)) {
+    return normalizePath(queryPath.join("/"))
+  }
+  if (typeof queryPath === "string" && queryPath.trim()) {
+    return normalizePath(queryPath)
+  }
+  const incoming = new URL(req.url, "http://localhost")
+  return normalizePath(incoming.pathname.replace(/^\/api\/?/, ""))
+}
+
 function buildTargetUrl(req, backendBaseUrl) {
   const incoming = new URL(req.url, "http://localhost")
-  const targetPath = incoming.pathname.replace(/^\/api\/?/, "")
+  const targetPath = resolveRequestPath(req)
   const target = new URL(`${backendBaseUrl}/api/${targetPath}`)
   target.search = incoming.search
+  if (req?.query?.path != null) {
+    target.searchParams.delete("path")
+  }
   return target
 }
 
