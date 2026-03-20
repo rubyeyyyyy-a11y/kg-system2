@@ -111,13 +111,20 @@ export function useImportDraftFlow({ ensureReady, onNotice }: UseImportDraftFlow
     return parsed.message;
   }
 
+  function describeImportSchemaFailure(error: unknown) {
+    const parsed = parseApiError(error);
+    if (parsed.status == null) {
+      return "请求 /api/import/schema 未收到 HTTP 响应，请在浏览器 Network 中重点查看该接口。";
+    }
+    return `/api/import/schema 返回错误：${parsed.message}`;
+  }
+
   useEffect(() => {
     void (async () => {
       try {
         setSchema(await fetchImportSchema());
       } catch (error) {
-        const parsed = parseApiError(error);
-        onNotice({ level: "error", message: `加载 import schema 失败：${parsed.message}` });
+        onNotice({ level: "error", message: `加载 import schema 失败：${describeImportSchemaFailure(error)}` });
       }
     })();
   }, [onNotice]);
